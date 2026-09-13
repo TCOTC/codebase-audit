@@ -1,7 +1,7 @@
 ---
 name: codebase-audit
-description: 'Audit a codebase for hidden design and correctness problems that tests and linters cannot catch. Covers duplicated single-source-of-truth literals (hardcoded paths, keys, route strings), same-semantics implementations that drifted apart, state lost during async or lifecycle transitions, enumeration sets missing new members, unescaped interpolation into HTML, sibling code blocks that diverged, and assumptions about cross-repo or cross-platform behavior. Use when hunting latent design flaws, checking for design drift, finding duplicated hardcoded paths or constants, reviewing whether logic is duplicated across packages, auditing test blind spots, or preparing a large refactor. NOT for style or lint issues, not for runtime debugging, not for security review.'
-argument-hint: '[scope: package or directory] [focus: literals | drift | state | all]'
+description: 'Audit and repair the SiYuan codebase (Go kernel, TypeScript frontend, Electron host) for hidden design, contract, and correctness problems that tests and linters cannot catch, then make the minimal safe fix. Covers duplicated single-source-of-truth literals (hardcoded paths, keys, route strings), same-semantics implementations that drifted apart, state lost during async or lifecycle transitions, enumeration sets missing new members, unescaped interpolation into HTML, contract and format-compatibility gaps, resource and lifecycle leaks, and unverified cross-repo or cross-platform assumptions. Use when hunting latent design flaws, checking for design drift, finding duplicated hardcoded paths or constants, reviewing whether logic is duplicated across packages, auditing test blind spots, repairing a defect found by an audit, deciding whether a fix should stay local or become an architectural change, or preparing a large refactor. NOT for style or lint issues, not for runtime debugging, not for security review.'
+argument-hint: '[scope: package or directory] [focus: literals | drift | state | contract | all] [mode: audit | repair | arch | verify]'
 ---
 
 # 代码库审计（隐藏问题扫描）
@@ -15,6 +15,29 @@ argument-hint: '[scope: package or directory] [focus: literals | drift | state |
 找出**测试和 linter 抓不到**的问题。这类问题的共同特征是「单侧看着都对，只有交叉或跨状态才暴露」，所以加单测无用。
 
 **不适用**：代码风格（用 lint 工具）、运行时调试、安全审计（那是另一套方法论）。
+
+## 工作模式
+
+| 模式 | 做什么 | 是否改动文件 | 流程 |
+|---|---|---|---|
+| **审计**（默认） | 找缺陷，产出报告 | 否，只读 | 下方「执行流程」1–9 步 |
+| **修复** | 改代码修掉已确认的缺陷 | 是，**需用户明确授权** | 审计结论 → [修复手册](./references/repair-playbook.md) |
+| **架构调整** | 改结构，消除缺陷的复发条件 | 是，**需用户明确授权** | 满足「该改架构」判据后按修复手册第 4 节 |
+| **验证** | 复核既有发现的处理结果 | 否 | 「执行流程」第 1 步的验证模式 |
+
+**审计结论不是修改授权**。用户只要求「看看有没有问题」时，做完审计就收口；
+进修复模式前必须由用户明确要求改代码。
+
+## 全栈层面导航
+
+判据 A–I 按**推理形态**组织（怎么推理）；[全栈层面地图](./references/stack-map.md) 按**仓库层面**组织（去哪找）。
+确定范围时先查层面地图取该层的权威源、既有校验器与取证陷阱，再回到本文判据清单取检查法。
+
+| 组 | 层面 | 主要判据 |
+|---|---|---|
+| 内核（Go） | L1 数据与索引、L2 API 与契约、L3 属性视图、L4 同步/快照/加密、L5 CLI/MCP/server | A、D1、D3、D3c、D4、G、H、I |
+| 前端（TS/Electron） | L6 编辑器内核、L7 UI 与配置、L8 Electron 宿主与打包 | C、D1e、D1g、D3c、E2、F |
+| 横切 | L9 i18n 与文档、L10 CI/测试/发布 | A、D3c、G3、G4、I |
 
 ## 核心原则
 
@@ -291,9 +314,49 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
   用例内的 `TMPDIR` 被忽略。**「覆盖是否真的覆盖到了」比「修完之后是否绿」更值得验证**——
   前者能发现条件性失效，后者只反映当时那台机器。
 
+### H. 资源与生命周期（半机械，**尚无本仓库确认实例**）
+
+> **状态：待实证。** 以下检查点由通用 Go / TS 运行时经验提出，**尚未在本仓库取得确认的缺陷实例**，
+> 因此没有对应的 P 条目。按「从已确认缺陷出发」的扩充规范，取得实例后再补模式库。
+> 命中时必须走完整挑战门——缺少本仓库先例意味着它更容易是「可以更好」而非缺陷。
+
+长驻进程（内核）与长生命周期页面（编辑器）里，资源的**创建点**与**释放点**必须成对且可达。
+
+- **H1 订阅 / 定时器 / 句柄未释放**：`setInterval`、`requestAnimationFrame`、事件监听、文件句柄、
+  `context.CancelFunc`。检查点是**销毁路径**（`destroy` / 组件移除 / 页签关闭）是否覆盖全部创建点；
+  同族实现里只有某一处漏了 `destroy`，是最强的信号形态
+- **H2 集合无上限增长**：缓存、历史栈、已关闭列表、日志缓冲只有 `push` 没有裁剪。
+  **与 D4 的分工**：D4 问「裁剪端是否与消费端同端」（已有界但裁错端），H2 问「**是否存在界**」
+- **H3 并发资源的泄漏与顺序**：goroutine 无退出信号（`goleak` 可检出）、锁持有跨越 I/O、
+  `sync.Pool` / 缓存被并发写入。取证用 `go test -race` 或新建最小的泄漏用例
+
+**取证**：前端在销毁前后采样监听器/定时器是否仍在活动；Go 侧优先构造最小复现而非通读全包。
+
+### I. 格式与兼容性（语义判断，**本仓库最高危的改动面**）
+
+> **与 G 的分工**：G 问「契约是否被测试钉住」，I 问「**已发布的数据格式是否仍然可读**」。
+> 权威依据是目标仓库 `AGENTS.md` 第 1 节的兼容性条款与 `docs/ENCRYPTED-NOTEBOOK.md` 的策略，
+> **不是实现现状**——实现现状本身就是被审计对象。
+
+- **I1 格式变更缺少版本与兼容计划**：文档、资源、属性视图、密钥信封、备份、历史或同步格式被改动，
+  却没有显式格式版本，或没有「旧格式仍可读 / 有可恢复迁移」的路径。
+  修法方向是**保留兼容读或提供可恢复迁移**，不是要求用户删除或重建数据
+- **I2 兼容性变更绕过认证或回退明文**：未知格式、损坏、认证失败必须**保留原始数据并返回错误**；
+  以「让用户能打开」为由跳过认证或降级到明文，属于比原问题更严重的缺陷
+- **I3 缺少上一版格式的回归夹具**：格式改动没有用**受支持的上一版格式**的夹具覆盖
+  读、导出、历史、备份、恢复路径。这类缺口在单机上不可见，跨设备或恢复时才暴露
+- **I4 派生数据的重建假设**：派生索引可以重建，**但前提是源密文先通过认证**。
+  把「反正能重建」当成可以丢弃源数据的理由，是此类缺陷最常见的合理化
+
+**克制条款**：`AGENTS.md` 明确「加密笔记本开发已完成，按已发布特性维护」。
+因此 I 类各条的目标是**保持可读与可恢复**，不是推动格式演进；也不得重新生成 MasterSalt 或丢弃密钥来绕过不兼容。
+
 **本仓库实证**：200 个 bug 修复提交中 **30% 同时补了测试**（详见 [实证数据](./references/evidence.md)），说明这些正是原有测试的盲区。**修复时补的测试类型，就是下一轮该主动检查的测试类型。**
 
 ## 执行流程
+
+**先定模式**（默认审计）：审计 / 修复 / 架构调整 / 验证。后三种的授权边界与完整流程见
+[修复与架构调整手册](./references/repair-playbook.md)。
 
 1. **先读既有发现登记表，并把它当作去重过滤集**。来源至少两处：`references/evidence.md` 的历轮发现表，以及目标仓库的 memory 记录（如 `/memories/repo/`）。
    登记表里已有的「已确认 / 已提 issue / 已自行推翻」条目，其位置与结论即为过滤项。
@@ -335,6 +398,15 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 7. **落回业务表现**。为每条发现写出「业务表现 / 预期表现 / 可验证不变量」三元组；预期表现的权威依据必须可引用。**触发条件不直观的，额外写出「普通操作看不到 + 什么输入才触发」的复现步骤。**
 8. **输出报告**。按下方「输出格式」，用普通文本与小标题，不要用代码块包裹发现。
 9. **写回判据库**。新判据进 [模式库](./references/patterns.md)，新误报进本文「已知误报」。
+
+**进入修复模式后接续**（1–9 步已完成，且用户已明确授权修改）：
+
+10. **先做变体分析**。同一缺陷不会是孤例，用判据 A / D 的机械手段扫同族；
+    命中者纳入同一次修复，或明确列为后续项写进报告的「未尽事项」，不允许沉默略过
+11. **评估爆炸半径再动手**。调用方、消费端字段、跨端影响、是否不可逆，四项都要写进报告；
+    建议形如「照抄另一处实现」时，先确认两处的上游消费方是否相同
+12. **按阶梯选修法，然后走验证闭环**。收口前必须确认该测试**在 CI 执行集内**（判据 G4），
+    并以 CI 的**实际结论**收口——提交信息与维护者评论都不算。完整流程见修复手册第 3、5 节
 
 ## 输出格式
 
@@ -380,6 +452,9 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 置信度必须诚实标注。低置信度条目保留但明确标注，交由人工判断，不要凑数。
 
 「业务表现 / 预期表现 / 可验证」三项为强制项。写不出业务表现且给不出预期表现权威依据的发现，不得进入报告主列表，只能作为附录观察项。
+
+**修复报告**（修复模式下）用 [修复手册第 8 节](./references/repair-playbook.md) 的模板 R1：
+字段结构与上方条目一致，另加「变体 / 爆炸半径 / 改法（阶梯第几级）/ 回滚 / 未尽事项」。
 
 **对话中的输出约定**：
 
@@ -450,10 +525,17 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 8. **提交前看 `git status` 与 `git diff --cached`**：Python 自检用 `importlib` 从文件加载模块时会写
    `__pycache__/*.pyc`，一不小心就把字节码提交进仓库（本轮实际发生过，已在 `.gitignore` 里排除，
    并让自检设 `sys.dont_write_bytecode`）。
+9. **新增 `references/` 文件必须在「参考资源」里挂接**，由 `skill_self_check.py` 双向校验
+   （被引用的文件必须存在；`references/` 下的文件必须被引用）。孤儿文件按判据 A 就是「无人消费的定义」，
+   实际后果是这一轮写的方法论下一轮没人会读到。同理，**判据字母与 P 编号都不得重复**（自检已覆盖）——
+   并行会话撞号过，重复编号会让「按编号查既有结论」这一步给出错误答案。
 
 ## 修复时的硬约束
 
 排查结论**不是**动手改动的授权。修改前必须遵守 `AGENTS.md`：
+
+> 完整的修复流程（爆炸半径、变体分析、修法阶梯、验证闭环、高危改动清单、提交与回读）见
+> [修复与架构调整手册](./references/repair-playbook.md)。本节只列不可越过的底线。
 
 - **禁止** `git commit` / `git push`，除非用户明确要求
 - 改 Go 代码后跑 `gofmt`，但不要编译内核或重启内核
@@ -484,6 +566,8 @@ git push
 
 ## 参考资源
 
+- [全栈层面地图](./references/stack-map.md) — 按仓库层面组织：关键路径、权威源、既有校验器、取证陷阱、跨层连带检查表
+- [修复与架构调整手册](./references/repair-playbook.md) — 爆炸半径、变体分析、修法阶梯、架构调整判据、验证闭环、高危改动清单
 - [模式库](./references/patterns.md) — 缺陷模式定义、跨领域实例、更新机制
 - [挑战门](./references/challenge-gate.md) — 两轮对抗审查，防两个方向的误判，并审建议的修法
 - [实证数据](./references/evidence.md) — 本仓库问题分布与修复形态的量化结论
@@ -531,3 +615,4 @@ git push
 | 2026-09-14 | **历史记录整理**（三档）：① 修正 `已知误报` 表格被空行打断的格式问题，并把已改判为真缺陷的 MIME 条目移入新子节「曾被误判为误报、实为真缺陷」；修正更新记录中已被推翻但并列表述的旧结论；② `evidence.md` 把第十二轮/第十八轮从 `###` 提升为 `##` 并移到时间序正确的位置、「如何更新本文」移到最后、合并第十七轮重复的两张 issue 表、去掉更新记录每行重复的「实证见 evidence.md」；③ 把 `D1b`–`D1n` 的完整检查法与实例收到模式库，`SKILL.md` 每条只留「判据 + 关键信号 + P 编号」（D 节 100 → 41 行） |
 | 2026-09-14 | **自审与修复**（对 skill 自身套用本判据）：① 两个扫描脚本在扫描根不存在时输出「0 个文件 / 0 条发现」并以 0 退出——正是判据 D1m / P35「假成功」，会让「没扫到」被当成「没问题」，改为报错 + 退出码 2；② `--min-files` 默认是 2，而 SKILL.md 明确警告「降到 2 会引入大量偶然命中」且脚本 docstring 也示范 2，三处不一致，默认改为 4（实测 2 → 1060 条、4 → 274 条）；③ 新增 `scripts/test_scan_scripts.py` 自检（防上述两项回归 + 目标仓库冒烟）；④ E2 由一行扩为可操作检查法并补三类实测（注册表覆盖 MIME 内置表 / CRLF 换行符 / 临时目录是否命中硬编码路径黑名单），补「不要用『我这里正常』排除」的反驳写法；⑤ 挑战门补四条实测教训：两个方向的误判（真缺陷被判成噪声更贵）、降级理由是一条技术断言时必须再验（第一轮也会错）、裁决之外要记「论据被纠正」、审建议的修法是否有害；⑥ 报告模板「挑战门」字段要求写明论据纠正 |
 | 2026-09-14 | **校准判据 F 并压缩 D3/D3c/D4**：① 实测 F 脚本的误报率——785 文件 / 244 候选 / 95 文件，归一化后只有 **43 种形态**，抽样 100+ 条判为真缺陷 **0 条**；「条数」不等于工作量，应按形态逐类判定。列出三类真正需人工判断的（裸变量 / DOM 与接口驱动的值 / 跨模块返回值）与六类可直接跳的（已在 SKILL.md 判据 F）。② 按实测扩充过滤规则（`Constants.*`、裸大写下划线常量、`escapeAriaLabel`、`updateHotkeyTip`、双字面量三元、数值字段尾随形态），候选 244 → **168（-31%）**；规则改为规则表并显式声明锚定方式（第一版把多条规则写成一个 alternation，其中一条备选的 `\s*` 能匹配空串，会让**全部**候选被判为安全）；③ 自检加 15 个应放行 + 8 个应保留的形态锁定，后者更重要；④ `D3`/`D3c`/`D4` 的细节已确认在 P14/P15/P27/P10/P23 中，压缩为「判据 + 关键信号 + P 编号」（D 节 62 行）；⑤ 新增「追加与整理规范」与 `scripts/skill_self_check.py`（表格连续性/列数、标题重复、轮次嵌套与递增、引用路径），负向验证 **6/6** 注入问题均被拦住；它在首次运行就抓到一个真缺陷——`已知误报` 表的原因列含未转义的 `this.mobile \|\| …`，该行在 Markdown 里被拆成 4 列 |
+| 2026-09-14 | **扩展为全栈「查找 + 修复」skill**：① 新增 [全栈层面地图](./references/stack-map.md)，按 10 个层面（内核 L1–L5 / 前端 L6–L8 / 横切 L9–L10）给出关键路径、权威源、高发形态→判据、**仓库自带校验器**与取证陷阱，并加「跨层连带检查表」；把「优先跑仓库自带校验器、不在 skill 里重写第二真源」写成设计约束（这正是判据 A）；② 新增 [修复与架构调整手册](./references/repair-playbook.md)：授权边界、爆炸半径四问、变体分析三扫法、修法阶梯五级、架构调整五条判据与最低要求、验证闭环六级、高危改动清单、提交与回读、报告模板 R1；③ 新增判据 **H 资源与生命周期**（标注「尚无本仓库确认实例」，故不建 P 条目）与 **I 格式与兼容性**（对准 `AGENTS.md` 加密笔记本硬约束，并与 G 明确分工）；④ 新增「工作模式」表（审计 / 修复 / 架构调整 / 验证）与「全栈层面导航」，执行流程补修复模式接续第 10–12 步；⑤ `description` 与 `argument-hint` 扩展到修复与架构触发词；⑥ 追加与整理规范补第 9 条（`references/` 文件双向挂接、判据字母与 P 编号不得重复）；⑦ 层面地图与手册的方法论来源在文末标注，并声明 `trailofbits/skills`（CC-BY-SA-4.0）**只可参考、不得复制正文进任一仓库** |
