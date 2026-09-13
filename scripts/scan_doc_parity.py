@@ -44,8 +44,18 @@ INLINE_CODE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 
 # 只保「像标识符」的内容：含路径分隔符、点号、下划线，或全大写/驼峰
 IDENT_SHAPE = re.compile(r"[/_.\-#]|[a-z][A-Z]")
-# 含 CJK 的反引号内容 = 被翻译过的自然语言或本地化示例，**不是**语言无关标识符
-CJK = re.compile(r"[\u3000-\u303f\u3040-\u30ff\u4e00-\u9fff\uff00-\uffef]")
+# CJK 片段：自然语言部分（可本地化）
+CJK_RUN = re.compile(
+    r"[\u3000-\u303f\u3040-\u30ff\u4e00-\u9fff\uff00-\uffef]+")
+# 尖括号占位符：名字可本地化，**结构**不可
+PLACEHOLDER = re.compile(r"<[^<>]*>")
+# 函数调用：只保被调名，**实参名可本地化**（实测 `filepath.Base(路径)`）
+CALL_LIKE = re.compile(r"^([A-Za-z_$][\w.$<>\[\]*/:-]*)\s*\(")
+# 全 TitleCase 段的路径 = 自然语言示例（实测 `/Parent/Child/Current` ↔ `/父标题/子标题/当前标题`），
+# 不是标识符——真实路径段几乎全小写（`/api/notebook/lsNotebooks`）。
+# **必须在归一化后判定**：否则英文形式被丢掉、中文的 `/#/#/#` 留下，规则本身变不对称。
+EXAMPLE_PATH = re.compile(
+    r"^/(?:#|[A-Z][a-z0-9]+)(?:/(?:#|[A-Z][a-z0-9]+)){1,}$")
 # JSON 示例结构（内含被本地化的示例值）
 JSONISH = re.compile(r"[{}\[\]]|\":")
 # 语言/工具无关的通用值，出现次数差异无意义
@@ -56,6 +66,26 @@ NOISE = {
     "http", "https", "localhost", "127.0.0.1", "content-type", "user-agent",
     "id", "type", "value", "name", "key", "data", "code", "msg", "error",
 }
+
+
+def normalize_identifier(value):
+    """归一化可本地化的部分，使两种语言的等价内容能对上。
+
+    三类实测假阳性都源于「同一件事在不同语言里写法不同」：
+    ① 占位符名被译：`<relative-path>` ↔ `<相对路径>`、`<ancestorID>` ↔ `<父ID>`；
+    ② 示例参数被译：`filepath.Base(path)` ↔ `filepath.Base(路径)`；
+    ③ 示例值被译：`/Parent/Child/Current` ↔ `/父标题/子标题/当前标题`。
+
+    修法：把①、②、③ 拆开——**结构**必须一致，**名字**不要求一致。
+    第一版不做归一化，仅用「含 CJK 则剔除」过滤，结果是把中文版整条丢掉、
+    英文版留着，于是 WORKSPACE / SY-FORMAT / ENCRYPTED-NOTEBOOK 三组各报多条假差异。
+    """
+    call = CALL_LIKE.match(value)
+    if call:
+        value = call.group(1)          # 丢掉实参：filepath.Base(path) -> filepath.Base
+    value = PLACEHOLDER.sub("<>", value)
+    value = CJK_RUN.sub("#", value)
+    return value
 
 
 def discover_pairs(docs_dir):
@@ -104,11 +134,13 @@ def fingerprint(text):
 
 
 def identifiers(text):
-    """反引号里的**语言无关标识符**集合。
+    """反引号里的**语言无关标识符**集合（已归一化）。
 
-    过滤掉三类：含 CJK（被翻译过的）、JSON 示例结构（内含本地化示例值）、
-    含空格的多词内容（可能是自然语言短语，降级另计）。
-    实测：不加这三条时，`API.ja.md` 会因「示例值被译成 1行目」而报出 12 条假差异。
+    返回 (strict, loose)：strict 是不含空格的值（标识符/路径/命令），
+    loose 是含空格的值（可能是命令，也可能是被翻译的短语，需人读）。
+
+    注意：loose 桶里的值已被 CJK 掩码，**两种语言天然对不上**，
+    因此它的输出恒定带“需人读”标注，不应作为「缺失」的直接依据。
     """
     strict, loose = set(), set()
     in_fence = False
@@ -117,16 +149,25 @@ def identifiers(text):
             in_fence = not in_fence
             continue
         for m in INLINE_CODE.finditer(line):
-            value = m.group(1).strip()
-            if not value or len(value) > 80:
+            raw = m.group(1).strip()
+            if not raw or len(raw) > 80:
                 continue
-            if value.lower() in NOISE:
+            if raw.lower() in NOISE:
+                continue
+            if JSONISH.search(raw):
+                # JSON 示例内含被本地化的示例值，结构可比性差
+                continue
+            value = normalize_identifier(raw)
+            if value.lower() in NOISE or len(value) < 3:
+                continue
+            if EXAMPLE_PATH.match(value):
+                # 自然语言示例路径（归一化后判定，见常量处说明）
                 continue
             if not IDENT_SHAPE.search(value):
                 continue
-            if CJK.search(value) or JSONISH.search(value):
-                # 语言无关内容不该含 CJK，也不该是含本地化示例值的 JSON
-                continue
+            # 按**归一化后**的值分桶：若用原始值判定，
+            # `<>/data/<>/`（英）与 `<>/data/<>/`（中，占位符内含空格）会落入不同桶，
+            # 两边明明相等却报成「有而本版无」。
             (loose if " " in value else strict).add(value)
     return strict, loose
 
