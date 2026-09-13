@@ -451,6 +451,61 @@ DTO 便成了「冻结的快照」。而 Go 的结构体转换要求底层类型
    注意 `apigen` 这类工具可能只覆盖同仓的**另一侧**产物——**「有生成器」不等于「覆盖本集合」**。
 6. 比完成员名后**再比载荷字段**，否则修法会产出「说谎的类型」。
 
+### P18 同一算子在多条实现路径上的量纲/格式漂移
+
+**对应判据**：D1（同构分支逐项 diff 判定条件）、B（语义漂移），是 P11/P12 在**同一枚举的多个实现路径**上的特例。
+
+**定义**：同一个语义标识（枚举值、算子名、i18n 键）在同一份代码里存在**两条以上实现路径**
+（如「列底部计算」与「行级汇总」），各自算同一个指标。当某一条路径使用了不同的**量纲**
+（0–1 比值 vs 0–100 整数）或不同的**格式化标记**（`NumberFormatPercent` vs `NumberFormatNone`）时，
+同一个算子在不同位置给出不同的数字与单位。
+
+**为何出现**：两条路径通常由不同时期、不同人实现（先做列计算，后加汇总列；或反之）。
+后加的路径**复制了算子名**，但算式与格式是独立写的。因为**算子名相同**，任何按名字做的搜索都看不出差异；
+又因为两条路径都要靠具体数据才显形，单测与人工验收都容易只覆盖其中一条。
+**「同一个 switch 里的兄弟分支」是本模式最省力的入口**——百分比族的其他成员往往用的是正确量纲。
+
+**与 P11/P12 的区别**：P11 是跨语言/跨包的两份**表**漂移；P12 是同一变换的多个**函数**漂移；
+P18 的漂移发生在**同一个函数的相邻分支之间**，或同一功能的两条调用路径之间，范围更小、更易被忽略，
+且**常常在同文件内就能找到权威侧**，无需跨仓比对。
+
+**实证案例（本仓库，第 11 轮）**：数据库「汇总」列（rollup）的 `Percent checked` / `Percent unchecked`。
+
+- 错误实现：`kernel/av/value.go:3167` / `:3179`（`(*ValueRollup).calcContents`），
+  算式 `float64(countChecked*100/len(r.Contents))`（Go 整数除法，先截断再转 float）配 `NumberFormatNone`（赋值在 `:3177` / `:3189`）。
+- 权威侧 1（同一 switch 的兄弟分支）：`kernel/av/value.go:2824`（Percent empty）、`:2834`（Percent not empty）、
+  `:2846`（Percent unique values）全部是 `float64(x)/float64(len(r.Contents))` 配 `NumberFormatPercent`。
+- 权威侧 2（同一算子的另一条路径）：`kernel/av/calc.go:1654-1679`（`calcFieldCheckbox`，列底部计算）
+  用比值 + `NumberFormatPercent`；`calcFieldRollup`（`:1845-1882`）对其余 Percent 算子亦同。
+- 格式化语义：`kernel/av/value.go:2247`（`formatNumber`）证明 `NumberFormatPercent` **本身会乘 100 并补 `%`**，
+  `NumberFormatNone` 只输出裸数字 → 错误分支是「先乘 100 再不做百分号」。
+- 业务表现：汇总列选「已完成占比」时，2/3 显示 `66`（应为 `66.67%`），1/200 显示 `0`（应为 `0.5%`）。
+- 渲染链：`kernel/sql/av.go:816` → `BuildContents` → `calcContents`；
+  前端 `app/src/protyle/render/av/attributeValue.ts:78`（`genAVRollupHTML` 的 `number` 分支）
+  与 `cell.ts:1387` 直接输出 `number.formattedContent`，**没有任何地方补 `%`**。
+- 可达性：`kernel/model/attribute_view_key_config.go:25` 的 `AttributeViewKeyRollupOperators` 含这两个算子；
+  `app/src/protyle/render/av/calc.ts:169` 在目标字段类型为 `checkbox` 时**只**提供 `Checked`/`Unchecked`/`Percent checked`/`Percent unchecked`；
+  `app/src/protyle/render/av/rollup.ts:255` 把 `dataset.colType` 设为目标字段类型 → 普通用户可点出该组合。
+
+**其他领域的同类形态**（报告时可就近取证）：
+
+1. **同一个统计量的「实时」与「离线/快照」两条计算路径**：一条用秒、一条用毫秒，界面不显示单位。
+2. **同一个货币金额在「单价计算」与「订单汇总」里分/元混用**，两处都叫 `amount`。
+3. **同一个比率在「明细行」与「报表汇总」里一个存 0–1 一个存 0–100**，且都标成「百分比」。
+
+**检查法**：
+
+1. 收集「算子/枚举名 → 全部实现点」：grep 枚举常量名（如 `CalcOperatorPercentChecked`）与
+   其**字符串字面量**（如 `"Percent checked"`）在仓内的全部出现，看看是否有两条以上赋值/计算路径。
+2. 对每条路径逐项 diff 三件事：**量纲**（是否 ×100）、**数值类型**（整数除法还是 float 除法）、
+   **格式标记**（是否 `Percent`）。三者任一不同即候选。
+3. 判定权威侧的顺序：同一 switch 内的兄弟分支 > 同一算子的其他计算路径 > 与该值消费方式匹配的格式化函数。
+4. 确认渲染层是否会二次归一化（有无补 `%`、有无再乘 100）；**没有二次归一化才成立**。
+5. 注意整数除法：`a*100/b` 在 Go/Java/C# 中先截断，`1/200` 得 `0`——这类反例无需任何单位约定即可判错，
+   优先用它作为不变量。
+6. 修复前检查**下游消费**：排序、数值筛选、嵌套汇总、导出都会读同一个字段，
+   改量纲会同时改变筛选阈值语义，必须在报告中提示，不能写成「一行对齐」。
+
 ## 如何扩充本库
 
 1. 从一次**已确认的缺陷**出发（而非猜测），确认它为何未被既有判据捕获。

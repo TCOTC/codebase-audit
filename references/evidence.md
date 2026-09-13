@@ -381,6 +381,36 @@
 - **本机坑（新增）**：PowerShell 5.1 的 `>` 重定向默认写 **UTF-16LE**，Python 以 `utf-8-sig` 读会报 `UnicodeDecodeError: byte 0xff`。
   回读 `gh api` 输出时要么用 `Out-File -Encoding utf8`，要么按 `encoding='utf-16'` 读取
 
+### 第十一轮（2026-09-13）：汇总列「已完成占比」量纲与格式漂移
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1 / B（新 P18） | 数据库汇总列（rollup）的 `Percent checked` / `Percent unchecked` 算成了裸整数：`kernel/av/value.go:3167`/`:3179` 的 `(*ValueRollup).calcContents` 用 `float64(countChecked*100/len(r.Contents))` + `NumberFormatNone`（赋值 `:3177`/`:3189`）；而同 switch 的三个兄弟分支（`:2824`/`:2834`/`:2846`）与**同一算子的另一条路径** `calcFieldCheckbox`（`kernel/av/calc.go:1654-1679`）都用比值 + `NumberFormatPercent`。`formatNumber`（`:2247`）对 Percent 会乘 100 并补 `%`，故错误分支是「先乘 100 再不打百分号」。业务表现：汇总列选「已完成占比」，2/3 显示 `66`（应 `66.67%`），**1/200 显示 `0`**（应 `0.5%`，整数除法截断）。渲染链 `kernel/sql/av.go:816` → `BuildContents` → `calcContents`，前端 `attributeValue.ts:78` / `cell.ts:1387` 直出 `formattedContent`，无二次归一化 | 高（代码可证 + 同包两处权威侧对照；挑战门两轮 CONFIRMED / 第二轮把严重度收窄至低） | 待提 issue |
+| A / F | 机械复扫：重复字面量 153 条（P1 117 / P2 16 / P3 20）、未转义插值 244 条 / 95 文件；逐条核对仍为已知噪声（`assets/`、`/stage/loading-pure.svg`、受 `app/src/types/api/index.d.ts` 约束的 `/api/` 字面量、`conf.json`、CSS 选择器、`z-index` 插值） | — | 未命中 |
+| 子代理候选（未通过本上下文取证或挑战门） | `kernel/model/export.go:1898` PDF 书签 `bms[h.ID]` 无 `ok` 判断（兄弟分支 `:1886` 有）；`kernel/model/import.go:2240` 图片 `title` 建 `NodeLinkTitle` 时未写 `Tokens`（`<a>` 分支 `:2300` 有）；`kernel/model/carddav.go:625` 多卡 vCard 拆分时 map key 用循环不变量 `path.Base(filename)`；`kernel/model/template.go:156` 对必为空的 `ret` 排序；`app/src/protyle/render/av/col.ts:723` 列名未 `escapeHtml` | 中 | 附录观察项，未核 |
+| 已核实为误报/已存在覆盖 | `SetAssetHash` 的 `assets/` 守卫（调用点均传 `assets/` 前缀）、agent SSE 事件集（内核 14 个 emit 与前端 16 个 `case` 双向覆盖）、`SiYuanAssetsImage` 缺 `.tif`（第三轮已登记为观察项）、`query_embed` 六处引用 | — | 不报告 |
+
+#### 第十一轮的方法论教训
+
+1. **「同一算子的多条实现路径」是 P11/P12 之外的新入口，比跨仓比对省力**。本轮无需跨语言、跨包，
+   仅在一个包内比对「枚举常量名 → 两条赋值路径」即可定位权威侧。把 `grep` 的目标从「函数名」改为
+   **「枚举常量名 + 该枚举的字符串字面量」**，能同时覆盖定义点与所有消费点。
+2. **整数除法是最硬的反例**。`countChecked*100/len(...)` 在 Go 中先截断，1/200 得 `0`。
+   这个反例**不依赖任何单位约定**——无论维护者主张量纲是 0–1 还是 0–100，「200 条里勾了 1 条显示 0」都错。
+   第五轮的教训（选「任何合理语义下都错的输入」）在本轮再次生效。**先找不需要解释就错的输入。**
+3. **挑战门第二轮给出了「不要承诺一行修复」的约束**。维护者立场指出：改量纲会同时改变
+   `av/sort.go` 排序、`av/filter.go` 的数值筛选阈值、嵌套汇总的 Sum/Average、`model/export.go` 导出文本。
+   因此报告的建议必须写成「对齐 + 评估下游筛选语义」，而非「改一行」。
+   **凡是会改变已落盘/已消费数值量纲的修复，都要先列下游消费点。**
+4. **「同一个 UI 菜单项落到两个不同内核函数」是最有说服力的业务表现**。
+   目标字段是复选框时，`app/src/protyle/render/av/calc.ts:169` 的菜单只给四个算子；
+   同一项用于列底部计算走 `calcFieldCheckbox`（正确），用于汇总列走 `calcContents`（错误）。
+   用户在同一数据集里能直接对比出 `66.67%` 与 `66`。**把「同一入口、两条后置路径」写成业务表现，比描述代码更有效。**
+5. **本轮的先验收益来自「未覆盖区域清单」而非更聪明的搜索**。开扫前先排除历轮 10 组，
+   再把子代理的侦察范围限定在 `export/import/template`、`flashcard/av/sql`、`card/search/history/export/protyle-render-av`
+   三个从未被系统看过的区域，命中率明显高于历史轮次的散点搜索。
+   **子代理产出仍只能当候选**：3 个候选里有 2 个经本上下文核对后不可达或已被上游保护。
+
 ## 如何更新本文
 
 每轮审计后追加：
