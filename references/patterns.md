@@ -933,3 +933,119 @@ storage 键 `local-searchkeys` 的默认值（`app/src/protyle/util/compatibilit
   因此报告必须写「守卫被削弱为只判空」，不能写「守卫等于不存在」——后者会被挑战门以「描述失准」降级。
 - 业务表现：替换一次「foo」后（`replaceKeys === ["foo"]` 且输入框仍为 `foo`），点历史图标会弹出只剩「清除历史」一项的菜单；`toggleAssetHistory` 同条件下不弹。纯 UI 冗余，无数据损害。
 - 修法：条件改为 `list.replaceKeys.length === 1 && list.replaceKeys[0] === ...`，与 `:164` 对齐。
+
+### P34 免鉴权静态出口的符号链接越界（含修法陷阱）
+
+**对应判据**：D1h、D1g、E2、F。
+
+**定义**：静态资源出口用**纯词法**路径校验（`filepath.Clean` + `IsSubPath`）后交给 `http.ServeFile`/`c.File`，
+而该出口所属前缀在鉴权 `CheckAuth` 里被**直接豁免**。于是「外观/资源目录下存在符号链接」时，
+匿名请求即可读到链接目标——通常是被伺服根目录的兄弟或上级（例如 `conf.json`、TLS 私钥）。
+
+**为何出现**：这类加固通常是**逐路由迁移**的（同族已有若干出口做了 `EvalSymlinks` 复核 + 敏感路径拒绝 + regular-file 判定，
+并配了软链回归测试），迁移时漏掉一个；而鉴权豁免清单更早写成、按前缀匹配，两者叠加才构成完整攻击链。
+**单看任一半都不足以定级**，必须交叉。
+
+**实证案例（本仓库）**：
+- `kernel/server/serve.go:742-747` 的 `/appearance/*filepath` 只做词法 `IsSubPath`，末尾 `c.File`（`:806`）→
+  `http.ServeFile` 跟随符号链接；`util.AppearancePath = <workspace>/conf/appearance`（`kernel/util/working.go:111`+`:353`），
+  与 `conf.json` 同目录，相对路径 `../conf.json` 即可命中。
+- 豁免：`kernel/model/session.go:276-281` 对 `/appearance/` 前缀 `c.Next()`，不校验锁屏密码、**连 Origin/Sec-Fetch-Site 检查也跳过**；
+  `corsMiddleware` 无条件 `Access-Control-Allow-Origin: *`，匿名跨站 `fetch` 可读响应体。
+- 目标价值：`conf/conf.json` 含 `accessAuthCode`、`cookieKey`（会话签名密钥）、`api.token`、`secrets`（`kernel/model/conf.go:60-95`）。
+- 同族权威侧：`serveStaticFile`（`serve.go:604-661`）双向 `EvalSymlinks` + 再次 `IsSubPath` + 敏感路径拒绝 + `IsRegular()`，
+  且有 `serve_static_test.go:142/170` 两个软链回归测试；`ensureBootAppearancePathHasNoSymlink`（`kernel/model/boot_appearance.go:647`）
+  逐段 `Lstat`；共四处静态出口都调用了敏感路径判定。
+- 第二条泄漏路径（同一 handler）：`langs/*.json` 分支用 `os.ReadFile` 读取后把内容当语言包解析并**回吐 JSON**，
+  不经 `c.File`；`langs/x.json -> ../../conf.json` 同样泄漏，说明加固点必须在所有分支之前统一做。
+
+**检查法**：
+1. 先列鉴权豁免清单（`HasPrefix(RequestURI, ...)` 白名单），标记其中含静态资源前缀的项。
+2. 对这些前缀下的每个出口，检查是否做了「解析真实路径 → 再次包含判定」；词法版即为候选。
+3. 构造两种输入分别验证：**中间组件是软链**（`themes/x/link -> ../..`，再请求 `link/conf.json`）与叶子是软链。
+4. 确认最终消费点（`ServeFile`/`ReadFile`/模板合并）是否跟随软链。
+5. 修法两项约束（**容易把修复做成事故**）：
+   - 不要复用「按前缀判定」的敏感目录黑名单——被伺服的资源根常位于该前缀之下，会 403 掉全部合法资源；
+   - 不要一律禁止符号链接——仓库可能**有意支持**「包目录本身是软链」（主题/图标开发目录外置），
+     正确语义是「解析后要求目标落在允许根内，并允许包目录这一层是软链」。
+6. 修复必须覆盖同 handler 的所有读文件分支，并补两条回归：包目录软链应 200、包内越界软链应 403。
+
+### P35 CLI/脚本入口的假成功（异步与无返回值）
+
+**对应判据**：D1m、P1、G。
+
+**定义**：命令行入口把动作交给**异步入队**或调用**无返回值**的函数，失败只经 WebSocket 推送上报。
+CLI 进程没有 WS 接收方，于是错误被静默吞掉，命令照样打印「结果」并以退出码 0 结束。脚本据此判断成功会得到假阳性。
+
+**为何出现**：内核的写入路径以「编辑器在线」为前提设计错误通道（`util.PushErrMsg`/`PushTxErr` → WS 广播 → 前端弹提示），
+CLI 复用同一 model 函数时没有把错误改走返回值。同族的其它子命令若已返回 error，就成了对照证据。
+
+**实证案例（本仓库）**：
+- `kernel/cli/cmd/block.go:373-403` `block delete`：`PerformTransactions` + `FlushTxQueue`（只等待不返回结果），
+  错误经 `kernel/model/transaction.go:130-160` 的 `flushTx` → `util.PushTxErr` 只做 WS 广播；命令仍 `fmt.Println(id)` 退出 0。
+  对照：同文件 `validateBlockMove`（`:448`）与 `block update` 做存在性校验；HTTP 侧 `PerformBlockOperation` 对 delete
+  明确校验「外部删除请求必须命中现存节点」（`kernel/model/block_operation.go:39-46`）。
+- `kernel/cli/cmd/repo.go:151-170` `repo checkout`：`CheckoutRepoDirect` 无返回值，失败分支只 `util.PushErrMsg`，命令无条件打印 `ok`。
+- 变体 A（dry-run 被吞）：`kernel/cli/cmd/export.go:34-52/62-79/92-105` 的 `if dryRun && output != ""`，
+  省略 `--output` 时 dry-run 失效并真的执行导出；同文件 `export docx` 无条件处理 dry-run。
+- 变体 B（空结果截断文件）：同一处 `os.WriteFile(output, []byte(content), 0644)`，而 `model.ExportMarkdownContent`
+  对不存在的块返回空串且不返回 error（`kernel/model/export.go:3109-3132`）→ 目标文件被 `O_TRUNC` 清空为 0 字节，仍退出 0。
+  同族守卫：`materializeExportArtifact`（`export.go:224-231`）对空产物返回 `export failed: empty artifact path`。
+
+**检查法**：
+1. 逐个 CLI 子命令，看它调用的 model 函数**是否有返回值**；无返回值且错误走 WS 的即为候选。
+2. 找同文件 / HTTP 侧的同语义实现作为权威侧，比较错误语义与退出码。
+3. 检查 dry-run 条件是否被绑在「某个可选参数非空」上。
+4. 检查「空结果 → 写文件」的组合（`os.WriteFile` 默认 `O_TRUNC`）。
+5. 不变量：失败时退出码非 0，且不受影响的文件内容保持原样。
+
+### P36 库默认白名单被选项整体覆盖
+
+**对应判据**：D3、A。
+
+**定义**：调用第三方库时用「设置项」传入一份自建列表，而该设置项在库实现里是**赋值**（替换默认值）而非追加，
+于是库自带的安全/性能默认项被静默移除。症状是「作者明显有意排除某类输入，却漏了另一类同类输入」。
+
+**为何出现**：库的选项命名（`WithExcludedXxx`）不体现「替换 vs 追加」，默认值又定义在库内部；
+调用方只按自己的清单写，不会去读库源码。**判据是「库内默认集合」与「调用方集合」的差集**，不是调用方集合本身。
+
+**实证案例（本仓库）**：`kernel/server/serve.go:316-322` 的 `gzipMiddleware`：
+```go
+gzip.Gzip(gzip.DefaultCompression,
+    gzip.WithExcludedExtensions([]string{".pdf", ".mp3", ..., ".gz"}),
+    gzip.WithExcludedPathsRegexs([]string{`(?i)\.hei[cf]$`}))
+```
+`gin-contrib/gzip` v1.2.3 的 `options.go:18` 定义 `DefaultExcludedExtentions = {".png",".gif",".jpeg",".jpg"}`
+（注释即「图片已压缩，不值得再压缩」），`handler.go:34` 用它初始化，而 `options.go:55-57` 的 `WithExcludedExtensions`
+直接赋值 → 四个图片扩展名被整体替换掉。同版本 `shouldCompress` 只判 `Accept-Encoding`/`Connection`/扩展名/排除正则，
+**不看 Content-Type**，因此所有图片都进入压缩分支，白付 CPU 且体积可能膨胀。
+作者已为 `.gz` 与 HEIF 做了排除，说明设计意图正是「已压缩载荷不压缩」，图片属同类漏项。
+
+**检查法**：
+1. 对每个「传入列表」的库选项，读库源码确认是赋值还是追加，并记录库内默认集合。
+2. 求「库默认 − 调用方」的差集，逐个判定是否属于同类漏项。
+3. 用 `Accept-Encoding` 实测响应头（`Content-Encoding`）验证，而不只看代码。
+4. 修法优先「在调用方列表里补回默认项」，或在库支持时改用追加形态；同时补一条覆盖默认项的断言。
+
+### P37 谓词通配符未转义（LIKE 语义被用户输入改变）
+
+**对应判据**：E3、E4、P6。
+
+**定义**：把用户关键词拼进 SQL `LIKE '%...%'` 时只转义了引号（防注入），未转义 `%` 与 `_`。
+于是用户输入会**改变过滤语义**：`%` 匹配全部、`_` 匹配任意单字符，表现为「搜索框输什么都没过滤」。
+
+**为何出现**：注入防护（转义引号）与通配符转义是两个不同的关注点，前者显式、后者隐含；
+同包通常已有 `escapeLikePattern` 之类的工具，但只在部分调用点使用，形成漂移。
+
+**实证案例（本仓库）**：`kernel/model/graph.go:695-702` 拼 `content LIKE '%part%'` 时只做
+`strings.ReplaceAll(part, "'", "''")`，并调用 `kernel/conf/search.go:135-146` 的 `NAMFilter`
+（同样直接拼 `name/alias/memo LIKE '%keyword%'`）。输入 `_` 生成 `LIKE '%%_%%'` 命中几乎所有块，图不过滤。
+权威侧：`kernel/sql/span.go:28-38` 的 `escapeLikePattern` 转义 `%`/`_`/`\`，同包其它 LIKE 查询都遵守它。
+
+**检查法**：
+1. grep 所有 `LIKE` 拼接点，按「是否调用通配符转义」分组，找少数派。
+2. 确认拼接值来自用户输入（而非内部常量）。
+3. 实测：关键词传 `%` 与 `_`，断言不匹配无关行。
+4. 修法注意跨包依赖方向——转义 helper 若在 `kernel/sql`，而拼接点在 `kernel/conf`，需避免循环依赖
+   （上提至 `kernel/util` 或就地实现等价函数）。
+

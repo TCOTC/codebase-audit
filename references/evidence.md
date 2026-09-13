@@ -678,3 +678,48 @@
 5. **挑战门第一轮的「描述失准」也要照单修**。第二轮把 `toggleHistory` 从「守卫等于不存在」纠正为「只有第三个子条件恒假」——这直接决定了修复面（改一个条件 vs 重写守卫），也决定了严重度（纯外观 vs 功能缺失）。**症状描述错会改变修法，不只是措辞问题。**
 6. **子代理纠正了本次的范围前提**：`app/src/data/**` 与 `app/src/export/**` 不存在。派发侦察前先让对方确认目录存在，比事后修补量少。
 7. **本轮机械扫描增量仍为 0**，五条发现全部来自定向语义核查（D1 及其子型），与前四轮结论一致。重复字面量条目数从 166 涨到 231 纯因扫描文件数从 1360 涨到 1373 与阈值波动，无新增可报项。
+
+## 第十六轮（B 线，2026-09-13）：内核 CLI / server 装配 / sql 与文件系统
+
+> 本轮与另一个并行会话同时进行。为避免冲突：使用独立临时目录 `%TEMP%\audit-r16b`（不触碰对方的 `audit-r16`）、
+> 建 issue 前用 search API 遍历 open+closed 去重、写回 skill 前先 `git pull --rebase`。范围刻意避开对方的
+> 前端/外观方向（对方当轮产出见 #19444 `custom-attr__avbacklinks 布局`、#19445 `boot window 冷启动`）。
+
+范围：`kernel/cli/`、`kernel/server/`、`kernel/sql/` + `kernel/search/` + `kernel/filesys/` + `kernel/conf/`。
+三路只读侦察 + 主线取证，六条发现过挑战门（其中一条经挑战门**纠正可达性并降级**）。
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1h / D1g（新 P34） | `kernel/server/serve.go:742-806` 的 `/appearance/*filepath` 只做词法 `IsSubPath` 后 `c.File`，而 `kernel/model/session.go:276-281` 对该前缀免鉴权（已设锁屏密码时连 Origin 检查也跳过）→ `conf/appearance/` 下的越界软链可被匿名读取，目标是 `conf/conf.json`（`api.token`/`cookieKey`）。同族四处静态出口都做了 realpath 复核并有软链测试；同 handler 的 `langs` 分支另有 `os.ReadFile` 泄漏路径 | 高（挑战门两轮 CONFIRMED，严重度中；集市渠道已封闭，前置需手工/git 带入软链） | 已提 issue #19456 |
+| D1d / D1 | `database clean --av <在用ID>` 删除在用数据库定义（`kernel/model/attribute_view.go:55-91` 无「未引用」判定，同族资产侧与复数版都有）→ 前端默认 `createIfNotExist` 会把数据库重建成空表；clean 历史在 `<workspace>/history` 不参与同步，多设备不可恢复 | 高（挑战门两轮 CONFIRMED，严重度高） | 已提 issue #19457 |
+| D3（新 P36） | `kernel/server/serve.go:320` 的 `gzip.WithExcludedExtensions` 是**赋值**语义，把 gin-contrib/gzip v1.2.3 默认的 `{png,gif,jpeg,jpg}` 整体替换 → 所有图片被 gzip；作者已排除 `.gz`/HEIF，属同类漏项 | 高（上游 v1.2.3 源码逐行核对，严重度低） | 已提 issue #19458 |
+| D1m 变体（新 P35） | `kernel/cli/cmd/export.go:34-105` 三个导出命令不检查空结果 → `os.WriteFile` 把 `--output` 截断为 0 字节且退出 0；dry-run 被 `&& output != ""` 吞掉；同一族还有 `block delete` 与 `repo checkout` 报假成功 | 高（严重度低） | 已提 issue #19459 |
+| E3/E4（新 P37） | `kernel/model/graph.go:695-702` + `kernel/conf/search.go:135-146` 拼 `LIKE` 未转义 `%`/`_` → 关系图搜索输入 `_` 时几乎不过滤；权威侧 `kernel/sql/span.go:28-38` 的 `escapeLikePattern` | 高（严重度低） | 已提 issue #19460 |
+| D2/G | `kernel/api/router.go:621` 的 `/api/av/changeAttrViewLayout` 漏挂 `CheckReadonly`（同段唯一），`--readonly` 模式下仍改写 av 文件与镜像块 IAL | 高（严重度低） | 已提 issue #19461 |
+| D1 | `kernel/sql/index_queue.go:104-133`/`:316-319` 的 `dbOpToIndexEntry` 与 `indexEntryToOp` 均缺 `update_block_content`（`kernel/sql/queue.go:49` 的注释与 `:393` 的 execOp 都承认该 action）→ 该操作永不写入 `queue/index.queue`，崩溃后丢失，嵌入块内容保持陈旧 | 中高 | 待提 issue |
+| D1 | `kernel/cli/cmd/outline.go:34-49` 把「文档无标题」判为失败（HTTP 侧同名端点返回空数组 + code 0），脚本无法区分「不是文档」与「没有标题」 | 高 | 待提 issue |
+| D1 | `kernel/cli/cmd/history.go:153` 的 `--op` 帮助文案枚举 `delete/update/create`，而真实集合是 `clean/update/delete/format/sync/replace/outline`（`kernel/model/history.go:1127-1133`）；且 `--op` 是唯一未做过滤就拼进 SQL 的筛选参数 | 中 | 待提 issue |
+
+### 挑战门纠正（本轮最重要的过程记录）
+
+`/api/av/changeAttrViewLayout` 一条在第一轮被写成「只读角色下仍可改数据库布局」，**挑战门按中间件顺序推翻了这一半**：
+路由链是 `CheckAuth → CheckAdminRole → handler`，而 `CheckAdminRole`（`kernel/model/session.go:456-462`）对
+`RoleReader`/`RoleVisitor` 直接 403，发布服务 JWT 的角色正是 `RoleReader`（`kernel/model/auth.go:290-310`），
+因此只读角色根本进不到 handler；真正可达的只有内核 `--readonly` 模式。
+附带发现：handler 内 `kernel/api/av.go:365-369` 针对只读角色的 `IsReadOnlyRoleContext` 分支因此是死代码。
+→ 已把「按中间件顺序核对角色可达性」写入「已知误报」，并把该条严重度从「中」降为「低」。
+
+### 方法论教训
+
+1. **并行会话下的隔离三原则**：独立临时目录、建 issue 前用 search API 去重（覆盖 open+closed；`gh search issues --state all` 不被支持，
+   改用 `gh api search/issues`）、写回 skill 前 `git pull --rebase`。另外主动确认对方的产出（本轮 #19444/#19445）并避开其方向。
+2. **鉴权类发现的定级必须交叉两个事实**：路径校验强度 **×** 鉴权豁免范围。任一单独都不足以定级；
+   本轮把「词法校验」与「`/appearance/` 免鉴权」两条线交叉后才有完整攻击链。
+3. **修法陷阱要写进报告**：本轮外观软链的修复若照抄同族的「敏感目录前缀黑名单」，会让所有外观资源 403
+   （因为外观根就在 `conf/` 下）；若一律禁止符号链接，会破坏仓库**有意支持**的软链主题目录（#8263）。报告里写明这两条，
+   比只给「加 EvalSymlinks」有用得多。
+4. **第三方库选项要先读库源码**：`WithExcludedXxx` 是赋值还是追加、默认集合是什么，只能从库源码确认；
+   判据是「库默认 − 调用方」的差集。
+5. **「无返回值 + WS-only 错误通道」是 CLI 的普遍盲区**：本轮一条发现串起了 `block delete`、`repo checkout`、
+   `export *` 三类命令，说明按「CLI 子命令 → model 函数签名」的机械扫描（grep 是否有返回值）是高效入口。
+
