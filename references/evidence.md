@@ -544,6 +544,42 @@
 `gh run list --json conclusion` → `gh run view <id> --json jobs` 看真实结论**，
 维护者评论里的「本地全量测试通过」同理不能等同 CI 通过。
 
+#### 矛盾前提的 2×2 取证（三次 CI 运行即为完整证明）
+
+`kernel/util/path.go:470` 的 `isSensitivePath` 对**工作空间外**路径做硬编码 UNIX 前缀匹配
+（`/.` `/etc` `/root` `/var` `/proc` `/sys` `/run` `/bin` `/boot` `/dev` `/lib` `/srv` `/tmp` `/usr` `/opt` `/sbin`，
+`path.go:487-509`）。两组测试把这一事实当作**相反的前提**：
+
+- **A 组必须命中前缀**：`kernel/util/path_test.go:173` `TestIsSensitivePathSymlinkWorkspace` 末句
+  `path_test.go:220-225` 断言 `isSensitivePath(realWorkspace+"-outside/public.txt")` 为 `true`。
+  该路径与工作空间是**字符串前缀相同但路径边界不同**的兄弟目录，`IsSubPath` 判定为工作空间外，
+  所以它只能靠系统前缀黑名单命中；而黑名单是 `HasPrefix(path, "/var")` 这种**锚定路径开头**的匹配，
+  夹具路径里那层 `.var/app/org.b3log.siyuan/SiYuan` 帮不上忙 → 必须 `TMPDIR` 以 `/tmp` 或 `/var` 开头。
+- **B 组必须不命中前缀**：`kernel/model/import_obsidian.go:576` 的 `validateObsidianVaultRoot` 对 vault 根调
+  `util.IsSensitivePath`，`kernel/server` 的静态伺服同理；夹具全是 `t.TempDir()`。若 `TMPDIR=/tmp`，
+  则 root = `/tmp/TestXxx…/001` → 命中 `/tmp` → 报 `Obsidian Vault path is unsafe: selected Vault path is sensitive`
+  而非期望的 `errObsidianVaultConfigMissing`。
+
+| CI 运行 | commit | `TMPDIR` | A 组 `kernel/util` | B 组 `kernel/model` + `kernel/server` |
+|---|---|---|---|---|
+| 34771606033 | `a846821ec2` | 未设 → Linux 默认 `/tmp` | `ok … kernel/util 2.318s` ✓ | **FAIL**（15 个用例） |
+| 34771876307 | `8f0071886c` | `${{ runner.temp }}` | **FAIL**（`TestIsSensitivePathSymlinkWorkspace`） | 通过 ✓ |
+| 34772185308 | `22a727db07` | `runner.temp` + 用例级 `/var/tmp` | 通过 ✓ | 通过 ✓ |
+
+第三行不是「找到了兼顾的取值」，而是那个测试**在自己的作用域内把变量改回去**——
+因为 A 通过要求 `TMPDIR` 命中黑名单、B 通过要求不命中，**同一变量上不可同时满足**，
+这是由黑名单定义直接推出的，不需要实测反例。
+
+**修复的残余脆弱点（值得再修）**：
+1. 修复把「夹具可用」寄托在 CI 的 `TMPDIR` 取值上，而非让夹具自造所需路径。后果是
+   **`go test ./...` 在 macOS（`TMPDIR` 天然为 `/var/folders/…`，同属 `/var` 前缀）上仍会红 B 组**。
+2. `t.Setenv("TMPDIR", …)` 生效的前提是 `GOTMPDIR` 为空：`t.TempDir()` 走
+   `os.MkdirTemp(os.Getenv("GOTMPDIR"), pattern)`（`$GOROOT/src/testing/testing.go` 的 `makeTempDir`），
+   仅当 `GOTMPDIR` 为空才回落到 `os.TempDir()`（`$GOROOT/src/os/file_unix.go:390` 的 `tempDir`，**不缓存** `TMPDIR`）。
+   一旦 CI 或本地设了 `GOTMPDIR`，该用例级覆盖会**静默失效**。
+3. A 组断言整体包在 `filepath.Separator == '/'` 里，**Windows 上该分支被跳过**——本机全绿不代表 CI 绿。
+
+
 #### 第十一轮的方法论教训
 
 1. **「同一算子的多条实现路径」是 P11/P12 之外的新入口，比跨仓比对省力**。本轮无需跨语言、跨包，
