@@ -550,11 +550,11 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D1g / E2（新 P25） | `app/electron/boot.html:562` 与 `init.html`/`workspace.html` 共用的 `connectionEntry.js`，在 boot 窗口因 `createBootWindow`（`main.js:2368-2370`）缺 `nodeIntegration` 而抛 `ReferenceError`（Electron 44 下无 `require`）→ 远端内核模式下「连接远程内核」按钮永不渲染，取消/换服务器入口失效 | 高（挑战门两轮 CONFIRMED，严重度中） | 待提 issue |
-| D4（新 P23） | `app/src/layout/Wnd.ts:955` 已关闭页签栈裁剪端方向反了（消费端 `pop` 取最新，裁剪端也 `pop`），且裁剪在 `push` 之前 → 稳态长度 65，超过 64 条后每次关闭挤掉「上一次关闭」；⇧⌘T 第二次起跳序 | 高（挑战门两轮 CONFIRMED，第二轮由中降为低） | 待提 issue |
-| C（新 P26） | `app/src/protyle/render/av/locate.ts:368-370` 定位到折叠分组只改 DOM 不写状态，且 `finishAVLocate` 无条件清理请求 → 任意 AV 数据操作触发的重渲会把分组折回、目标行与光标一起消失 | 高（挑战门两轮 CONFIRMED，严重度中） | 待提 issue |
-| C / D1f | `app/src/layout/dock/index.ts:308` 同一表达式写两遍（第二个 `elements[0]` 应为 `elements[1]`）→ 下半组实现 `resize` 的插件停靠面板收不到通知、上半组被调用两次 | 高（挑战门两轮 CONFIRMED，严重度低，可顺手修） | 待提 issue |
-| C | `app/src/history/diff.ts:485-492`「交换对比方向」只重渲 header 与侧栏（`genHTML`），editors 子面板初始 `fn__none` 且不调 `renderCompare`，选中态也不回填 → 对比区空白、高亮丢失 | 高（挑战门两轮 CONFIRMED，第二轮由中降为低） | 待提 issue |
+| D1g / E2（新 P25） | `app/electron/boot.html:562` 与 `init.html`/`workspace.html` 共用的 `connectionEntry.js`，在 boot 窗口因 `createBootWindow`（`main.js:2368-2370`）缺 `nodeIntegration` 而抛 `ReferenceError`（Electron 44 下无 `require`）→ 远端内核模式下「连接远程内核」按钮永不渲染，取消/换服务器入口失效 | 高（挑战门两轮 CONFIRMED，严重度中） | 已提 issue #19446 |
+| D4（新 P23） | `app/src/layout/Wnd.ts:955` 已关闭页签栈裁剪端方向反了（消费端 `pop` 取最新，裁剪端也 `pop`），且裁剪在 `push` 之前 → 稳态长度 65，超过 64 条后每次关闭挤掉「上一次关闭」；⇧⌘T 第二次起跳序 | 高（挑战门两轮 CONFIRMED，第二轮由中降为低） | 已提 issue #19447 |
+| C（新 P26） | `app/src/protyle/render/av/locate.ts:368-370` 定位到折叠分组只改 DOM 不写状态，且 `finishAVLocate` 无条件清理请求 → 任意 AV 数据操作触发的重渲会把分组折回、目标行与光标一起消失 | 高（挑战门两轮 CONFIRMED，严重度中） | 已提 issue #19448 |
+| C / D1f | `app/src/layout/dock/index.ts:308` 同一表达式写两遍（第二个 `elements[0]` 应为 `elements[1]`）→ 下半组实现 `resize` 的插件停靠面板收不到通知、上半组被调用两次 | 高（挑战门两轮 CONFIRMED，严重度低，可顺手修） | 已提 issue #19449 |
+| C | `app/src/history/diff.ts:485-492`「交换对比方向」只重渲 header 与侧栏（`genHTML`），editors 子面板初始 `fn__none` 且不调 `renderCompare`，选中态也不回填 → 对比区空白、高亮丢失 | 高（挑战门两轮 CONFIRMED，第二轮由中降为低） | 已提 issue #19450 |
 
 ### 方法论教训
 
