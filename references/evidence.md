@@ -291,8 +291,21 @@
    与生成的 `app/src/types/api/index.d.ts:147,149` 也是 18 个。
    契约迁移（`debc9a74cb`，2026-09-13）晚于页签特性（`5b8556e965`，2026-09-05），
    于是把漏项**复制进了文档与生成物**。判定权威侧时不能把「生成物/文档也这么说」当作独立证据——
-   它们与 DTO 同源，只能算同一份证据的多个副本。
-
+   它们与 DTO 同源，只能算同一份证据的多个副本。5. **列举同一集合的副本时，别漏掉 CLI flag 帮助文案**：同一「搜索类型过滤」集合实际有 **12 处副本**，
+   本轮新增的一处是 `kernel/cli/cmd/search.go:217` —— `--type` 帮助文案枚举 18 个类型名，
+   但 `--type` 值经 `stringSliceToMap` 直通 `model.FullTextSearchBlock`，
+   `buildTypeFilter`（`kernel/model/search.go:2061`）读 `types["tabs"]`（`:2089`）与
+   `types["tabItem"]`（`:2090`），故 `--type tabs` 实际生效、只是 `--help` 里看不到。
+   **这类副本「行为正确、仅可发现性受损」，极易被判为不可达而跳过**，
+   但它的修法与 DTO 漏项同源（补一处枚举），应并入同一条目而非另开一条。
+   同轮清点：`conf/search.go`(20) / `getDefault.ts`(20) / `search/menu.ts`(20) /
+   `config/tabs/searchTab.ts`(20) / `config.d.ts` 两个 interface(20) 为完整副本；
+   `model/storage.go` / `apicontract/criterion.go` / `schema.json` / `api/index.d.ts` /
+   三语 `docs/API*.md` / CLI 帮助文案共 8 处为 18 键残缺副本。
+6. **「缺失副本 + 无回填」共同决定丢失是否持久**：`app/src/protyle/util/compatibility.ts:837`（`replaceTypes`）
+   与 `:842`（`subTypes`）都有历史回填，`types` 没有。因此点击条件写入 `LOCAL_SEARCHDATA` 的 18 键版本
+   **不会被本地缓存层修复**。注意这一条本身不是缺陷（新增类型默认未勾选与 `conf.Search` 默认值一致），
+   它只是「丢失持久性」的证据 —— **同一 feature 内兄弟字段有回填而它没有，是判断丢失能否自愈的关键**。
 ## 如何更新本文
 
 每轮审计后追加：
