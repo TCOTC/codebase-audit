@@ -355,7 +355,7 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| A / D3 / G1（新 P17） | 插件公开契约 `TOperation`（petal 的 npm 包 `siyuan`，经 `petal/types/protyle.d.ts:316 protyle.transaction(...)` 消费）是 `app/src/types/index.d.ts` 同名联合类型的手工镜像，仓内**无任何子集断言**；`AGENTS.md` 明文要求同任务同步 petal，实测积压 **15 项**（2026-06-16 → 2026-09-04），而 petal 仍在主动增补（2026-08-24 两项）→ 积压而非冻结；第二维是 `IOperation` 的 `cellUpdates`/`viewIDs` 载荷字段也缺 | 高（三方成员集合与差集实测、生产者逐条定位、两侧 git 历史核对；挑战门两轮分别 CONFIRMED / DOWNGRADED 至低） | 待提 issue |
+| A / D3 / G1（新 P17） | 插件公开契约 `TOperation`（petal 的 npm 包 `siyuan`，经 `petal/types/protyle.d.ts:316 protyle.transaction(...)` 消费）是 `app/src/types/index.d.ts` 同名联合类型的手工镜像，仓内**无任何子集断言**；`AGENTS.md` 明文要求同任务同步 petal，实测积压 **15 项**（2026-06-16 → 2026-09-04），而 petal 仍在主动增补（2026-08-24 两项）→ 积压而非冻结；第二维是 `IOperation` 的 `cellUpdates`/`viewIDs` 载荷字段也缺 | 高（三方成员集合与差集实测、生产者逐条定位、两侧 git 历史核对；挑战门两轮分别 CONFIRMED / DOWNGRADED 至低） | 已提 issue #19432（严重度低） |
 | — | 候选：内核→前端 WS 推送命令集是否有双向漂移。**排除**：机械提取 70 个内核推送 cmd 与前端 396 个句柄字面量做双向 diff，仅 `updateids` 无前端 `case`——但它由 `emitToPlugins("ws-main", data)` 原样转给插件（issue #13434 的原意即「给插件用」），非缺口。**本轮的教训：前端分派大量使用 Yoda 写法 `"msg" === response.cmd`，只 grep `case` 会造出大批假漂移**（首版脚本报 9 条，修正后仅 1 条） | 高 | 排除，不报告 |
 | — | 候选：AV 定义存放在笔记本容器之外（普通库全局 `data/storage/av/`、加密库 `<boxID>/storage/av/`），归属只能靠进程级 `pendingAVBox` + 磁盘探测推断。**排除**：跨加密边界的守卫极完整（`IsSameCryptoBoundary` 覆盖文档移动、块移动、块引、资源、AV 镜像、关系共 47 处），且「加密笔记本是资源孤岛」在两处有显式注释 | 中 | 排除，不报告 |
 | A / F | 机械复扫：重复字面量 153 条（P1 117 / P2 16 / P3 20）、未转义插值沿用历轮阈值；逐条核对仍为已知噪声（`assets/`、`/api/` 受类型约束路由、CSS 选择器、`conf.json`） | — | 未命中 |
@@ -371,6 +371,15 @@
 6. **严重度由「权威侧是否承诺稳定」定档**。本轮决定性降级依据是 `docs/API.md:139` 明文把 `/api/transactions` 操作列为内部实现、不承诺兼容性，`docs/API-CONTRACTS.md:91` 又说明跨仓同步不进入 CI。**判定「应补全」前先找反向声明**；找不到反向声明的「应补全」只是审计者意见。
 7. **运行时无兜底分支会让「声明漏项」仅停留在类型层**。内核 `switch op.Action` 无 `default:`（事务开关在 `kernel/model/transaction.go:466` 闭合，`ret` 保持 nil）→ 未知 action 静默 no-op。因此本轮的后果**必须**限定为「伪造编译错误」，不能写成功能阻断。**审计「闭合集合漏项」时要分开写「声明层后果」与「运行层后果」。**
 8. **零副作用的取证方式：只读跨仓对比**。本轮全程未写入任何工作区数据，未建临时文档、未调写接口；机械脚本与比对脚本都放在仓库外 `%TEMP%\audit-r10\`。**跨仓契约类审计天然可零副作用完成。**
+
+#### 第十轮提交记录
+
+- 已提 issue #19432（state=open，标题与正文经逐字符回读校验一致：title 完全相等、body 2521/2521）
+- 写入流程：临时 payload 置于系统临时目录（`siyuan-gh-issue-20260913-tooperation.json`），`gh api --method POST` 不带 `--jq`，
+  随后与 payload 逐字比对；已删除 payload 与全部临时物并确认不存在
+- 仓库内零残留（`app/pnpm-lock.yaml` 的改动非本轮产生）
+- **本机坑（新增）**：PowerShell 5.1 的 `>` 重定向默认写 **UTF-16LE**，Python 以 `utf-8-sig` 读会报 `UnicodeDecodeError: byte 0xff`。
+  回读 `gh api` 输出时要么用 `Out-File -Encoding utf8`，要么按 `encoding='utf-16'` 读取
 
 ## 如何更新本文
 
