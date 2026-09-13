@@ -506,6 +506,65 @@ P18 的漂移发生在**同一个函数的相邻分支之间**，或同一功能
 6. 修复前检查**下游消费**：排序、数值筛选、嵌套汇总、导出都会读同一个字段，
    改量纲会同时改变筛选阈值语义，必须在报告中提示，不能写成「一行对齐」。
 
+### P19 外部可达路径上缺 not-found 守卫，panic 被 recover 吞成 2xx
+
+**对应判据**：D1d（同族方法只有一处缺前置守卫）、P2（分派返回值正确性）。
+
+**定义**：同一文件里成对的方法族（`DeleteXxx`/`GetXxx`/`UpdateXxx`）大多在「目标不存在」时返回 not-found 错误并 `return`，
+唯有个别成员把「查询结果」直接解引用。因为上游 HTTP 框架按**路径形态**（深度、前缀、扩展名）而非**存在性**分派，
+该分支对**已认证的外部请求**可达；panic 被项目的 recover 中间件吞掉后，
+**handler 未写状态码就 panic，`net/http` 在收尾时补 200**，于是「无法处理的请求」被报告为成功。
+
+**为何出现**：这类方法族通常是同一天批量抄写的（本例两个函数引入时间相差半个月、结构逐字同构、连注释都留着复制粘贴的痕迹）。
+`if value, loaded := m.LoadAndDelete(k); loaded { x = value }` 少了 `else`，**没有任何编译器或 linter 会报警**——
+Go 不提示「可能为 nil」，项目若未开 nilness 分析就完全静默。
+调用方一侧的误判则来自「框架会先校验资源存在」这一**隐含假设**：WebDAV/CardDAV 这类协议的分派是按 URL 深度算资源类型的，
+与存在性正交，必须读上游源码才能确认。
+
+**成立条件（三条同时满足才报告）**：
+
+1. 同族方法存在**唯一的**缺守卫成员——一致性权威侧就在同文件内，**无需外部规范背书**；
+2. 已确认**调用链上无存在性预检**（逐层读到上游分派函数，给出行号）；
+3. 「不得 panic」有依据——这一条**只需类型安全/健壮性常识**，但**不要**把它包装成协议合规主张（见 `SKILL.md`「已知误报」）。
+
+**实证案例（本仓库，第 12 轮）**：
+
+- `kernel/model/carddav.go:398`（`LoadAndDelete` 无 `else`）→ `:411` `os.RemoveAll(addressBook.DirectoryPath)`；
+  `kernel/model/caldav.go:331` → `:344` 逐字同构（`:343` 注释仍写着 `// remove address book directory`）。
+- 同族正确实现：`DeleteAddress`（`carddav.go:289`，miss → `ErrorCardDavBookNotFound`）、`GetAddressBook`（`:335`）、
+  `DeleteObject`（`caldav.go:232`）、`GetCalendar`（`:320`）；两个 not-found 常量已存在于 `carddav.go:93` / `caldav.go:81`，
+  **删除路径是唯一未使用者**。
+- 上游无预检：`go-webdav@v0.7.0/internal/server.go:92-97` 直接调 `h.Backend.Delete(r)`；
+  `carddav/server.go:269-279` 的 `resourceTypeAtPath` 只按**路径深度**判定资源类型；SiYuan 包装 `carddav.go:747-758` 只做 `PathCleanWithSlash`。
+- 实测（本机 3.8.4-alpha.8）：`DELETE /carddav/principals/main/contacts/<不存在的名字>` → **200 + 空 body**；
+  日志 `E ... logging.go:237: PANIC RECOVERED: runtime error: invalid memory address or nil pointer dereference`，
+  栈帧 `carddav.go:411` → `(*CardDavBackend).DeleteAddressBook` → `carddav/server.go:702`。
+  捕获链：`serve.go:153` `model.Recover` → `session.go:516` → `logging.Recover`（只 `LogErrorf` 后吞掉，不写状态码）。
+- 严重度：**低**。panic 发生在全部变更动作之前——`LoadAndDelete` 未命中、`booksMetaData` 未变更、`os.RemoveAll` 未执行，
+  `defer c.lock.Unlock()` 正常执行，因此无数据损坏、无锁泄漏，危害仅为日志刷屏 + 状态码语义错误。
+- 可达的现实链路：`load()`（`carddav.go:207-226`）只在元数据文件**不存在**时才重建 default 地址簿 →
+  客户端删掉 default 成功后，本地缓存里仍有它，任何重发的 DELETE 都命中。
+- 零副作用取证：这是**拒绝型**缺陷（预期失败），可在真实工作区直接实测，无需建临时对象再回删；
+  唯一副产物是首次 DAV 访问会初始化 `data/storage/carddav/…`，属正常行为而非缺陷产物。
+
+**其他领域的同类形态**：
+
+1. **REST handler 在 `UPDATE ... WHERE id=?` 后直接读返回对象**：0 行受影响即 nil 解引用，
+   而路由层的 `:id` 参数校验只查格式不查存在。
+2. **gRPC/gateway 的 map 查询后直接取字段**：拦截器只做鉴权与限流，不做资源存在性校验。
+3. **命令行工具的位置参数**：`flag.Args()[0]` 未判长度，而 shell 补全让人误以为参数总是存在。
+
+**检查法**：
+
+1. 对每个方法族（`Delete*`/`Get*`/`Update*`）grep 其 not-found 分支条数，找出**唯一没有**该分支的成员。
+2. 逐层读调用链，确认上游是按**路径形态**还是**存在性**分派；报告中必须写明「框架不会兜住」的依据行号。
+3. 追 panic 的最终表现：确认项目的 recover 中间件是否吞掉 panic 且不写状态码（`net/http` 会补 200）。
+4. **严重度看「panic 之前的副作用」**：位于全部变更动作之前 → 无数据损坏，降级为「日志噪声 + 状态码语义错误」；
+   若在部分写盘/部分删除之后，则升级为数据不一致。
+5. 修法要给出**语义正确的返回**而非「照抄兄弟路径」：兄弟路径返回普通 error 时，经上游映射可能是 500，
+   把「成功的幂等重试」变成服务端故障。优先选协议正确（上游导出的 `NewHTTPError(statusNotFound, …)`）或幂等 `return nil`；
+   守卫必须放在**任何变更动作之前**，否则会把「已删除」报成失败，那才是真正的语义错误。
+
 ## 如何扩充本库
 
 1. 从一次**已确认的缺陷**出发（而非猜测），确认它为何未被既有判据捕获。

@@ -439,6 +439,48 @@
    三个从未被系统看过的区域，命中率明显高于历史轮次的散点搜索。
    **子代理产出仍只能当候选**：3 个候选里有 2 个经本上下文核对后不可达或已被上游保护。
 
+### 第十二轮（2026-09-13）：机械复扫 + 三个未覆盖区域的子代理侦察
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1d（新 P19） | `kernel/model/carddav.go:398`（`LoadAndDelete` 无 `else`）→ `:411` `os.RemoveAll(addressBook.DirectoryPath)`；`kernel/model/caldav.go:331` → `:344` 逐字同构。同族的 `DeleteAddress`/`GetAddressBook`/`DeleteObject`/`GetCalendar` 都有 not-found 分支且常量已存在；上游 `go-webdav@v0.7.0` 按**路径深度**分派、无存在性预检；panic 被 `model.Recover` 吞掉后 `net/http` 补 **200** | 高（实测复现 + 栈帧逐帧核对，`caldav.go` 那条为静态可证） | 挑战门两轮 CONFIRMED，第二轮 DOWNGRADED 至低严重度；待提 issue |
+| A / F | 机械复扫：重复字面量 **166** 条（P1 130 / P2 16 / P3 20，文件数 1360）、未转义插值沿用历轮阈值；逐条核对仍为已知噪声（`assets/`、`/stage/loading-pure.svg`、受 `app/src/types/api/index.d.ts` 联合类型约束的 `/api/` 路由、CSS 选择器、`conf.json`、`0.38`、`INPUT`/`SPAN` 等 DOM 名） | — | 未命中 |
+| 候选（未取证） | `kernel/model/flashcard.go:815-828`：`custom-riff-new-card-limit` 解析失败时 `strconv.Atoi` 把 **0** 写进 `newCardLimit`，而 0 在 `getDeckDueCards` 里是最严格值 → 该文档复习时新卡全部消失，只有一行 `invalid ... limit` 日志；同仓其它非法配置一律回落默认 | 中高 | 附录观察项 |
+| 候选（未取证） | `kernel/model/flashcard.go:560-570`：卡片管理排序比较器混用 Due 与 ID 两把键，不满足严格弱序，入参来自 map 遍历（每次顺序随机）→ 混合新卡/旧卡时分页可能重复或漏卡 | 中 | 附录观察项 |
+| 候选（未取证） | `kernel/model/template_doc_tree_render.go:295`：重生成块 ID 后未调 `treenode.RemapTabsActiveIDs`/`WalkWithTabTitles`，而 `tree.go:102`、`import.go:666`、`template.go:1010` 三处同构实现都调了（全仓仅 4 个调用点） | 中 | 附录观察项 |
+| 候选（未取证） | `app/src/asset/renderAssets.ts:67-85`：`genAssetHTML` 的 audio/image/video/a 分支裸插 `pathString`，而同文件 `renderAssetsPreview` 与安全公告修复 `2229686df9` 覆盖的 `asset/index.ts` 都转义了；Windows 文件名限制使其不可达 | 中低 | 附录观察项 |
+| 子代理自验推翻 | 候选 4 条：`carddav.go:625` 多卡 vCard 用原文件名做 key（可达性需手工放文件，且重启自愈）、`export.go:4830` 把行 ID 当定义块 ID 写入 `defBlockIDs`（当前无可见后果）、`export.go:1580` 聚焦导出对页签项丢容器（GUI 传文档 ID 不可达，仅 MCP/API 可达）、`publish_access.go:1717` 用 `passwordID` 作守卫（遍历可达状态后确认不可达） | 中 | 自行降级，未上报 |
+
+#### 第十二轮的方法论教训
+
+1. **「同族方法只有一个缺守卫」是 D1 的独立高点位**。本轮不必先证明可达性：同文件四个兄弟方法都有 not-found 分支、
+   两个常量已定义却无人使用，**自相矛盾本身就是强证据**（与第七轮「同包自相矛盾」同一手法，但范围缩小到一个文件内）。
+   `if ...; loaded { x = v }` 缺 `else` 是这类缺陷的机械指纹，可脚本化。
+2. **「有 recover 中间件」不是安全网，而是缺陷的隐身衣**。第五、六轮分别确立了恒真/恒假守卫；本轮补上第三条：
+   **panic 被吞掉后 `net/http` 补 200**，使「无法处理的请求」表现为成功。审计「panic 是否等于崩溃」时，
+   必须读到 middleware 的 `recover()` 之后**有没有写状态码**，而不是停在「有 recover 就没事」。
+3. **「不得 panic」不需要外部规范背书，「应返回 404」需要**。挑战门第一轮推翻了我误引的 RFC 4918 §9.6
+   （它只规定成功 DELETE **之后**的 GET 返回 404），第二轮又推翻了我「404 不可表达」的断言
+   （根包 `go-webdav@v0.7.0/server.go:50` 已导出 `NewHTTPError`）。**推断链的每一环都必须读源码**，
+   否则「预期表现」这一栏会变成审计者自造的权威。已把这一类写成新误报。
+4. **修法不能照抄兄弟路径**。本例兄弟路径返回普通 `errors.New`，经上游 `ServeError` 映射为 **500**；
+   若照抄，报告自己援引的「幂等重试」场景反而从「200（无害）」变成「500（客户端持续重试）」。
+   **挑战门在收窄严重度的同时，还阻止了一次会让缺陷变严重的修复**——这是它的第二个价值点。
+5. **拒绝型缺陷是最省力的取证目标**。`DELETE` 不存在的路径预期失败，panic 发生在全部变更动作之前，
+   因此可以在真实工作区直接实测，无需建临时对象再回删。第七轮的 `append(parentID=页签项)` 也是同一形态。
+   **选复现场景时优先挑零副作用的那个。**
+6. **零副作用不等于零痕迹**：本次请求触发了该工作区**首次** CardDAV 访问，`load()` 顺带初始化了
+   `data/storage/carddav/principals/main/contacts/address-books.json` 与空 `default/` 目录（内容仅默认地址簿）。
+   这是任何一次 DAV 访问都会产生的正常行为，但审计时应在报告中披露，避免被误当成缺陷或残留。
+7. **子代理产出仍是候选**：本轮 3 个子代理共给出 12 条候选，主上下文采纳 1 条并实测，4 条经自验降级/推翻。
+   有效的做法是给它们**历轮排除清单**并强制「必须给出权威依据与用户可见路径、自我推翻要写明」。
+8. **skill 仓库出现工作树回退事故（本轮发现）**：`SKILL.md`/`references/evidence.md`/`references/patterns.md`
+   三个文件的工作树被回退到**第十一轮之前**的状态（第十一轮的 D1c、P18、各轮 issue 编号全部丢失，
+   `git diff` 表现为 138 行删除）。`HEAD`（`24a3e6f`）与 `origin/main` 一致且内容完整，
+   已备份工作树后用 `git checkout -- .` 恢复。**教训：每轮开扫前不仅要读登记表，还应确认登记表本身是最新的**——
+   本轮若不是先读 `evidence.md` 再核对工作树，会基于残缺的判据库做去重，重现第八轮的重复报告。
+   备份留在 `%TEMP%\skill-bak-r12\`，确认无误后删除。
+
 ## 如何更新本文
 
 每轮审计后追加：
