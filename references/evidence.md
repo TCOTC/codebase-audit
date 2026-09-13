@@ -584,10 +584,10 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D3c（新 P27） | 设置 - 外观 - 通知 的「全选不完整提示」开关永不生效：前端 `APPearanceTab.ts:1149-1160` 有 7 项，内核 `kernel/util/appearance.go:63-70` 只有 6 字段（镜像 `apicontract/bazaar.go:360-368` 同），静默丢弃后被广播覆盖；消费点 `keydown.ts:229-234` 永远为假。附带 `objEquals` 恒不成立 → 每次关闭该对话框都写一次 `setAppearance` | 高（挑战门两轮 CONFIRMED，严重度中） | 待提 issue |
-| D1h（新 P28） | `kernel/model/template.go:106-121` `RemoveTemplate` 只做词法校验，`templates/link -> ..` 时 `RemoveTemplate("link/conf")` 会递归删除目录外的 `<data>/conf`；同族四处均有 realpath / 逐级 Lstat / `os.Root` 防护且带软链测试。`kernel/mcp/tools/template.go` 的读取路径同样缺校验 | 高（挑战门：第一轮误判降级，复活轮纠正后 CONFIRMED，严重度中） | 待提 issue |
-| F | `app/src/config/render/render.ts:72` 的 `textarea` 分支不转义（同函数 `:76`/`:80` 转义），7 个配置项受影响；`</textarea>` 提前闭合 + RCDATA 解码实体 → 面板显示值≠配置值并静默回写 | 高（挑战门两轮 CONFIRMED，严重度低） | 待提 issue |
-| D3（新 P29 附带） | `kernel/mcp/tools/box_lease.go:30-47` 的加密租约白名单缺 `inbox`（`inbox.go:208` 与白名单内的 `document.go:134` 调用同一句 `CreateDocByMd(notebook, …)`，且 resolver 已支持 `notebook` 键）；根因是 `performCreateDocTransaction` 吞掉落盘错误（`model/file.go:2422-2430` + `transaction.go:120/488`）→ 报成功却删云端原件 | 高（挑战门两轮 CONFIRMED；第一轮把 `tag`/`bookmark` 一并列入属误报，已剔除；严重度低） | 待提 issue |
+| D3c（新 P27） | 设置 - 外观 - 通知 的「全选不完整提示」开关永不生效：前端 `APPearanceTab.ts:1149-1160` 有 7 项，内核 `kernel/util/appearance.go:63-70` 只有 6 字段（镜像 `apicontract/bazaar.go:360-368` 同），静默丢弃后被广播覆盖；消费点 `keydown.ts:229-234` 永远为假。附带 `objEquals` 恒不成立 → 每次关闭该对话框都写一次 `setAppearance` | 高（挑战门两轮 CONFIRMED，严重度中） | 已提 issue #19452 |
+| D1h（新 P28） | `kernel/model/template.go:106-121` `RemoveTemplate` 只做词法校验，`templates/link -> ..` 时 `RemoveTemplate("link/conf")` 会递归删除目录外的 `<data>/conf`；同族四处均有 realpath / 逐级 Lstat / `os.Root` 防护且带软链测试。`kernel/mcp/tools/template.go` 的读取路径同样缺校验 | 高（挑战门：第一轮误判降级，复活轮纠正后 CONFIRMED，严重度中） | 已提 issue #19453 |
+| F | `app/src/config/render/render.ts:72` 的 `textarea` 分支不转义（同函数 `:76`/`:80` 转义），7 个配置项受影响；`</textarea>` 提前闭合 + RCDATA 解码实体 → 面板显示值≠配置值并静默回写 | 高（挑战门两轮 CONFIRMED，严重度低） | 已提 issue #19454 |
+| D3（新 P29 附带） | `kernel/mcp/tools/box_lease.go:30-47` 的加密租约白名单缺 `inbox`（`inbox.go:208` 与白名单内的 `document.go:134` 调用同一句 `CreateDocByMd(notebook, …)`，且 resolver 已支持 `notebook` 键）；根因是 `performCreateDocTransaction` 吞掉落盘错误（`model/file.go:2422-2430` + `transaction.go:120/488`）→ 报成功却删云端原件 | 高（挑战门两轮 CONFIRMED；第一轮把 `tag`/`bookmark` 一并列入属误报，已剔除；严重度低） | 已提 issue #19455 |
 | D1 | `kernel/plugin/api_agent.go:174` 注册用局部名作键，返回值 `{id, name}` 都不等于该键，`unregisterCapability` 未命中时静默 resolve | — | **REJECTED**：petal `kernel.d.ts` 明确 `unregisterCapability` 接收注册时的局部名，按文档调用可正常注销；残留易用性问题见「未取证候选」 |
 
 ### 已审查并驳回
