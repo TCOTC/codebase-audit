@@ -414,6 +414,10 @@
 - 排序不受影响：`kernel/av/sort.go:452` 读同一个 `content`，乘 0.01 是单调变换
 - 无需数据迁移：`Rollup.Contents` 虽会写盘（`CloneStoredValue` 只剥离 `RenderedContent`，`kernel/av/render_template.go:25`），但每次渲染由 `BuildContents` 重算并置空（`kernel/av/value.go:2663`）
 
+**复现夹具（用户工作区，非仓库内）**：文档 `/db test 2`，两个数据库分别演示「截断」（3 行勾 1 行 → 页脚 `33.33%` vs 汇总 `33`）与「归零」（103 行勾 1 行 → 页脚 `0.97%` vs 汇总 `0`），并把复选框列的页脚计算设为同一算子做同屏对照。
+
+**已提 issue #19435**（state=open；title 74/74、body 1549/1549 逐字符回读一致；labels 被静默丢弃，符合已知权限限制）
+
 ## 第十七轮（2026-09-13）：已提 issue 的修复验证
 
 范围：本 skill 历轮产出的 **37 条 issue 全量核对**（#19397–#19465，含并行 B 线的 #19456–#19461）。
@@ -426,8 +430,8 @@
 | issue 状态 | 37/37 `closed`（#19432 在 `petal` 仓库修复，非本仓） |
 | 代码已改 | 37/37，位置与本轮报告一致 |
 | 新增/补测 | 21 处（含 1 条 i18n CI workflow） |
-| 受影响包完整测试 | `av` `sql` `server`(见下) `conf` `treenode` `apicontract` `mcp/tools` `api` `cli/cmd` `model` 全绿 |
-| 前端 | 本轮相关 105 条全绿；全量套件有 1 处无关失败（见下） |
+| 受影响包完整测试 | `av` `sql` `conf` `treenode` `apicontract` `mcp/tools` `api` `cli/cmd` `model` 全绿；`server` 仅 1 处**宿主 MIME 差异**失败（见下，非回归） |
+| 前端（09-14 补正） | 本轮相关 105 条全绿；**全量套件有 13 处失败，其中 10 处为源码测试的真实失败**（原记录「1 处」是我只读输出尾部造成的误判，见下） |
 | **由修复引入的回归** | **0** |
 
 ### 方法要点（新增，可复用）
@@ -448,26 +452,53 @@
   而非兄弟路径的普通 error（避免把幂等重试变 500）；#19464 改用 `[data-type="more"], [data-type="more-space"]` 选择器取代
   `previousElementSibling`（避开移动端语义差异）；#19456 未复用按前缀判定的敏感目录黑名单、也未一律禁软链。
 
-### 本机环境差异（新误报，勿当回归）
+### 宿主 MIME 注册表决定内联白名单（09-14 从「误报」改判为**真缺陷**，已提 #19475）
 
-| 现象 | 真因 |
-|---|---|
-| `kernel/server` 的 `TestSecureAssetContentHeadersAllowsInlineSafeAssets` 在 Windows 上必失败：`safe asset [test.jpg] must stay inline, got Content-Disposition "attachment; filename=test.jpg"` | 本机注册表把 `.jpg` 注册为 `application/jpg`，`mime.TypeByExtension(".jpg")` 不返回 `image/jpeg`，`isAssetInlineUnsafe`（`kernel/server/serve.go:917`）按媒体类型前缀白名单判定为不安全。该测试与函数早于本轮修复 3 周（`d2085a754d` 2026-08-21），非回归。**跑内核测试前先试 `mime.TypeByExtension(".jpg")`**，不要据此报回归 |
+`kernel/server/serve.go:917` 的 `isAssetInlineUnsafe` 用 `mime.TypeByExtension` 取媒体类型再按白名单决定是否强制附件下载。
+本机 `HKLM\SOFTWARE\Classes\.jpg` 的 `Content Type` 为 `application/jpg`（同机 `.jpeg` 仍为 `image/jpeg`），
+于是 `TestSecureAssetContentHeadersAllowsInlineSafeAssets` 在 Windows 上必失败。
+**机制**：Windows 上 Go 的 `initMimeWindows`（`$GOROOT/src/mime/type_windows.go`）遍历 `HKEY_CLASSES_ROOT`
+并用 `setExtensionType` **覆盖内置表**，仅对 `.js` 硬编码豁免 `text/plain`（Go issue #32350）。
+逐扩展名比对 19 项，只有 `.jpg` 与内置表不同；`.js` 注册表值为 `text/plain`（恰在白名单内）—— 说明注册表确实能给出「内联安全」的类型。
+**影响面已实测夹逼**：Chromium **忽略子资源上的 `Content-Disposition` 与错误 Content-Type**，
+四个对照端点（正常 / 仅附件头 / 仅 `application/jpg`+nosniff / 两者兼具）在 `<img>` 中全部渲染成功；
+真正受影响的是顶层导航（`setAssetsAttachmentDisposition` 的注释本身写明该头用于「让浏览器 window.open 触发下载而非内联预览」）。
+**教训**：上一轮把这条写成「环境差异、不要报」的误报，实际是「产品行为依赖宿主配置」的真缺陷；
+**「因为 CI 跑不到」不能当作排除理由**，那是判据 G4 的独立发现，不是免报牌。
 
-### 与本轮 issue 无关的既有失败（判据 G1 前端变体）
+### 前端测试套件实况（09-14 补正，新判据 G3/G4）
 
-`app/tests/mobileBacklinks.test.js` 在 `dev` 上失败：`unexpected module editor/assetOpen`。
-其 stub 白名单未覆盖 `app/src/layout/dock/BacklinkContent.ts` 新增的
-`import {normalizeAssetOpenConfig} from "../../editor/assetOpen"`（引入于 `6ed4866976`
-「Migrate settings API contracts #19378」，2026-09-13 23:05，非本 skill 产出的 issue）。
+`cd app && pnpm test`（`dev` = `e4960b6553`）：`tests 2474 / pass 2455 / fail 13`，去重后共 13 个失败用例。
+**上一轮只读了输出尾部（`Select-Object -Last 15`）就写下「仅 1 处无关失败」，实为 13 处 —— 误判直接进了结论。**
+逐个单跑仍失败，排除了测试间干扰。
 
-→ **测试替身白名单与源码 import 图之间没有一致性断言**：新增 import 会让该测试静默脱靶，
-且因为断言发生在 `load()` 里，报错信息只说「unexpected module X」，不看 diff 很难归因。
-检查法：对用 stub 白名单驱动模块加载的测试，机械比对「白名单 ∪ 被测模块的传递依赖」与「实际 import 集合」。
+按根因分四类：
 
-**复现夹具（用户工作区，非仓库内）**：文档 `/db test 2`，两个数据库分别演示「截断」（3 行勾 1 行 → 页脚 `33.33%` vs 汇总 `33`）与「归零」（103 行勾 1 行 → 页脚 `0.97%` vs 汇总 `0`），并把复选框列的页脚计算设为同一算子做同屏对照。
+| 类别 | 数量 | 机制 | 实例 |
+|---|---|---|---|
+| 测试发现非 hermetic | 3 | `"test": "node --import tsx --test"` 未限定路径，递归扫到被 `.gitignore:14` 忽略的 `app/build/win-unpacked/resources/app/`（electron-builder 副本）。把 `app/build` 移出 `app/` 后：`tests` 2474→2427、`fail` 13→10 | `build\win-unpacked\...\{connectionManager,remoteKernel,windowMessaging}.test.js` |
+| 测试替身/白名单漂移（G3） | 5 | 桩对象存在但缺新导出（`TypeError: (0 , m_1.f) is not a function`）；模块白名单缺新 import；DOM 替身缺新调用的方法 |  `topBar.test.ts:270` 缺 `isInMobileApp`；`transactionAV.test.ts`×2 缺 `getEditorTransaction`；`backlinkReference.test.js` 缺 `setBacklinkTypeFoldExpandHandler`；`mobileBacklinks.test.js` 缺 `editor/assetOpen`；`image.test.ts` 的 `classList` 只有 `toggle` 没有 `remove` |
+| 断言未随生产变更更新 | 4 | 断言写死了实现细节 | `fontPreview.test.ts:45` 要求 `rootMargin === undefined` 而实现传 `"100px 0px"`；`fileTreeReorder.test.ts:54` 用 `strictEqual` 要求返回原对象而实现已改为投影；`entryVisibility.test.ts:32` 插件槽位期望基于字体项位于 `text` 之后（默认条目 09-09 已移到之前） |
+| 行尾敏感 | 1 | 按 `"\n    });\n"` 切片源码；`.gitattributes` 对 `.js` 只写 `* text=auto`，本机 `core.autocrlf=true` 检出为 CRLF → 锚点不匹配 | `electron/windowMessaging.test.js:100`；`app/electron/main.js` 实测 4497 CRLF / 0 孤立 LF，`b"\n    });\n" in file` = False、`b"\r\n    });\r\n"` = True。同目录 `crashHistory.test.js:10` 用 `"\n};"`（无尾随换行）故不受影响 |
 
-**已提 issue #19435**（state=open；title 74/74、body 1549/1549 逐字符回读一致；labels 被静默丢弃，符合已知权限限制）
+**引接各条的生产提交**：`27d54e1809`(#19467)、`0a1b5b424e`(#19378)、`99e5bd19ac`(#19257)、`6ed4866976`(#19378)、
+`4de337d316`(#19407)、`ff239fd9b3`(#19323)、`aaf5f44829`(#19378)、`b1077b520a`(#19226)。
+其中 `aaf5f44829` 的改动经核验对消费方安全：`Files.ts:1031`、`MobileFiles.ts:502`、`PinnedDocs.ts:499` 都只读 `result.notebook` 与 `result.parentPath`。
+
+### CI 执行集缺口（新判据 G4，已提 #19472）
+
+`.github/workflows/api-contracts.yml` 是唯一跑单测的 workflow，且是白名单式：
+内核只跑 `./apicontract/...` 与带 `-run` 过滤的 `./api ./plugin ./model`；前端 `pnpm exec tsx --test` 只列 7 个文件。
+对照 `go list ./...` 的 30 个包与 358 个前端测试文件，未覆盖面极大（`server` `sql` `av` `conf` `treenode` `mcp/tools` `cli/cmd` 等）。
+**后果**：本地全量一跑就红、CI 恒绿，于是没人能区分新回归与存量噪声 —— 我自己的误判就是这套机制的直接产物。
+
+### 本轮已提 issue
+
+#19472（绝大多数单测不在 CI 执行集）、#19473（`pnpm test` 收集被忽略的 `app/build`）、
+#19474（前端 10 处测试失败：替身/白名单/断言/行尾）、#19475（`isAssetInlineUnsafe` 依赖宿主 MIME 注册表）。
+四条均 title/body 逐字符回读一致（长度差 1 为 GitHub 自动追加的尾部换行）。
+
+**取证工具**：`%TEMP%\audit-r18\`（Go 探针 + Python 脚本），事后已删除；本轮未在仓库内留任何文件。
 
 #### 第十一轮的方法论教训
 
