@@ -575,3 +575,84 @@ Go 不提示「可能为 nil」，项目若未开 nilness 分析就完全静默�
 6. 若新判据带来新误报，同步写入 `SKILL.md` 的「已知误报」。
 
 目标是让判据库随缺陷发现持续累积，而不是每轮从零开始。
+
+### P20 同族多实现里唯一一处读错 DOM 属性（值恒空）
+
+**对应判据**：D1e、D1、C。
+
+**定义**：同一语义（读搜索框、读标题、读排序值）在多处各有实现，其中唯一一处读取的属性在目标元素上**不存在**
+（最典型是把 `contenteditable` 的 `div` 断言成 `HTMLInputElement` 再读 `.value`）。表达式求值为 `undefined`，
+再用 `|| ""` 兜底，于是「读不到」被伪装成「没有值」：不报错、不抛异常，只表现为功能静默失效。
+
+**为何出现**：`as SomeElement` 是编译期谎言（TS 不校验 DOM 实际标签），`|| ""` 兜底后连 `undefined` 都不再暴露。
+同族其它实现读对了属性，缺陷只落在没被测试覆盖的那一处；共用的渲染函数还会让人误以为「同一控件必然同一读法」。
+
+**实证案例（本仓库）**：`app/src/protyle/render/av/kanban/render.ts:95/:128` 读 `searchInputElement?.value || ""`；
+搜索框由共享的 `genTabHeaderHTML`（`render.ts:165`）生成为 `<div contenteditable="plaintext-only" data-type="av-search">`，
+表格（`render.ts:642`）、画廊（`gallery/render.ts:248`）、`bindAvSearch`（`search.ts:23`）等九处都读/写 `textContent`。
+因 `render.ts:568-576` 按 `data-av-type` 分派到看板且不传 data，看板走自带取数分支 → `query` 恒空 → 搜索恒不过滤；
+`locate.ts:251-252` 每次渲染把 `data-av-type` 改写成当前视图类型，关死了「恰好走表格分支」的侥幸路径。
+
+**检查法**：
+1. grep 同一变量名的**全部读取点**，按取值方式（`textContent` / `value` / `innerText`）分组，找少数派。
+2. 读该元素的**生成 HTML**，确认该属性是否存在（`contenteditable` 的 div 没有 `value`）。
+3. 确认**有无写入方**写该属性：没有 → 值恒空；有 → 只算取值时机问题，不要写成恒空。
+4. 追分派依据：若上游按 DOM 属性分派到该实现，且该属性每次渲染都被规范化成当前状态，则缺陷稳定复现。
+5. **不变量**：断言「该读取结果 == 同族其它实现的读取结果」，用真实 DOM 跑一次即可证伪。
+
+### P21 手写配置登记表与实际声明漂移（宽松默认 + 无完整性测试）
+
+**对应判据**：A、D3、P4、P15。
+
+**定义**：一份手写的「可配置项登记表」（catalog／白名单／枚举）与实际的菜单、路由、字段声明逐项不一致：
+登记表有而实际没有的键 → 设置面板出现**勾选/拖拽均无效**的条目；实际有而登记表没有的键 → 该条目**无法被配置**
+（不能隐藏、不能排序）。因为运行时对未知键**宽松放行**（保留、不改动、不告警），两种不一致都不报错、不失败，
+只表现为「配置看着生效了却没效果」或「个别项怎么都关不掉」。
+
+**为何出现**：宽松默认是插件/动态内容的**架构必需**（未知 id 属外部注入，不能当异常处理），于是「漏登记」被降级为静默；
+登记表又只被**有选择性的测试**覆盖（只对静态 markup 做全量 diff，不对动态拼装的菜单做扫描），漂移因此长期存活。
+
+**实证案例（本仓库）**：`app/src/config/entryVisibility/catalog.ts` 对 `app/src/menus/protyle.ts`、
+`app/src/protyle/gutter/index.ts`：
+- 漏项：`transposeTable`（`protyle.ts:2433`，块标 - 单个块 - 表格）、`cancelMerged`（`:2286`）、
+  `copyMirror`（`gutter/index.ts:3566`，数据库块的复制项）、`inline.image` 的 `openBy`（`protyle.ts:1520-1521`
+  → `commonMenuItem.ts:1052-1061`；`inline.link`/`inline.ref` 都有，唯独图片没有，整棵子菜单因此不可配置）；
+- 幽灵项：`inline.text.more` 下的 `separator_insert`／4 个 `insert*`／`separator_delete`／2 个 `delete*`
+  （实际由 `tableMenu` push 进 `menus`，作为行内菜单的**顶层**项出现；`more` 子菜单只含
+  `otherMenus.concat(other2Menus)`）、`gutter.multi.copy` 下的 `copyAVID`／`duplicateMirror`／`duplicateCompletely`
+  （仅在单选 AV 分支生成）；
+- 机制：`runtime.ts:316-338` 的 `filterMenuItems` 只在 `getEntryCatalogNode(path)` 存在时才隐藏；设置面板完全由 catalog 生成。
+
+**检查法**：
+1. 机械提取两套序列——登记表的 key 序列、实际声明的 `id` 序列（含条件分支与 `git log -S` 引入时间线），逐项 diff。
+2. 对每个差异判定方向：**漏项**（无法配置）还是**幽灵项**（无效开关）——两者修法不同，修法都要落到等价位。
+3. 检查运行时对未知键的策略（保留／隐藏／报错），宽松放行正是漏项静默的原因。
+4. 找现有测试的覆盖边界：只断言「前 N 项」「某段切片」的测试等于放弃完整性，正是漂移的容身处。
+5. 不变量取「登记表 key 集合 == 实际可渲染 id 集合（按条件分支取并集）」。
+
+### P22 同源请求构造的复制品漏字段（跨端参数漂移）
+
+**对应判据**：B、D1、P5。
+
+**定义**：同一请求（同一端点、同一契约）在两端各有一份手写的参数构造，字段逐项同构，只差个别字段；而该字段在契约里是
+`optional`、内核有默认值，于是缺失**不报错**，只让两端得到不同结果集。与 P12 的区别：漂移的不是字符串变换而是**请求载荷**；
+与 P15 的区别：不是 DTO 丢字段，而是调用点漏传。
+
+**为何出现**：optional 字段让「漏传」合法，内核默认值决定了漏传的行为；两份构造来自复制，复制时只带走当时已有的字段，
+之后新增的**模式相关派生字段**只出现在被改动的那一份里。
+
+**实证案例（本仓库）**：桌面 `app/src/search/util.ts:1520` 有 `searchHPath: !requestConfig.hasReplace`；
+移动 `app/src/mobile/menu/search.ts:319-330` 的同构 `searchParam` 没有该字段；
+`kernel/apicontract/search_query.go:58` 是 `*bool api:"optional"`，`kernel/api/search.go:335-337` 省略即 `true`。
+同一提交 `fa44649fa7` 把 `FindReplaceInBox` 改为 `FullTextSearchBlockInBoxWithHPath(..., false)` ——
+「普通搜索默认展开 HPath、替换目标永不展开」是配套的一对，`FindReplaceRequest` 里根本没有该字段。
+后果：移动端替换模式的列表多出「仅命中层级路径」的行（对它们替换是 no-op）、匹配计数偏大。
+
+**检查法**：
+1. grep 同一端点的**全部**请求构造点，逐字段 diff（不只比字段个数，要比含 `?!` 的派生值）。
+2. 查差异字段是否 `optional` + 内核默认值 → 判断缺失是否静默。
+3. `git log -S <字段>` 找引入它的提交，看是否成对改了另一层（内核/另一端点），据此判断意图。
+4. 判定影响时先厘清「前端列表」与「服务端实际作用的集合」——**别把展示差异写成数据差异**
+   （挑战门实例：这一误判会把低危缺陷抬成高危，修法优先级随之失真）。
+5. 修法优先「把派生逻辑收敛到共享装配函数」，而不是在缺失处再抄一遍同样条件（否则制造第三个真相点）。
+

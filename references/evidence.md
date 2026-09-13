@@ -491,3 +491,54 @@
 4. 方法论教训
 
 数据用于校准下一轮的判据与阈值，避免重复劳动。
+
+## 第十三轮（2026-09-13）：前端定向扫描（app/src）
+
+范围：`app/src` 全量前端（770+ TS 非测试文件）。机械复扫：重复字面量 64 条（P1 44/P2 5/P3 15，files 778）、
+未转义插值 244 条/95 文件，逐条核对后除下述条目外均为噪声（UI 选择器、ID、i18n 文本、内部 HTML 片段）。
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1e / C（新 P20） | `app/src/protyle/render/av/kanban/render.ts:128` 读 `searchInputElement?.value`（该元素是 `genTabHeaderHTML` 生成的 `contenteditable` div，无 `value`），同族九处读 `textContent` → 看板视图搜索恒不过滤；全量重渲时 `showSearch` 为假 → 搜索框被折叠清空 | 高（代码可证；挑战门两轮 CONFIRMED，严重度中） | 待提 issue |
+| A / D3（新 P21） | `app/src/config/entryVisibility/catalog.ts` 与实际菜单声明 4 处不一致：漏 `transposeTable`/`cancelMerged`/`copyMirror`/`inline.image.openBy`；`inline.text.more` 与 `gutter.multi.copy` 含永不出现的幽灵键。违反 `AGENTS.md` 第 9 条 | 高（挑战门两轮 CONFIRMED，严重度低） | 待提 issue |
+| B / D1（新 P22） | `app/src/mobile/menu/search.ts:319-330` 的 `searchParam` 缺 `searchHPath: !hasReplace`（桌面 `search/util.ts:1520` 有；内核默认 true；同一提交 `fa44649fa7` 把 `FindReplaceInBox` 改为 `false`，两者本是一对）→ 移动端替换模式列表多出仅命中 HPath 的行 | 高（挑战门两轮 CONFIRMED，严重度由「数据差异」DOWNGRADED 为低） | 待提 issue |
+| D1 | `app/src/mobile/util/setEmpty.ts:42` 只读判据方向反了（`getOpenNotebookCount() > 0 \|\| !readonly`）→ 发布/读者角色在移动端空页看到「新建文档」，点击必然 403（提示未本地化 "Forbidden"）；同屏另 3 项、移动端菜单、桌面端共 5 处均隐藏 | 高（挑战门两轮 CONFIRMED，严重度低） | 待提 issue |
+
+### 已审查并驳回
+
+- 「移动端主文件树未响应 `fileTree.docIconClickExpand`/`parentDocClickExpand`」：这两个设置项在
+  `app/src/config/tabs/fileTab.ts` 被 `/// #if !MOBILE` 编译剔除，移动端本无此设置；`PinnedDocs` 的 `this.mobile || …`
+  是显式的平台区分。属有意设计，已写入「已知误报」。
+- `app/src/sync/syncGuide.ts:115/119/121` 云端目录名未转义：`dejavu.cloud.IsValidCloudDirName`
+  拒绝 `"`、`<`、`'` 等字符，正常路径下列不出该形态的名字（仅当用户在自己云盘外部创建了非法目录名才可达），
+  且影响限于自己的远端目录，降为观察项。
+
+### 未取证候选（勿重报，除非有新证据）
+
+- `app/src/protyle/util/compatibility.ts`：保存侧对 `LOCAL_SEARCHDATA`/`LOCAL_FILESPATHS`/`LOCAL_CLOSEDTABS` 都调 sanitizer，
+  加载侧只对 closedTabs 调 → 存量未脱敏 storage 可被还原（需跨版本/跨客户端写入前提）。
+- `app/src/config/tabs/syncUi.ts:414-435`：保存响应 `.finally` 用服务端快照逐字段回填整个第三方存储表单，
+  无 `editing`/revision 守卫（对比 `bodyGradient.ts:12-18`、`keymapUi.ts:717-750` 的做法）。
+- `app/src/boot/globalEvent/keydown.ts:190` 与 `keyup.ts:79` 的 `getFullHPathByID` 回调无 reqId/版本校验
+  （对比 `util/fetch.ts:22-24` 的 `reqIds` 白名单）；`app/src/protyle/hint/extend.ts:482` 的 `searchTag` 同理。
+- `app/src/editor/databaseRow.ts:63` 行窗口 body 整体 `replaceWith`，无「单元格有焦点则延后」判断
+  （对比 `BacklinkContent` 的 `markDirty()` 延后刷新）。
+- `app/src/mobile/dock/MobileFiles.ts:1467-1495` 的 `selectItem` 缺桌面版 `Files.ts:1993-2017` 的路径归一化与
+  `visitedPaths` 防死循环（未构造出稳定可达路径）。
+- `app/src/protyle/gutter/index.ts:153`（`*Block` 系）与 `app/src/protyle/wysiwyg/backlinkTypeFold.ts:3`、
+  `app/src/protyle/render/av/richText.ts:124`（短名系）是同一块类型闭合集合的三份副本；`langs/*.json` 中
+  `HTML`/`IFrame` 键不存在，反链折叠按钮回退显示英文（可能是有意保留英文名，故仅记录）。
+
+### 方法论教训
+
+1. **子代理的「跨端/跨实现差异」候选必须回到同一端内找自相矛盾**。本轮驳回的移动端文件树候选，
+   子代理的内部矛盾论据（PinnedDocs 会展开）看似有力，实则被 `/// #if !MOBILE` 编译块解释掉。
+   **跨端对比前先 grep 编译期保护块**，否则会把有意的平台区分当成漏实现。
+2. **`git log -S <x> -- <path>` 的 `--stat` 只统计该路径**，本轮据此误判为「1 file changed, 1 insertion」，
+   实际提交改了 6 个文件（含内核配套改动）。要判断「是否只改了一侧」，必须不带 pathspec 看完整 diffstat。
+3. **挑战门能纠正业务表现的因果链**：本轮 D1e 最初写成「打字时输入被清空」，实际 `renderAll=false` 时
+   `afterRenderGallery` 提前 return，输入不会被吃；清空只发生在 `renderAll=true` 的重渲。症状描述错了会直接影响修法与优先级。
+4. **「前端列表」≠「服务端作用的集合」**：P22 最初被描述成「替换目标集不一致」，实际替换目标由内核
+   `FindReplaceInBox` 内决定，前端字段只影响列表与计数。**断言数据层后果前先读服务端的取数实现。**
+5. **机械扫描的增量仍然为 0**：64 条重复字面量与 244 条未转义候选全部为噪声/已知项，
+   本轮四条发现全部来自**定向语义核查**（判据 D1/D3）而非脚本产出——与第十一、十二轮结论一致。
