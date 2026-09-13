@@ -37,25 +37,55 @@ SINK_CALL = re.compile(
 # 模板字符串中的插值
 INTERPOLATION = re.compile(r"\$\{([^{}]+)\}")
 
-# 已知安全的包装函数（项目约定）
+# 已知安全的包装函数（项目约定）。新增前先读实现确认它确实转义。
 SAFE_WRAPPERS = (
     "escapeHtml", "sanitizeKernelHTML", "escapeAttr", "encodeURIComponent",
     "encodeURI", "CSS.escape",
+    # `escapeAriaLabel`（app/src/util/escape.ts）专用于属性语境，会替换引号与 `<`。
+    "escapeAriaLabel",
+    # `updateHotkeyTip`（protyle/util/compatibility.ts）把 `⌘X` 这类固定串包成 kbd 标记，
+    # 输出完全由常量拼接，不接受外部数据。
+    "updateHotkeyTip",
 )
-# 已知安全的值形态：纯字面量、数字运算、布尔、固定字符串
-SAFE_EXPR = re.compile(
-    r'^[\'"`]|'          # 字符串字面量
-    r"^\d+$|"            # 纯数字
-    r"^(true|false|null|undefined)$|"
-    r"\.length$|"
-    r"^window\.siyuan\.languages\.[A-Za-z0-9_]+$|"  # 受控的 i18n 文案
-    r"^[A-Za-z_$][A-Za-z0-9_$.]*\s*\?\s*[\"']"      # 三元且分支为字面量
+# 每条规则是 (正则, 是否锚定在开头, 说明)。
+# 拆成规则表而不是一个巨大的 alternation：锚定语义不同（match 与 search）的正则
+# 混在一起时，只要其中一条能匹配空串，整条规则就会把所有表达式都判为安全。
+SAFE_EXPR_RULES = (
+    (re.compile(r"^[\'\"`]"), True, "字符串字面量"),
+    (re.compile(r"^\d"), True, "纯数字开头"),
+    (re.compile(r"^\+\+"), True, "自增（数值）"),
+    (re.compile(r"^(true|false|null|undefined)$"), True, "字面量"),
+    (re.compile(r"^-\d"), True, "负数"),
+    (re.compile(r"^window\.siyuan\.languages\."), True, "受控的 i18n 文案"),
+    (re.compile(r"^Constants\.[A-Za-z0-9_.]+$"), True, "仓库常量表"),
+    (re.compile(r"^[A-Z][A-Z0-9_]{3,}$"), True, "裸的大写下划线常量"),
+    (re.compile(r"^!\s*[\w.\[\]\"']+$"), True, "布尔取反"),
+    (re.compile(r"\.length$"), False, "取长度"),
+    (re.compile(r"\.toString\(\)$"), False, "数字转字符串"),
+    # 尾部的数值字段（可带一步算术）：`a.b.clientWidth + 16` 这类几何量不是注入面。
+    # SAFE_VAR_NAME 只能锚定开头，所以尾随形态必须单独成规则。
+    (re.compile(r"\.(clientWidth|clientHeight|offsetWidth|offsetHeight|scrollWidth|scrollHeight|"
+                r"scrollTop|scrollLeft|length|count|size|width|height|top|left)(\s*[-+*/]\s*\d+)?$"),
+     False, "数值字段（含一步算术）"),
+    # 三元且两侧分支都是字面量：分支里不可能含动态数据
+    (re.compile(r"\?\s*[\"'][^\"'\n]*[\"']\s*:\s*[\"'][^\"'\n]*[\"']"), False, "三元分支均为字面量"),
 )
 # 数值型变量名：插入到 style/data-* 中不构成 HTML 注入
 SAFE_VAR_NAME = re.compile(
     r"^(?:\+\+|--)?(?:index|i|j|n|k|count|num|size|length|width|height|"
     r"zIndex|top|left|right|bottom|opacity|delay|duration|offset|total|page|"
-    r"pageSize|max|min|level|depth|retry|attempts)\b",
+    r"pageSize|matchedAssetCount|refCount|rootRefCount|max|min|level|depth|retry|attempts|"
+    r"clientWidth|clientHeight|offsetWidth|offsetHeight|scrollTop|scrollLeft|"
+    r"defaultValue|spellcheck)\b",
+    re.IGNORECASE,
+)
+# 数值型变量名：插入到 style/data-* 中不构成 HTML 注入
+SAFE_VAR_NAME = re.compile(
+    r"^(?:\+\+|--)?(?:index|i|j|n|k|count|num|size|length|width|height|"
+    r"zIndex|top|left|right|bottom|opacity|delay|duration|offset|total|page|"
+    r"pageSize|matchedAssetCount|refCount|rootRefCount|max|min|level|depth|retry|attempts|"
+    r"clientWidth|clientHeight|offsetWidth|offsetHeight|scrollTop|scrollLeft|"
+    r"defaultValue|spellcheck)\b",
     re.IGNORECASE,
 )
 # 处于 style="..." 或 data-*="..." 属性内部
@@ -87,9 +117,12 @@ def looks_unsafe(expr, line):
     expr = split_expr(expr)
     if not expr:
         return False
-    if SAFE_EXPR.match(expr):
-        return False
-    if SAFE_VAR_NAME.match(expr):
+    # 前导 `(` 会让所有锚定规则失效，先剥掉再判（`(getIcon())` 与 `getIcon()` 同类）
+    bare = expr.lstrip("(").strip()
+    for pattern, anchored, _ in SAFE_EXPR_RULES:
+        if pattern.match(bare) if anchored else pattern.search(expr):
+            return False
+    if SAFE_VAR_NAME.match(bare):
         return False
     for wrapper in SAFE_WRAPPERS:
         if wrapper in expr:

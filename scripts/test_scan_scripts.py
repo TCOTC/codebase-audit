@@ -15,10 +15,15 @@
    默认 2 会产出约 4 倍噪声（实测 SiYuan 仓库：274 → 1060 条）。
 3. 给了目标仓库时做冒烟：两个脚本能扫到文件并给出结论，
    防止正则或遍历被改坏后静默返回空。
+4. `scan_unescaped_html` 的过滤规则不能过度放行：
+   这里既固定「应当被过滤」的形态，也固定「必须保持不安全」的形态。
+   后者更重要——规则写法退化（比如某条规则能匹配空串）会把全部候选判为安全，
+   而脚本仍然输得出看起来正常的报告。
 
 仅依赖标准库，无需第三方包。退出码 0 表示全部通过。
 """
 
+import importlib.util
 import io
 import os
 import re
@@ -53,6 +58,13 @@ def check(condition, label, detail=""):
         FAILURES.append(label)
 
 
+def load_html_scanner():
+    spec = importlib.util.spec_from_file_location("scan_unescaped_html", SCAN_HTML)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 print("[1] 根目录不存在时必须报错，而不是假成功")
 missing = os.path.join(HERE, "___no_such_dir___")
 for script, name in ((SCAN_DUP, "scan_duplicated_literals"),
@@ -85,7 +97,42 @@ if m:
     check(default >= 4, "默认值不低于 4（当前 %d）" % default)
 
 print()
-print("[3] 目标仓库冒烟：能扫到文件并给出结论")
+print("[3] 过滤规则：既不能漏报已知安全形态，也不能把不安全形态放行")
+scanner = load_html_scanner()
+SAFE_CASES = [
+    ("escapeHtml(userInput)", "项目约定的转义包装"),
+    ("escapeAriaLabel(window.siyuan.languages.reset)", "属性语境的转义包装"),
+    ("updateHotkeyTip(\"⌘Home\")", "固定串拼接的快捷键提示"),
+    ("Constants.ZWSP", "仓库常量表"),
+    ("ZWSP", "裸常量"),
+    ("1", "纯数字"),
+    ("++window.siyuan.zIndex", "自增计数"),
+    ("true", "布尔字面量"),
+    ("window.siyuan.languages.all", "受控 i18n 文案"),
+    ("!this.collapsed", "布尔取反"),
+    ("!this.protyle.disabled", "布尔取反（属性链）"),
+    ("this.selectIds.length", "取长度"),
+    ("this.pageCount.toString()", "数字转字符串"),
+    ('filter === item.value ? " b3-chip--current" : ""', "三元两侧都是字面量"),
+    ("hljsElement.firstElementChild.clientWidth + 16", "几何量参与运算"),
+]
+UNSAFE_CASES = [
+    ("html", "裸变量可能是拼好的 HTML"),
+    ("rowHTML", "拼好的表格行"),
+    ("item.label", "可能来自用户数据的字段"),
+    ("options.icon", "插件传入的值"),
+    ("response.data.pageCount || 1", "跨模块返回值，无类型保证"),
+    ("dayjs().format(\"YYYYMMDDHHmmss\")", "函数调用结果不可静态判定"),
+    ("window.siyuan.config.export.imageWatermarkStr", "用户自填字符串会进 innerHTML"),
+    ("getColIconByType(target.dataset.colType)", "由 dataset 驱动，值来自 DOM"),
+]
+for expr, why in SAFE_CASES:
+    check(not scanner.looks_unsafe(expr, ""), "放行：%s（%s）" % (expr[:40], why))
+for expr, why in UNSAFE_CASES:
+    check(scanner.looks_unsafe(expr, ""), "保留候选：%s（%s）" % (expr[:40], why))
+
+print()
+print("[4] 目标仓库冒烟：能扫到文件并给出结论")
 repo = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("AUDIT_TARGET_REPO", "")).strip()
 if not repo:
     print("  SKIP  未提供目标仓库（传入路径参数或设 AUDIT_TARGET_REPO 即可启用）")
