@@ -542,3 +542,37 @@
    `FindReplaceInBox` 内决定，前端字段只影响列表与计数。**断言数据层后果前先读服务端的取数实现。**
 5. **机械扫描的增量仍然为 0**：64 条重复字面量与 244 条未转义候选全部为噪声/已知项，
    本轮四条发现全部来自**定向语义核查**（判据 D1/D3）而非脚本产出——与第十一、十二轮结论一致。
+
+## 第十四轮（2026-09-13）：布局 / 宿主 / 历史 / AV 定位
+
+范围：`app/electron/`、`app/src/window/`、`app/src/layout/`、`app/src/history/`、`app/src/sync/`、
+`app/src/protyle/render/av/` 的虚拟滚动与定位。四个只读侦察子代理 + 主线逐条取证，五条主报告条目全部过两轮挑战门。
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1g / E2（新 P25） | `app/electron/boot.html:562` 与 `init.html`/`workspace.html` 共用的 `connectionEntry.js`，在 boot 窗口因 `createBootWindow`（`main.js:2368-2370`）缺 `nodeIntegration` 而抛 `ReferenceError`（Electron 44 下无 `require`）→ 远端内核模式下「连接远程内核」按钮永不渲染，取消/换服务器入口失效 | 高（挑战门两轮 CONFIRMED，严重度中） | 待提 issue |
+| D4（新 P23） | `app/src/layout/Wnd.ts:955` 已关闭页签栈裁剪端方向反了（消费端 `pop` 取最新，裁剪端也 `pop`），且裁剪在 `push` 之前 → 稳态长度 65，超过 64 条后每次关闭挤掉「上一次关闭」；⇧⌘T 第二次起跳序 | 高（挑战门两轮 CONFIRMED，第二轮由中降为低） | 待提 issue |
+| C（新 P26） | `app/src/protyle/render/av/locate.ts:368-370` 定位到折叠分组只改 DOM 不写状态，且 `finishAVLocate` 无条件清理请求 → 任意 AV 数据操作触发的重渲会把分组折回、目标行与光标一起消失 | 高（挑战门两轮 CONFIRMED，严重度中） | 待提 issue |
+| C / D1f | `app/src/layout/dock/index.ts:308` 同一表达式写两遍（第二个 `elements[0]` 应为 `elements[1]`）→ 下半组实现 `resize` 的插件停靠面板收不到通知、上半组被调用两次 | 高（挑战门两轮 CONFIRMED，严重度低，可顺手修） | 待提 issue |
+| C | `app/src/history/diff.ts:485-492`「交换对比方向」只重渲 header 与侧栏（`genHTML`），editors 子面板初始 `fn__none` 且不调 `renderCompare`，选中态也不回填 → 对比区空白、高亮丢失 | 高（挑战门两轮 CONFIRMED，第二轮由中降为低） | 待提 issue |
+
+### 方法论教训
+
+1. **挑战门第二轮连续纠正了三处严重度与因果**：`Wnd.ts` 的「每次关闭都丢一条」实为「超过 64 条后才丢」（受 `length > SIZE_UNDO` 守卫）；
+   `dock/index.ts` 的「每个停靠区有上下两组」与 DOM 不符（左右停靠区实为 3 个 `.dock__items`，第 3 个属底部栏）；
+   `history/diff.ts` 的「必须重新点文件」漏了方向键也能恢复（`keydown.ts:54` 合成 click）。
+   **症状描述错会直接影响修法与优先级**，第二轮不是形式。
+2. **「有意的临时态」与「缺少载体」要分开写**。P26 的候选最初写成「补写 `groupFolded` 与缓存即可修复」，
+   第二轮指出这是错的：该字段随 AV 持久化、跨端同步，写回等于替用户永久改偏好。修法描述错了比不写修法更糟。
+3. **不要把「调用两次」当成无害**。`dock/index.ts` 同时存在「漏一组」与「重复一组」，两者都要写出；
+   只写前者会让人以为修法是补一行而忽略重复调用的副作用。
+4. **新增机械可查的形态**：P24（同一行重复同一表达式）可用 grep 穷举，本轮首次把它形式化；
+   同族陷阱 `splice(indexOf(x), 1)` 在未命中时删末尾，需先证可达性。
+5. **已驳回/观察项**：`app/src/layout/getAll.ts:64-113` 的 `models.inbox` 恒为空数组（无消费者，已写入「已知误报」）；
+   `app/src/layout/dock/Inbox.ts:123/129` 的 `splice(indexOf(x), 1)` 在未命中时删末尾（渲染与数组同源，未证可达）；
+   `app/src/history/doc.ts:27-84` 的 `renderDoc` 无在途守卫与请求序号（同族 `renderRepo` 有 `data-loading`）；
+   `app/src/history/diff.ts:433-436` 对比用的 Protyle 从不 `destroy()`（同族 `docDiff.ts:163-169` 会销毁）；
+   `app/src/history/history.ts:834` 展开日期无在途标记，快速重复点击会插入两个 `<ul>`；
+   `app/src/protyle/render/av/virtualScroll.ts:252` 表格的 `galleryColumn` 被算成 2（性能面，非正确性）；
+   `app/src/protyle/render/av/select.ts:626` 批量替换分支的 `mSelect` 访问是族内唯一未加可选链处。
+
