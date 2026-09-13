@@ -209,7 +209,9 @@
   - `_kernel` 整数键的**占位符顺序**与 `%v` 无有效校验 → H 类契约缺口
   - 术语约束漂移（`zh-TW` 必须用「區塊」而非「塊」）→ D3
   - 设置项说明以句号结尾、用 Unicode 省略号 → 格式约束
-- **既有校验器**：`python scripts/check-lang-keys.py`；`python scripts/check-translations.py`
+  - **多语言文档的结构与标识符漂移**（`docs/` 下的 `X.md` / `X.<lang>.md`）→ A、D3
+- **既有校验器**：`python scripts/check-lang-keys.py`；`python scripts/check-translations.py`；
+  多语言一致性用 `scan_doc_parity.py`
 - **取证陷阱**：
   - 新键加在对象**顶部**；**例外**：`_kernel` 内部在**末尾**追加下一个递增整数键
   - 缩进用 **tab**（每层一个）
@@ -218,6 +220,13 @@
   - `check-translations.py` 用 `sorted()` 抹掉顺序、正则漏 `%v`、且不在 CI ——
     **它不能作为「占位符契约已被校验」的证明**（这是它自身的契约缺口）
   - 在默认 GBK 控制台运行会 `UnicodeEncodeError`，需 `PYTHONIOENCODING=utf-8`
+  - `docs/API*.md` **不是生成物**：`apigen` 只写 `app/src/types/api/index.d.ts`、
+    `kernel/apicontract/schema.json` 与 petal 的 `index.d.ts`——三语 API 文档是手写各自维护的，
+    所以版本间漂移不会被任何生成步骤发现。实测基线：10 组文档中 **5 组有真差异**
+  - 一致性的两类比对**缺一不可**：只看标识符会漏掉「少一整节」，只看标题数量则无法定位缺什么
+    （实测：三语端点集合一致都是 79 个，但 `API.ja.md` 的 `###` 少 1 个——少的是说明性章节）
+  - **交叉引用被本地化是正确行为**（中文版指向 `X.zh-CN.md`），一致性检查必须配对抵消，
+    否则 SY-FORMAT / TAB-BLOCK / WORKSPACE 三组会各报 1 条假差异
 
 ## L10 CI / 测试 / 发布
 

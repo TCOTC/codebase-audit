@@ -26,6 +26,9 @@
    没拿到变更文件、或证据库不存在时，空索引与「没有历史发现」在输出上无法区分，
    会让使用者以为这个文件历史上很干净。另：它在交互式终端下**不得阻塞等 stdin**
    （会看起来像卡死），且子进程必须显式关掉 stdin 继承。
+7. `scan_doc_parity`：目录不存在时不得输出「0 组」；且**交叉引用被本地化**
+   必须被抵消（中文版指向 `X.zh-CN.md` 是正确行为）。实测不加抵消规则时，
+   SY-FORMAT / TAB-BLOCK / WORKSPACE 三组会各报 1 条假差异。
 
 仅依赖标准库，无需第三方包。退出码 0 表示全部通过。
 """
@@ -45,6 +48,7 @@ SCAN_DUP = os.path.join(HERE, "scan_duplicated_literals.py")
 SCAN_HTML = os.path.join(HERE, "scan_unescaped_html.py")
 SCAN_DOM = os.path.join(HERE, "scan_dom_type_literals.py")
 SCAN_IDX = os.path.join(HERE, "scan_regression_index.py")
+SCAN_PARITY = os.path.join(HERE, "scan_doc_parity.py")
 EVIDENCE = os.path.join(SKILL_DIR, "references", "evidence.md")
 
 FAILURES = []
@@ -85,8 +89,9 @@ print("[1] 根目录不存在时必须报错，而不是假成功")
 missing = os.path.join(HERE, "___no_such_dir___")
 for script, name in ((SCAN_DUP, "scan_duplicated_literals"),
                      (SCAN_HTML, "scan_unescaped_html"),
-                     (SCAN_DOM, "scan_dom_type_literals")):
-    code, out, err = run(script, "--root", missing)
+                     (SCAN_DOM, "scan_dom_type_literals"),
+                     (SCAN_PARITY, "scan_doc_parity")):
+    code, out, err = run(script, "--root" if script != SCAN_PARITY else "--docs", missing)
     check(code != 0, "%s 退出码非 0（实际 %d）" % (name, code))
     check("no such directory" in err,
           "%s 在 stderr 说明原因" % name, repr(err[:120]))
@@ -154,7 +159,38 @@ for expr, why in UNSAFE_CASES:
     check(scanner.looks_unsafe(expr, ""), "保留候选：%s（%s）" % (expr[:40], why))
 
 print()
-print("[5] scan_regression_index：空输入与缺失证据库不得静默成功")
+print("[5] scan_doc_parity：目录缺失不得静默成功，且交叉引用本地化必须被抵消")
+code, out, err = run(SCAN_PARITY, "--docs", missing)
+check(code != 0, "目录不存在时退出码非 0（实际 %d）" % code)
+check("no such directory" in err, "在 stderr 带 no such directory 标记", repr(err[:120]))
+check("Traceback" not in err, "是主动报错而非崩溃", repr(err[:160]))
+check("0 组" not in out, "不输出「0 组」", repr(out[:120]))
+# 交叉引用抵消是承重规则：中文版指向 X.zh-CN.md 属正确行为
+sys.path.insert(0, HERE)
+spec = importlib.util.spec_from_file_location("scan_doc_parity", SCAN_PARITY)
+parity = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(parity)
+miss, extra = parity.cancel_localized_xrefs(
+    ["SY-FORMAT.md", "WORKSPACE.md"], ["SY-FORMAT.zh-CN.md"], "zh-CN")
+check(miss == ["WORKSPACE.md"] and extra == [],
+      "本地化交叉引用被配对抵消（仅剩真差异）",
+      "得到 miss=%s extra=%s" % (miss, extra))
+# 「语言匹配」这个条件要用**能区分两种行为**的数据，「A.md vs A.ja.md」测不出：
+# 它在「只抵消语言匹配的后缀」和「抵消任意 .md 后缀」两种逻辑下都不抵消。
+# 必须让 extra 同时含匹配与不匹配的后缀，才能验证不过度抵消。
+miss2, extra2 = parity.cancel_localized_xrefs(
+    ["A.md"], ["A.zh-CN.md", "A.ja.md"], "zh-CN")
+check(miss2 == [] and extra2 == ["A.ja.md"],
+      "只抵消语言匹配的那一个（不过度抵消）",
+      "得到 miss=%s extra=%s" % (miss2, extra2))
+# 语言后缀完全不匹配（en 基准 vs ja 版本）时不得抵消任何项
+miss3, extra3 = parity.cancel_localized_xrefs(["A.md"], ["A.zh-CN.md"], "ja")
+check(miss3 == ["A.md"] and extra3 == ["A.zh-CN.md"],
+      "基准语言与版本语言不符时不抵消",
+      "得到 miss=%s extra=%s" % (miss3, extra3))
+
+print()
+print("[6] scan_regression_index：空输入与缺失证据库不得静默成功")
 code, out, err = run(SCAN_IDX, "--evidence", missing)
 check(code != 0, "证据库不存在时退出码非 0（实际 %d）" % code)
 # 首行 ASCII 标记是四个脚本共用的契约（stderr 可能在任何控制台编码下被读）。
@@ -174,7 +210,7 @@ check(bool(m) and int(m.group(1)) > 0, "索引里的文件数 > 0（%s）"
        % (m.group(1) if m else "?"))
 
 print()
-print("[6] 目标仓库冒烟：能扫到文件并给出结论")
+print("[7] 目标仓库冒烟：能扫到文件并给出结论")
 repo = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("AUDIT_TARGET_REPO", "")).strip()
 if not repo:
     print("  SKIP  未提供目标仓库（传入路径参数或设 AUDIT_TARGET_REPO 即可启用）")
@@ -209,6 +245,20 @@ else:
                     "未把选择器片段当成契约值", "检查 VALUE_SHAPE 是否被放宽")
         else:
             print("  SKIP  %s 下无 app/src" % repo)
+        docs = os.path.join(repo, "docs")
+        if os.path.isdir(docs):
+            code, out, err = run(SCAN_PARITY, "--docs", docs)
+            m = re.search(r"文档组\s*:\s*(\d+)", out)
+            check(code == 0 and bool(m) and int(m.group(1)) > 0,
+                  "scan_doc_parity 找到多语言文档组（%s）"
+                  % (m.group(1) if m else "?"), repr(err[:120]))
+            if m:
+                # 回归：本地化交叉引用被误报时，会有「X.md 有而本版无」而没有配对的
+                # 「X.<lang>.md 本版有而基准无」——两者成对出现才算抵消成功。
+                check("一致" in out or "有差异的文档组" in out,
+                      "能给出结论行", repr(out[-160:]))
+        else:
+            print("  SKIP  %s 下无 docs" % repo)
 
 print()
 if FAILURES:

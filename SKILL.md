@@ -21,6 +21,7 @@ argument-hint: '[scope: package or directory] [focus: literals | drift | state |
 | 模式 | 做什么 | 是否改动文件 | 流程 |
 |---|---|---|---|
 | **审计**（默认） | 找缺陷，产出报告 | 否，只读 | 下方「执行流程」1–9 步 |
+| **差分审查** | 审一个 PR / commit / diff | 否，只读 | [差分审查模式](./references/diff-review.md) |
 | **修复** | 改代码修掉已确认的缺陷 | 是，**需用户明确授权** | 审计结论 → [修复手册](./references/repair-playbook.md) |
 | **架构调整** | 改结构，消除缺陷的复发条件 | 是，**需用户明确授权** | 满足「该改架构」判据后按修复手册第 4 节 |
 | **验证** | 复核既有发现的处理结果 | 否 | 「执行流程」第 1 步的验证模式 |
@@ -28,9 +29,13 @@ argument-hint: '[scope: package or directory] [focus: literals | drift | state |
 **审计结论不是修改授权**。用户只要求「看看有没有问题」时，做完审计就收口；
 进修复模式前必须由用户明确要求改代码。
 
+**差分审查与审计的唯一区别是范围**（diff vs 目录），判据与挑战门完全复用。
+它值得单列的理由：`evidence.md` 实测**58.5% 的 bug 提交只碰 1–2 个文件、中位数 31 行**，
+小 diff 才是主流场景，而它有一个审计模式看不到的产出——**「漏改」**（同一次改动里对称的一侧没改）。
+
 ## 全栈层面导航
 
-判据 A–I 按**推理形态**组织（怎么推理）；[全栈层面地图](./references/stack-map.md) 按**仓库层面**组织（去哪找）。
+判据 A–H 按**推理形态**组织（怎么推理）；[全栈层面地图](./references/stack-map.md) 按**仓库层面**组织（去哪找）。
 确定范围时先查层面地图取该层的权威源、既有校验器与取证陷阱，再回到本文判据清单取检查法。
 
 | 组 | 层面 | 主要判据 |
@@ -387,7 +392,18 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
    但同一 commit 的 CI 为 `failure`；后续又需两个提交（`TMPDIR` → 单测级 `TMPDIR`）才转 `success`。
    同理，维护者评论里的「本地全量测试通过」也不等于 CI 通过。验证轮应以**最后一个引用该 issue 的提交的 CI 结论**收口。
 2. **确认范围**。全仓库还是指定包？先问清楚，避免无边界扫描。
-3. **跑机械筛选**。执行 A、F 的脚本，产出候选清单。
+3. **跑机械筛选**。执行判据 A、F 的脚本，并按需扩展到其它层面：
+
+   | 脚本 | 目标 | 判据 |
+   |---|---|---|
+   | `scan_duplicated_literals.py` | 充当标识符的重复字面量 | A |
+   | `scan_unescaped_html.py` | 未转义的 HTML 插值 | F |
+   | `scan_dom_type_literals.py` | 前端 `data-type` 闭合集合（权威源是 Lute 的 NodeType） | A、D3 |
+   | `scan_doc_parity.py` | 多语言文档的结构与标识符一致性 | A、D3 |
+
+   多语言文档的一致性**不属于任何别的校验器**：实测 `apigen` 只生成
+   `app/src/types/api/index.d.ts`、`schema.json` 与 petal 的 `index.d.ts`，
+   `docs/API*.md` 是**手写、各自维护**的，因此版本间漂移不会被任何生成步骤发现。
 4. **并行语义判断**。对候选头部逐条判断；B/C/D/E 类用 subagent 并行核查，避免污染主上下文。
 5. **过挑战门**。对每条发现按 [挑战门](./references/challenge-gate.md) 做两轮对抗审查。
    两个方向都要防（噪声报成缺陷 / 真缺陷判成噪声）；**降级理由是一条技术断言时必须再验该断言**；
@@ -395,7 +411,8 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 6. **强制取证**。每条发现给出文件:行与复现方式；能写测试的写测试。
 7. **落回业务表现**。为每条发现写出「业务表现 / 预期表现 / 可验证不变量」三元组；预期表现的权威依据必须可引用。**触发条件不直观的，额外写出「普通操作看不到 + 什么输入才触发」的复现步骤。**
 8. **输出报告**。按下方「输出格式」，用普通文本与小标题，不要用代码块包裹发现。
-9. **写回判据库**。新判据进 [模式库](./references/patterns.md)，新误报进本文「已知误报」。
+9. **写回判据库**。新判据进 [模式库](./references/patterns.md)，新误报进
+   [已知误报](./references/known-false-positives.md)。
 
 **进入修复模式后接续**（1–9 步已完成，且用户已明确授权修改）：
 
@@ -507,16 +524,17 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 |---|---|---|
 | 每轮开始（去重） | [已知误报](./references/known-false-positives.md) | 过滤集：不要报告的类别 + 曾被误判为误报但实为真缺陷 |
 | 确定范围 / 定层 | [全栈层面地图](./references/stack-map.md) | L1–L10 的关键路径、权威源、高发形态→判据、仓库自带校验器、取证陷阱、跨层连带检查表 |
+| 审一个 PR / commit / diff | [差分审查模式](./references/diff-review.md) | 按 diff 定范围、三类必查（漏改 / 新引入 / 声明不符）、本模式特有误报 |
 | 过挑战门 | [挑战门](./references/challenge-gate.md) | 两轮对抗审查（审发现）+ 四问审查（审修法） |
 | 需要某条判据的细节 | [模式库](./references/patterns.md) | P1–P38 的定义、跨领域实例、检查法、修法陷阱 |
 | 修复 / 架构调整 / 验证 | [修复与架构调整手册](./references/repair-playbook.md) | 授权边界、爆炸半径、变体分析、修法阶梯、架构判据、验证闭环、高危改动清单、模板 R1 |
 | 写「既往记录」字段 | [实证数据](./references/evidence.md) | 历轮发现登记表（去重的第二来源）与量化结论 |
 | 修改本 skill | [维护规范](./references/contributing.md) · [更新记录](./references/changelog.md) | 追加与整理规范、版本管理、编辑坑；历次变更历史 |
 
-`scripts/` — 三个机械扫描脚本与两个自检：
+`scripts/` — **四个机械扫描脚本与两个自检**：
 `scan_duplicated_literals.py`（判据 A）、`scan_unescaped_html.py`（判据 F）、
-`scan_dom_type_literals.py`（前端 DOM 契约的闭合集合，服务判据 A/D3）、
-`scan_regression_index.py`（历轮发现的回归索引，服务修复验证）、
+`scan_dom_type_literals.py`（前端 DOM 契约闭合集合）、`scan_doc_parity.py`（多语言文档一致性）、
+`scan_regression_index.py`（历轮发现的回归索引，服务差分审查与修复验证）、
 `test_scan_scripts.py`（脚本行为与过滤规则）、`skill_self_check.py`（本文档库的 7 组结构检查）。
 
 ## 更新记录
