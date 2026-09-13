@@ -280,6 +280,56 @@
    本例 `NodeTabs` 是**故意不收**（上游 `CanContain(NodeTabs, …)` 只允许 IAL），
    所以「把上游两个成员都塞进白名单」是错的修法。
 
+### P15 跨契约边界的手写 DTO 漏项（静默丢字段）
+
+**对应判据**：D3c、A（单一真源缺失）、P4。
+
+**定义**：同一个「被认可的值集合」在运行时配置结构体、持久化 struct、API 契约（`apicontract`）struct
+与前端类型里各维护一份手写副本。新增成员时只更新了运行时配置与前端，**契约/持久化 DTO 未同步**；
+由于请求与响应用标准 `encoding/json` 解码（未启用 `DisallowUnknownFields`），未知字段被静默丢弃，
+用户数据在写路径上消失且不报错。若两侧 DTO 通过结构体指针强转互转（`(*B)(a)`），
+修复还受「必须逐字段同布局同顺序」的额外约束。
+
+**为何出现**：契约迁移（把处理器参数从 `map[string]any` 收窄为强类型 request struct）时，
+DTO 是照既有 model 结构体**抄一份**得到的。抄写发生在某一时点，此后运行时的集合继续演进，
+DTO 便成了「冻结的快照」。而 Go 的结构体转换要求底层类型完全相同，抄写双方被绑定为镜像，
+一侧加字段而另一侧没加时**编译期不报错**——只在字段缺失处静默丢数据。
+
+**实证案例（本仓库）**：保存的搜索条件丢失「页签 / 页签项」过滤器（详见 `evidence.md` 第八轮）。
+- 权威集合：`kernel/conf/search.go:46-47` 的 `conf.Search.Tabs`/`TabItem`；
+  `TypeFilter()`（`:261-266`）与 `kernel/model/search.go:2090-2091` 的 `buildTypeFilter` 都按
+  `types["tabs"]`/`types["tabItem"]` 读取。
+- 缺口两处：`kernel/model/storage.go:142` 的 `model.CriterionTypes`（18 字段）与
+  `kernel/apicontract/criterion.go:20` 的 `apicontract.CriterionTypes`（18 字段），均无 Tabs/TabItem。
+- 写路径：`app/src/search/menu.ts:347` `saveCriterionData` 把整个搜索 config（20 键，含 `tabs`/`tabItem`，
+  见 `app/src/search/getDefault.ts:18-19`）作为 `criterion` POST 到 `/api/storage/setCriterion`
+  → `kernel/api/storage.go:186` 绑定 `apicontract.SetCriterionRequest`
+  → `kernel/api/contract_storage.go:67` `criterionModel` 指针强转 → `:246` `setCriteria` 落盘。
+- 读路径：`criterionContracts`（`kernel/api/contract_storage.go:53`）同样表达不了这两个键；
+  前端 `app/src/search/menu.ts:700` 每次渲染面板都从 `/api/storage/getCriteria` 重建条件列表，
+  点击 chip 时 `app/src/search/config.ts:198` 用条件的 `types` **整体替换**当前 `config.types`
+  （`syncSearchConfig` 先删光所有键再 `Object.assign`），于是 `config.types.tabs` 变为 undefined，
+  筛选开关复位、`buildTypeFilter` 读成 false、`configIsSame` 永久为 false 使 chip 不高亮。
+- 实测：POST `setCriterion` 时 `types` 带 20 个键（`tabs:true, tabItem:true`），
+  随后 GET `getCriteria` 读回只剩 18 个键。
+- 时间线：`git log -S tabItem` → `5b8556e965`（2026-09-05，Support tabbed container blocks）改了
+  `kernel/conf/search.go`、`app/src/search/getDefault.ts`、`app/src/search/menu.ts`、
+  `app/src/types/config.d.ts`，**未**改 `kernel/model/storage.go` 与 `kernel/apicontract/criterion.go`。
+
+**本仓库候选位置**：`kernel/apicontract/*.go` 中从 `kernel/model` 抄来的 DTO（`Criterion`、`RecentDoc`、
+`BlockInfo`、`SearchSubTypes`…），尤其与前端 `app/src/types/config.d.ts` 存在同名键集合的那些。
+
+**检查法**：
+1. grep 同一 `json` 标签名（如 `"tabItem"`、`"callout"`）在仓内的全部出现，按
+   「运行时配置 / 持久化 struct / apicontract struct / 前端类型」分组，逐组 diff 成员。
+2. 确认请求与响应解码是否使用标准 `encoding/json` 且无 `DisallowUnknownFields`：
+   有则表现为报错（用户当场可见），无则表现为静默丢数据（危害更大）。
+3. 检查两侧 DTO 是否用指针强转互转（`(*A)(b)`）——存在则该字段必须在**等价位**插入，否则整体错位。
+4. 走一遍写后读往返，比较键集合是否守恒（`len(sent) == len(returned)`）——最省力的不变量。
+
+**与 P4 的区别**：P4 是集合本身漏成员（消费点仍在同一份数据内）；P15 是**集合的副本**漏成员，
+且副本位于序列化边界，因此缺陷表现为「数据在往返中消失」，而非「某次判定走错分支」。
+
 ## 如何扩充本库
 
 1. 从一次**已确认的缺陷**出发（而非猜测），确认它为何未被既有判据捕获。

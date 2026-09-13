@@ -237,6 +237,36 @@
 5. **一票否决的实测优势：拒绝型缺陷可以零副作用复现**。`append(parentID=页签项ID)` 预期失败，执行后工作区无任何写入，因此可以放心在真实实例上取证；相比之下「写入成功型」缺陷需要建临时文档并回删。**优先挑选零副作用的复现场景。**
 6. **MCP 工具可直接充当内核 API 的取证探针**，无需本机 HTTP：`mcp_siyuan_block` 的 `append/move/insert` 走的就是 `CheckContainerParent` 同一条路径，`get_children` 则是读路径对照。注意 `mcp_siyuan_sql` 只暴露主库，`blocktrees` 表不可查（`no such table: blocktrees`），页签项的 `type='tab'` 只能在 `blocks` 表验证，`blocktrees` 侧靠 `blocktree.go:837` 的写入代码佐证。
 
+### 第八轮（2026-09-13）
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D3c（新 P15）/ A / P4 | 搜索「保存条件」静默丢弃 `tabs`/`tabItem` 两个类型过滤开关：权威集合 `kernel/conf/search.go:46-47` 的 `conf.Search.Tabs`/`TabItem`（`TypeFilter()` 与 `kernel/model/search.go:2090-2091` 的 `buildTypeFilter` 都按这两个键读），但 `kernel/model/storage.go:142` 的 `model.CriterionTypes` 与 `kernel/apicontract/criterion.go:20` 的 `apicontract.CriterionTypes` 都只有 18 字段。前端 `app/src/search/menu.ts:347` 把 20 键的 `config.types` 整体 POST，经 `criterionModel` 指针强转落盘；读回时 `app/src/search/config.ts:198` 又用条件的 `types` 整体替换当前 config。实测 POST 20 键 → GET 18 键，`tabs`/`tabItem` 消失 | 高（本机运行实例实测；挑战门两轮 CONFIRMED） | 待提 issue |
+| 观察项（未过业务表现门槛） | `app/src/protyle/wysiwyg/index.ts:2172` 划选探测的容器类名表含 `callout` 但不含 `tabs`/`tab-item`，而同一调用链 `app/src/protyle/wysiwyg/getBlock.ts:235` 的块级判定含之；因 `elementFromPoint` 基本命中 `.tab-item-content` 内的段落，无法稳定构造输入 → 不上报 | 低 | 附录观察项 |
+| 观察项（未过业务表现门槛） | `app/src/protyle/wysiwyg/getBlock.ts:172` `getNoContainerElement` 的容器类名表缺 callout/tabs/tab-item，唯一调用点是面包屑兜底；容器块自身 ID 本就可查面包屑，倾向有意省略 | 低 | 附录观察项 |
+| A / F | 机械复扫：重复字面量 136 条（P1 100/P2 16/P3 20）、未转义插值 244 条；逐条核对仍为已知噪声 | — | 未命中 |
+| 子代理自验推翻 | `app/src/gutter/index.ts:1926-1978` 列表转换菜单的 `UL2TL`/`OL2TL` 疑似写反 → lute 中两个方法实现逐行相同（都只置 `ListData.Typ = 3`），调用结果等价，推翻；`app/src/protyle/toolbar/index.ts:1262` `indexOf("text")` 疑似 -1 误删末项 → 位于 `types.includes("text")` 的 else 分支且上行刚去重，必 ≥ 0，推翻 | — | 自行推翻 |
+
+### 第八轮的方法论教训
+
+1. **契约迁移把「漏项」从一致性缺陷升级为数据丢失**。同一处漏项在 P4 场景下只是某次判定走错分支，
+   一旦 DTO 位于序列化边界且解码用标准 `encoding/json`，就变成「用户显式配置在往返中静默消失」。
+   **扫描闭合集合时，把「是否跨序列化边界」作为严重度分级的首要因子。**
+2. **指针强转（`(*B)(a)`）是「镜像 DTO」的指纹**。见到它就能断定两侧 struct 必须逐字段同布局同顺序，
+   因此写修复建议时必须给出「在等价位插入」这一约束，否则修复本身会引入整体错位的数据损坏。
+3. **「写后读键集合守恒」是最省力的不变量**。`len(sent) == len(returned)` 不需要理解语义即可判定真假，
+   而且取证成本极低（两次 API 调用），比追完整条前端链路更快。**优先给每条发现找一个键数/计数级别的等式。**
+4. **`git log -S <key> -- <file>` 逐文件跑，能一眼看出「同一次改动改了谁、漏了谁」**。
+   本轮把这条命令对 6 个候选文件各跑一次，5 秒内定位到 `5b8556e965` 只改了 4 处、漏了 2 处，
+   比读 diff 更快。**时间线证据要落成「哪些文件命中、哪些没有」的清单。**
+5. **子代理本轮的最大价值是「找到那块没被看过的地」**。第四轮以来首次有子代理产出被正式采纳
+   （本轮 2 号子代理给出 3 条候选，主上下文采纳 1 条并实测）。要求其「必须给出权威依据与用户可见路径、
+   自我推翻要写明」之后，候选质量明显高于前几轮。**侦察范围要给「未被历史轮次覆盖」的排除清单。**
+6. **文档只描述 API 接受面的枚举，不构成「用户可见限制」**。挑战门第二轮的最强反论证是
+   `docs/API.md` 只列 18 个键，但同一对话框在 UI 上渲染了 20 个开关——**UI 的承诺强于文档的枚举**，
+   且丢失是单向的（写 20 读 18），本地缓存还会被同一次点击写坏。判定「有意设计」时要问：
+   这个「有意」是否解释了全部可观测后果？
+
 ## 如何更新本文
 
 每轮审计后追加：
