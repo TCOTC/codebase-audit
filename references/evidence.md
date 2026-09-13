@@ -414,6 +414,57 @@
 - 排序不受影响：`kernel/av/sort.go:452` 读同一个 `content`，乘 0.01 是单调变换
 - 无需数据迁移：`Rollup.Contents` 虽会写盘（`CloneStoredValue` 只剥离 `RenderedContent`，`kernel/av/render_template.go:25`），但每次渲染由 `BuildContents` 重算并置空（`kernel/av/value.go:2663`）
 
+## 第十七轮（2026-09-13）：已提 issue 的修复验证
+
+范围：本 skill 历轮产出的 **37 条 issue 全量核对**（#19397–#19465，含并行 B 线的 #19456–#19461）。
+方法固定为四步：**issue 状态 → 修复提交 → 代码现状 → 回归测试**。
+
+### 结论
+
+| 项 | 结果 |
+|---|---|
+| issue 状态 | 37/37 `closed`（#19432 在 `petal` 仓库修复，非本仓） |
+| 代码已改 | 37/37，位置与本轮报告一致 |
+| 新增/补测 | 21 处（含 1 条 i18n CI workflow） |
+| 受影响包完整测试 | `av` `sql` `server`(见下) `conf` `treenode` `apicontract` `mcp/tools` `api` `cli/cmd` `model` 全绿 |
+| 前端 | 本轮相关 105 条全绿；全量套件有 1 处无关失败（见下） |
+| **由修复引入的回归** | **0** |
+
+### 方法要点（新增，可复用）
+
+- **编号 → 提交的映射必须回读代码补齐**：`git log --format="%h|%ad|%s" -500 | Select-String "issues/194"` 只覆盖「提交信息带该编号」的情形。
+  #19429（保存条件丢页签过滤器）的修复藏在 `2b26d96ec6`（提交信息写的是 #19378）里，`git log --grep=19429 --all` 空手而归。
+  **只看提交信息会把已修的判成未修**，最终以代码现状为准。
+- **修复可能换思路，验证要落到显示链路末端**：#19435 维护者没按「比值 + percent」改量纲，而是保留 `content = ratio*100`
+  以维持筛选/模板/底部统计的既有语义，只把 `FormattedContent` 覆盖为 `formatNumber(ratio, NumberFormatPercent)`
+  （`kernel/av/value.go:3186-3192` 的 `newRollupCheckboxPercent`）。验证时必须回读消费端：
+  `app/src/protyle/render/av/cell.ts:1242` 与 `attributeValue.ts:131` 都取 `formattedContent || content`，
+  而筛选 `filter.ts:615` 读原始 `content` —— 两条路径各取到正确的那个字段，修复成立。
+- **修复常比最小改动更彻底**：`buildSearchRequest` 提取为单一真源并同时替换桌面与移动端两处复制（#19442）；
+  新建 `app/src/protyle/render/av/locateState.ts` 承载「临时展开态」（#19448）；
+  `scripts/check-lang-keys.py` 新增占位符维度校验并接入 `.github/workflows/i18n.yml`（#19430，直接补掉了本轮报告的「无有效校验 + 不在 CI」）。
+- **本轮预警的修法陷阱被全部规避**（可视为判据有效性的正反馈）：
+  #19448 未写回 `groupFolded`（改存 WeakMap + 交互事件清理）；#19439 用 `webdav.NewHTTPError(http.StatusNotFound, …)`
+  而非兄弟路径的普通 error（避免把幂等重试变 500）；#19464 改用 `[data-type="more"], [data-type="more-space"]` 选择器取代
+  `previousElementSibling`（避开移动端语义差异）；#19456 未复用按前缀判定的敏感目录黑名单、也未一律禁软链。
+
+### 本机环境差异（新误报，勿当回归）
+
+| 现象 | 真因 |
+|---|---|
+| `kernel/server` 的 `TestSecureAssetContentHeadersAllowsInlineSafeAssets` 在 Windows 上必失败：`safe asset [test.jpg] must stay inline, got Content-Disposition "attachment; filename=test.jpg"` | 本机注册表把 `.jpg` 注册为 `application/jpg`，`mime.TypeByExtension(".jpg")` 不返回 `image/jpeg`，`isAssetInlineUnsafe`（`kernel/server/serve.go:917`）按媒体类型前缀白名单判定为不安全。该测试与函数早于本轮修复 3 周（`d2085a754d` 2026-08-21），非回归。**跑内核测试前先试 `mime.TypeByExtension(".jpg")`**，不要据此报回归 |
+
+### 与本轮 issue 无关的既有失败（判据 G1 前端变体）
+
+`app/tests/mobileBacklinks.test.js` 在 `dev` 上失败：`unexpected module editor/assetOpen`。
+其 stub 白名单未覆盖 `app/src/layout/dock/BacklinkContent.ts` 新增的
+`import {normalizeAssetOpenConfig} from "../../editor/assetOpen"`（引入于 `6ed4866976`
+「Migrate settings API contracts #19378」，2026-09-13 23:05，非本 skill 产出的 issue）。
+
+→ **测试替身白名单与源码 import 图之间没有一致性断言**：新增 import 会让该测试静默脱靶，
+且因为断言发生在 `load()` 里，报错信息只说「unexpected module X」，不看 diff 很难归因。
+检查法：对用 stub 白名单驱动模块加载的测试，机械比对「白名单 ∪ 被测模块的传递依赖」与「实际 import 集合」。
+
 **复现夹具（用户工作区，非仓库内）**：文档 `/db test 2`，两个数据库分别演示「截断」（3 行勾 1 行 → 页脚 `33.33%` vs 汇总 `33`）与「归零」（103 行勾 1 行 → 页脚 `0.97%` vs 汇总 `0`），并把复选框列的页脚计算设为同一算子做同屏对照。
 
 **已提 issue #19435**（state=open；title 74/74、body 1549/1549 逐字符回读一致；labels 被静默丢弃，符合已知权限限制）
