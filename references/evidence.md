@@ -818,3 +818,50 @@
 5. **「无返回值 + WS-only 错误通道」是 CLI 的普遍盲区**：本轮一条发现串起了 `block delete`、`repo checkout`、
    `export *` 三类命令，说明按「CLI 子命令 → model 函数签名」的机械扫描（grep 是否有返回值）是高效入口。
 
+### 第十八轮（2026-09-14）：API 契约重构（#19378）遗留的类型与契约缺陷
+
+用户要求核查「端到端类型契约重构完成后是否还有实际问题」。范围是契约层本身：生成器、schema、路由覆盖、
+跨仓产物、声明与实现一致性、请求绑定语义。
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1n（新 P38）/ D1 / G2 | 加密笔记本主密码在 API 边界被新增 `api:"trim"`：`kernel/apicontract/notebook.go:92`/`:106`/`:107` 的 `Password`/`OldPassword`/`NewPassword`，经 `kernel/apicontract/decode.go:116-121` 实现为「`strings.TrimSpace` + trim 后非空」。主密码是 `deriveKEK`（`kernel/model/crypto.go:1220`）的直接输入，无任何规范化；既有 KEK 按未裁剪的密码派生 → 首尾含空格的用户升级后无法解锁，`changeMasterPassword` 同样失败。重构前 `util.BindJsonArg(..., true, true)` 的第 4 参数是 `rejectEmpty` 而非 trim，旧 `ParseJsonArg` 函数体内无裁剪 → 规范化由契约迁移引入。实测三处 `"   "` 均返回 `Field [...] must not be empty`。附带：同一标记让 `NotebookIDRequest.Notebook` 由「非法 ID」变为「被静默接受」 | 高（机制链逐环核实 + 实测确认 trim 生效；未做端到端加密复现，需高危写入故未执行） | 已提 issue #19477 |
+| — | 机械与实证核对为**无缺陷**的环节（同一批结论，供后续轮次跳过） | — | 排除，不报告 |
+| 无 | 未取得其他可判定发现 | — | — |
+
+#### 本轮判为干净的环节（附实测口径，后续轮次不必重做）
+
+1. **契约与真实响应一致**：把 `kernel/apicontract/schema.go` 的 `validate` 与 `schema_numbers.go` 的辅助函数
+   忠实移植到 Python（`decodeSchemaJSON` 需 `parse_float/parse_int=Decimal`，`equalSchemaValue` 需两边同为 Decimal，
+   否则类型敏感比较会误判），用 `contract_test.go` 的 16 组夹具自检 16/16 一致后，对运行中的内核探测 **145 次**
+   （98 个 `body=none` 端点 + 带真实块 ID 的 `NonNullable`/`api:"nonnullable"` 端点），**0 违约**。
+   必须抽样回读原始 payload 确认落在 `code=0` 分支——失败信封能轻松通过校验，会让「全部通过」失去意义。
+2. **声明与实际业务错误码一致**：613 个 `contractHandler` 绑定的 handler，实际返回码与 `ErrorCodes` 声明零不一致。
+   提取器必须同时支持函数字面量与**具名 handler**（`contractHandler(apicontract.X, xContract)`），
+   否则会误配到同文件后面某个无关函数体，既产生假阳性也掩盖真缺陷。另一处必须排除的假阳性是 `ret.Code = 0`
+   （成功路径赋值，不是错误码）。
+3. **生成器无偏差**：1061 个纯对象定义，属性名集合、`required` 与 TS `?` 的可选性、属性类型文本零不一致。
+4. **闭合集合完整**：`viewType` 恰等于 `av.LayoutType{Table,Gallery,Kanban}`；AV 筛选算子 17 + `""` 与 `filterenum` 一致；
+   `BlockTransaction` 的 9 项 `enum=` 恰等于 `/api/block/*` 事务端点实际产出的 action 集合
+   （`move` 只出现在 `moveBlock`，而它返回 `Null`，不进响应）。
+5. **未靠类型抑制压平报错**：重构窗口内 `app/src` 只新增 1 处 `as unknown as`，且位于测试替身。
+6. **跨仓产物同步**：petal `origin/main` 的 `types/api/index.d.ts` 与当前契约逐字节等价
+   （586648 字符 / 620 路由 / 1116 类型全等），生成器 `api:check --petal` 通过。
+
+#### 第十八轮的方法论教训
+
+1. **「有生成器 + 有 CI 门禁」不等于「已验证」**。本轮先按经验怀疑响应校验有盲区，实测后反而证明响应面很干净；
+   真正的缺口在**请求绑定语义**——它是唯一「转换用户输入」的环节，而门禁只比对声明集合与产物一致性，
+   不比对「解码后的值是否等于用户提交的值」。**审计适配层要问「这个转换有没有改变值」，而不只是「类型对不对」。**
+2. **同一语义在旧代码里的载体常常是布尔参数名**。`BindJsonArg(..., true, true)` 的两个尾参无法从调用点看出语义，
+   必须回读函数定义；而新契约把它写成具名标记后，作者容易把两个语义合并，且**旧参数名会误导判断方向**
+   （`rejectEmpty` 不含 trim，但新标记 `trim` 含非空拒绝）。
+3. **本地跨仓引用会伪装成漂移**。首轮比对 petal 生成物「缺 370 KB」，实为本地 `origin/main` 落后 97 个提交；
+   `git fetch` 后差距归零。**跨仓核对前必须先 fetch**，否则会把「本地引用过期」报成跨仓不同步。
+4. **提取器缺陷会同时制造假阳性与假阴性**。误报 `/api/network/echo` 有 9 个未声明错误码，根因是提取器只认函数字面量；
+   同一缺陷还会让真正的具名 handler 完全不被检查。「差集很大」或「结果异常干净」时都要先怀疑提取器。
+5. **零副作用的密码学路径取证**：用**全空格密码**探测，输入校验在进入模型层之前就返回，
+   不接触任何密钥材料、不触发 Argon2id、不产生写入。这类「预期失败」的输入是加密相关代码最安全的探针。
+6. **第三方 Python 校验器不可用时，移植 + 自检是可行路线**。本机无 `jsonschema`，但**不能**直接 `pip install`
+   （仓库校验器是自定义子集：类型敏感的 `equalSchemaValue`、`minItems`/`maxItems` 与 `anyOf` 语义都与 JSON Schema 有差异），
+   移植后用 Go 侧原有夹具自检，比引入一个语义不同的库更可靠。

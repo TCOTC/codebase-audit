@@ -1049,3 +1049,36 @@ gzip.Gzip(gzip.DefaultCompression,
 4. 修法注意跨包依赖方向——转义 helper 若在 `kernel/sql`，而拼接点在 `kernel/conf`，需避免循环依赖
    （上提至 `kernel/util` 或就地实现等价函数）。
 
+### P38 适配层规范化标记改变了密钥派生等安全敏感的既有输入
+
+**对应判据**：D1n、G2、D1
+
+**定义**：接口适配层为某字段引入了规范化（去空白 / 大小写折叠 / 类型转换），而该字段同时是**密钥派生、摘要、
+签名或已落盘等值匹配**的输入。既有数据是按规范化之前的输入生成的，升级后同一个人用同一个密码会派生出不同结果，
+表现为**访问既有数据失败**，而不是「输入校验变严格」。
+
+**为何出现**：适配层重构（尤其是把 `map[string]any` 手取改为结构体标签绑定）时，作者会把「非空校验」升级成
+「规范化 + 非空校验」，因为两者在旧代码里常挤在同一个布尔参数里。新标记名只描述了新增的一半语义，
+另一半（去空白）成为**无人声明的副作用**。
+
+**实证案例（本仓库）**：`kernel/apicontract/notebook.go:92`、`:106`、`:107` 给 `password` / `oldPassword` /
+`newPassword` 打 `api:"trim"`，而 `kernel/apicontract/decode.go:116-121` 把它实现为「`strings.TrimSpace` +
+trim 后为空则报错」。主密码直接作为 `deriveKEK(password)`（`kernel/model/crypto.go:1220`）的输入，加密链路无任何规范化。
+重构前 `util.BindJsonArg("password", &password, true, true)` 的第 4 参数是 `rejectEmpty`，旧 `ParseJsonArg`
+函数体内无裁剪。实测 `{"password":"   "}` 返回 `Field [password] must not be empty`，旧实现下会通过 `rejectEmpty`
+继续进入业务层。同族不一致：`ImportNotebookCryptoBackupRequest.Password`（`:55`）没有该标记；
+前端 `app/src/config/tabs/accessTab.ts:803` 又自行 `value.trim()`。
+
+**检查法**：
+
+1. grep 绑定层的规范化标记与校验参数名，列出全部命中字段
+2. 逐字段判定消费端：是否做密码学派生 / 摘要 / 签名 / 持久化等值匹配（是则高危）
+3. 做**新旧实现对比**：读重构前的解析函数，确认规范化是新引入还是原有
+4. 看同族字段的标记是否一致（不齐说明标记是逐个手加的）
+5. 方向定性：宽进（无害）还是收窄（破坏既有数据）
+
+**修法陷阱**：
+
+- 合并语义的标记不能直接删除，否则附带校验（非空拒绝）一起丢失，须先拆成两个独立语义
+- 不要用迁移后写的维护文档证明「这是保留行为」——迁移会把新引入的行为追认进文档，
+  措辞常写「保留」而实际历史相反
