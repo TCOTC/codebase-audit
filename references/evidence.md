@@ -443,7 +443,7 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D1d（新 P19） | `kernel/model/carddav.go:398`（`LoadAndDelete` 无 `else`）→ `:411` `os.RemoveAll(addressBook.DirectoryPath)`；`kernel/model/caldav.go:331` → `:344` 逐字同构。同族的 `DeleteAddress`/`GetAddressBook`/`DeleteObject`/`GetCalendar` 都有 not-found 分支且常量已存在；上游 `go-webdav@v0.7.0` 按**路径深度**分派、无存在性预检；panic 被 `model.Recover` 吞掉后 `net/http` 补 **200** | 高（实测复现 + 栈帧逐帧核对，`caldav.go` 那条为静态可证） | 挑战门两轮 CONFIRMED，第二轮 DOWNGRADED 至低严重度；待提 issue |
+| D1d（新 P19） | `kernel/model/carddav.go:398`（`LoadAndDelete` 无 `else`）→ `:411` `os.RemoveAll(addressBook.DirectoryPath)`；`kernel/model/caldav.go:331` → `:344` 逐字同构。同族的 `DeleteAddress`/`GetAddressBook`/`DeleteObject`/`GetCalendar` 都有 not-found 分支且常量已存在；上游 `go-webdav@v0.7.0` 按**路径深度**分派、无存在性预检；panic 被 `model.Recover` 吞掉后 `net/http` 补 **200** | 高（实测复现 + 栈帧逐帧核对，`caldav.go` 那条为静态可证） | 挑战门两轮 CONFIRMED，第二轮 DOWNGRADED 至低严重度；已提 issue #19439 |
 | A / F | 机械复扫：重复字面量 **166** 条（P1 130 / P2 16 / P3 20，文件数 1360）、未转义插值沿用历轮阈值；逐条核对仍为已知噪声（`assets/`、`/stage/loading-pure.svg`、受 `app/src/types/api/index.d.ts` 联合类型约束的 `/api/` 路由、CSS 选择器、`conf.json`、`0.38`、`INPUT`/`SPAN` 等 DOM 名） | — | 未命中 |
 | 候选（未取证） | `kernel/model/flashcard.go:815-828`：`custom-riff-new-card-limit` 解析失败时 `strconv.Atoi` 把 **0** 写进 `newCardLimit`，而 0 在 `getDeckDueCards` 里是最严格值 → 该文档复习时新卡全部消失，只有一行 `invalid ... limit` 日志；同仓其它非法配置一律回落默认 | 中高 | 附录观察项 |
 | 候选（未取证） | `kernel/model/flashcard.go:560-570`：卡片管理排序比较器混用 Due 与 ID 两把键，不满足严格弱序，入参来自 map 遍历（每次顺序随机）→ 混合新卡/旧卡时分页可能重复或漏卡 | 中 | 附录观察项 |
