@@ -5,9 +5,15 @@
 一旦出现多份，就失去了单一真源，修改时容易漏改其中一处。
 
 用法：
-    python scan_duplicated_literals.py --root kernel --root app/src --min-files 2
+    python scan_duplicated_literals.py --root kernel --root app/src --min-files 4
 
 输出：默认写入 stdout，可用 --out 指定文件。输出为 ASCII，避免终端编码问题。
+
+`--min-files` 默认 4。实测（SiYuan 仓库，1434 个文件）：4 产出 274 条候选，
+2 产出 1060 条（约 3.9 倍），多出来的几乎都是「几次出现的偶然重复」。
+
+扫描根不存在时以退出码 2 报错，不输出「0 个文件 / 0 条发现」——零发现与没扫到
+文件在输出上无法区分，会让调用方把「没扫」当成「没问题」。
 """
 
 import argparse
@@ -66,6 +72,24 @@ def iter_source_files(roots):
                 if file_name.endswith(EXCLUDE_FILE_SUFFIXES):
                     continue
                 yield os.path.join(dir_path, file_name)
+
+
+def check_roots(roots):
+    """扫描根不存在时报错退出，不返回「0 个文件 / 0 条发现」的假成功。
+
+    零发现与「根本没扫到文件」在输出上无法区分，调用方会把前者当成「无此问题」。
+    """
+    missing = [r for r in roots if not os.path.isdir(r)]
+    if missing and len(missing) == len(roots):
+        sys.stderr.write(
+            "error: no such directory: %s\n"
+            "hint: pass --root explicitly; the built-in default is kernel + app/src\n"
+            % ", ".join(missing)
+        )
+        return False
+    for r in missing:
+        sys.stderr.write("warning: skipping missing root: %s\n" % r)
+    return True
 
 
 def is_identifier_like(value):
@@ -196,8 +220,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", action="append", dest="roots", default=[],
                         help="扫描根目录，可重复指定")
-    parser.add_argument("--min-files", type=int, default=2,
-                        help="至少出现在多少个不同文件中（默认 2）")
+    parser.add_argument("--min-files", type=int, default=4,
+                        help="至少出现在多少个不同文件中（默认 4；降到 2 会引入约 4 倍噪声）")
     parser.add_argument("--min-count", type=int, default=2,
                         help="最少总出现次数（默认 2）")
     parser.add_argument("--top", type=int, default=0,
@@ -207,6 +231,8 @@ def main():
     args = parser.parse_args()
 
     roots = args.roots or ["kernel", "app/src"]
+    if not check_roots(roots):
+        return 2
     findings, scanned = scan(roots, args.min_files, args.min_count)
     if args.top > 0:
         findings = findings[:args.top]
@@ -254,7 +280,8 @@ def main():
         print("written: %s" % args.out)
     else:
         sys.stdout.write(output)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

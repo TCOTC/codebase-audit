@@ -10,6 +10,10 @@ history dialogs"）与 f811001983（"Escape dynamic names in confirmation dialog
     python scan_unescaped_html.py --root app/src --out result.txt
 
 输出为 ASCII，避免终端编码问题。
+
+`--root` 不存在时以退出码 2 报错，不输出「0 个文件 / 0 条候选」——零候选与没扫到
+文件在输出上无法区分，会让调用方把「没扫」当成「没问题」。默认值 `app/src` 是
+SiYuan 的布局，用于其他仓库时必须显式传 `--root`。
 """
 
 import argparse
@@ -157,6 +161,15 @@ def main():
     parser.add_argument("--out", default="", help="输出文件")
     args = parser.parse_args()
 
+    if not os.path.isdir(args.root):
+        sys.stderr.write(
+            "error: no such directory: %s\n"
+            "hint: pass --root explicitly; the built-in default app/src is the\n"
+            "      SiYuan layout and will not exist in another repository\n"
+            % args.root
+        )
+        return 2
+
     total = 0
     all_findings = []
     for path in iter_files(args.root):
@@ -195,7 +208,8 @@ def main():
         print("written: %s" % args.out)
     else:
         sys.stdout.write(output)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
