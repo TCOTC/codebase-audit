@@ -499,10 +499,10 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D1e / C（新 P20） | `app/src/protyle/render/av/kanban/render.ts:128` 读 `searchInputElement?.value`（该元素是 `genTabHeaderHTML` 生成的 `contenteditable` div，无 `value`），同族九处读 `textContent` → 看板视图搜索恒不过滤；全量重渲时 `showSearch` 为假 → 搜索框被折叠清空 | 高（代码可证；挑战门两轮 CONFIRMED，严重度中） | 待提 issue |
-| A / D3（新 P21） | `app/src/config/entryVisibility/catalog.ts` 与实际菜单声明 4 处不一致：漏 `transposeTable`/`cancelMerged`/`copyMirror`/`inline.image.openBy`；`inline.text.more` 与 `gutter.multi.copy` 含永不出现的幽灵键。违反 `AGENTS.md` 第 9 条 | 高（挑战门两轮 CONFIRMED，严重度低） | 待提 issue |
-| B / D1（新 P22） | `app/src/mobile/menu/search.ts:319-330` 的 `searchParam` 缺 `searchHPath: !hasReplace`（桌面 `search/util.ts:1520` 有；内核默认 true；同一提交 `fa44649fa7` 把 `FindReplaceInBox` 改为 `false`，两者本是一对）→ 移动端替换模式列表多出仅命中 HPath 的行 | 高（挑战门两轮 CONFIRMED，严重度由「数据差异」DOWNGRADED 为低） | 待提 issue |
-| D1 | `app/src/mobile/util/setEmpty.ts:42` 只读判据方向反了（`getOpenNotebookCount() > 0 \|\| !readonly`）→ 发布/读者角色在移动端空页看到「新建文档」，点击必然 403（提示未本地化 "Forbidden"）；同屏另 3 项、移动端菜单、桌面端共 5 处均隐藏 | 高（挑战门两轮 CONFIRMED，严重度低） | 待提 issue |
+| D1e / C（新 P20） | `app/src/protyle/render/av/kanban/render.ts:128` 读 `searchInputElement?.value`（该元素是 `genTabHeaderHTML` 生成的 `contenteditable` div，无 `value`），同族九处读 `textContent` → 看板视图搜索恒不过滤；全量重渲时 `showSearch` 为假 → 搜索框被折叠清空 | 高（代码可证；挑战门两轮 CONFIRMED，严重度中） | 已提 issue #19440 |
+| A / D3（新 P21） | `app/src/config/entryVisibility/catalog.ts` 与实际菜单声明 4 处不一致：漏 `transposeTable`/`cancelMerged`/`copyMirror`/`inline.image.openBy`；`inline.text.more` 与 `gutter.multi.copy` 含永不出现的幽灵键。违反 `AGENTS.md` 第 9 条 | 高（挑战门两轮 CONFIRMED，严重度低） | 已提 issue #19441 |
+| B / D1（新 P22） | `app/src/mobile/menu/search.ts:319-330` 的 `searchParam` 缺 `searchHPath: !hasReplace`（桌面 `search/util.ts:1520` 有；内核默认 true；同一提交 `fa44649fa7` 把 `FindReplaceInBox` 改为 `false`，两者本是一对）→ 移动端替换模式列表多出仅命中 HPath 的行 | 高（挑战门两轮 CONFIRMED，严重度由「数据差异」DOWNGRADED 为低） | 已提 issue #19442 |
+| D1 | `app/src/mobile/util/setEmpty.ts:42` 只读判据方向反了（`getOpenNotebookCount() > 0 \|\| !readonly`）→ 发布/读者角色在移动端空页看到「新建文档」，点击必然 403（提示未本地化 "Forbidden"）；同屏另 3 项、移动端菜单、桌面端共 5 处均隐藏 | 高（挑战门两轮 CONFIRMED，严重度低） | 已提 issue #19443 |
 
 ### 已审查并驳回
 
