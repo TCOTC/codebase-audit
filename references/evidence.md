@@ -500,6 +500,50 @@
 
 **取证工具**：`%TEMP%\audit-r18\`（Go 探针 + Python 脚本），事后已删除；本轮未在仓库内留任何文件。
 
+### 收官复核（2026-09-14），四条的最终归宿
+
+| issue | 状态 | 修复提交 | 说明 |
+|---|---|---|---|
+| #19472 | **open**（CI 已通过，维护者未关闭） | `a846821ec2` + `8f0071886c` + `22a727db07` | CI 从白名单改为 `go test -tags "fts5 sqlcipher" ./... -count=1` + `pnpm test`；文档同步 |
+| #19473 | closed | `d32b6592f6` | `"test"` 加 `--test-concurrency=4` 与四个 glob，排除 `app/build` |
+| #19474 | closed | `dc55a0635a` | 补齐替身与响应字段、更新断言、消除 CRLF 敏感匹配 |
+| #19475 | closed | `2d0561daf5` | 新增固定映射 `assetInlineMediaType`，并在 `secureAssetContentHeaders` 里显式写死 `Content-Type` |
+
+**本地复验（Windows，`8f0071886c`）**：`pnpm test` = `tests 2418 / pass 2412 / fail 0 / skipped 6`（改前 2474/13）；
+`go test -tags "fts5 sqlcipher" ./...` 26 个包全部 `ok`。两端均全绿。
+
+**#19475 的修法与报告建议一致且更完整**：除了判断本身，还顺带把允许内联资产的 `Content-Type` 固定下来
+（`context.Header("Content-Type", mediaType)`），理由是宿主 MIME 同样会影响预览行为——这比我报告里只写
+「替换判定的输入」更彻底；`.svg`/`.html`/`.js` 依旧不在映射表内即强制下载，安全公告的约束保持不变。
+
+#### 教训：CI 覆盖补全后必然以「三连提交」暴雷
+
+`a846821ec2`（把 CI 改为全量）→ **failure**，且失败原因与我的 issue 描述**不同**，是新增暴露的**测试环境前提冲突**：
+
+- `contracts` 失败 1（Linux）：`kernel/model` 的 `import_obsidian_test.go:92`
+  `Obsidian Vault path is unsafe: selected Vault path is sensitive`；
+  同因还挂了 `kernel/server` 的 `TestRegisterStaticFileHandlers`/`TestWidgetResponseCacheControl`/
+  `TestTemplatesAndExportRequireAdministrator`/`TestSnippetPublishAccess`/`TestPluginPublishAccess`。
+  根因：这些夹具建在 `t.TempDir()`，而 GitHub Linux runner 的 `TMPDIR` 默认是 `/tmp`，
+  `kernel/util/path.go` 的 `isSensitivePath` 系统前缀黑名单含 `/tmp` 与 `/var`。
+- `frontend-tests` 失败 1（Windows）：`Error: spawn EBUSY`（Electron 并发启动争用）。
+
+于是 `8f0071886c` 两处修：CI 加 `TMPDIR: ${{ runner.temp }}`、并发降到 1。
+但**又把前提推过头**：`TestIsSensitivePathSymlinkWorkspace` 的末句断言
+（`isSensitivePath(realWorkspace+"-outside/public.txt")` 必须为 `true`）**依赖夹具落在黑名单前缀下**，
+`TMPDIR` 变到 runner 目录后就不再成立 → 该 commit 的 CI 仍 `failure`（`kernel/util`）。
+`22a727db07` 再给这一个测试 `t.Setenv("TMPDIR", "/var/tmp")`，CI 才 `success`。
+
+**可复用判据（已并入 G4）**：同一套夹具里存在**互相矛盾的环境前提**——一组要求临时根目录命中系统路径黑名单、
+另一组要求不命中。检查法：grep 夹具的 `TempDir`/`MkdirTmp` 与环境变量，再 grep 路径黑名单常量，
+找出「断言真值依赖二者前缀关系」的测试。可靠修法是构造显式路径（工作空间内、或直接指向黑名单目录），
+而不是依赖环境的临时根。
+
+**并记一条验证纪律**：`a846821ec2` 的提交信息写着「Run all kernel and frontend tests in CI」，
+看起来一次性修好了，但该 commit 的 CI 实际是 `failure`；**判定 `fixed` 必须用
+`gh run list --json conclusion` → `gh run view <id> --json jobs` 看真实结论**，
+维护者评论里的「本地全量测试通过」同理不能等同 CI 通过。
+
 #### 第十一轮的方法论教训
 
 1. **「同一算子的多条实现路径」是 P11/P12 之外的新入口，比跨仓比对省力**。本轮无需跨语言、跨包，
