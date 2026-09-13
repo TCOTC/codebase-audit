@@ -49,6 +49,47 @@ CONSTRAINED_SIGNALS = (
     ("ellipsis", "单行省略号截断"),
     ("text-ellipsis", "单行省略号截断"),
 )
+
+# 从 SCSS 反推「受约束类名」——**这是原版的盲区**：
+# 真实约束写在样式文件里（实测 SiYuan 的 `app/src/assets/scss/`：
+# `white-space: nowrap` 70 处、`text-overflow: ellipsis` 39 处、固定宽度 340 处），
+# 而原版只在 TS 的同一行找这些关键字，于是**系统性低估候选**。
+# 正确做法：先从样式里提取「哪个类被约束成不换行」，再在 TS 的使用点按类名匹配。
+SCSS_IGNORE_DIRS = {"node_modules", "dist", "build", "stage", ".git"}
+CLASS_RULE = re.compile(r"\.([A-Za-z_][\w-]*)")
+CONSTRAIN_DECL = re.compile(
+    r"white-space\s*:\s*nowrap|text-overflow\s*:\s*ellipsis|"
+    r"(?<!max-)(?<!min-)width\s*:\s*\d+(?:\.\d+)?(?:px|rem|em)\b|"
+    r"overflow\s*:\s*hidden")
+OVERFLOW_FREE = re.compile(r"white-space\s*:\s*(?:normal|pre-wrap|break-spaces)")
+
+
+def scan_styles(styles_roots):
+    """从 SCSS/CSS 提取「被约束成不换行或宽度固定」的类名集合。"""
+    constrained = set()
+    for root in styles_roots:
+        if not os.path.isdir(root):
+            continue
+        for dir_path, dir_names, file_names in os.walk(root):
+            dir_names[:] = [d for d in dir_names
+                            if d not in SCSS_IGNORE_DIRS and not d.startswith(".")]
+            for name in file_names:
+                if not name.endswith((".scss", ".css")):
+                    continue
+                path = os.path.join(dir_path, name)
+                text = io.open(path, encoding="utf-8", errors="replace").read()
+                # 以 `{` 分块，粗粒度地把声明与选择器配对
+                chunks = re.split(r"([^{}]*)\{", text)
+                for i in range(1, len(chunks), 2):
+                    sel = chunks[i].split("\n")[-1] if chunks[i] else ""
+                    body = chunks[i + 1] if i + 1 < len(chunks) else ""
+                    if not CONSTRAIN_DECL.search(body):
+                        continue
+                    if OVERFLOW_FREE.search(body):
+                        continue
+                    for cls in CLASS_RULE.findall(sel):
+                        constrained.add(cls)
+    return constrained
 # 显式像素/rem 宽度（同行的 style 或 CSS 声明）
 EXPLICIT_WIDTH = re.compile(r"(?:width|min-width|max-width)\s*:\s*\d+(?:\.\d+)?(?:px|rem|em)")
 # i18n 取值：`languages.xxx` 或 `languages["xxx"]`
@@ -69,8 +110,13 @@ def iter_sources(roots):
                     yield os.path.join(dir_path, name)
 
 
-def scan_usage(roots):
-    """返回 key -> [(相对路径, 行号, 约束说明或 None, 行内容)]。"""
+def scan_usage(roots, constrained_classes=None):
+    """返回 key -> [(相对路径, 行号, 约束说明或 None, 行内容)]。
+
+    `constrained_classes` 来自 `--styles`：TS 行里含这些类名即视为受约束容器。
+    不做这道关联就只能看到内联样式，而真实约束在样式文件里。
+    """
+    constrained_classes = constrained_classes or set()
     usage = {}
     for path in iter_sources(roots):
         try:
@@ -87,6 +133,11 @@ def scan_usage(roots):
                         break
                 if reason is None and EXPLICIT_WIDTH.search(line):
                     reason = "同行声明了固定宽度"
+                if reason is None and constrained_classes:
+                    for cls in CLASS_RULE.findall(line):
+                        if cls in constrained_classes:
+                            reason = "类 `%s` 在样式中被约束" % cls
+                            break
                 usage.setdefault(key, []).append((path, no, reason, line.strip()[:120]))
     return usage
 
@@ -134,6 +185,10 @@ def main():
     parser.add_argument("--source", action="append", default=None,
                         help="源码根目录（如 app/src），用于交叉核对使用点是否受约束；"
                              "**强烈建议提供**——不给则无法区分「受约束」与「可换行」")
+    parser.add_argument("--styles", action="append", default=None,
+                        help="样式根目录（如 app/src/assets/scss）。**建议提供**："
+                             "约束常写在样式文件里（nowrap/ellipsis/固定宽度），"
+                             "只给 --source 会系统性低估候选")
     args = parser.parse_args()
 
     if not os.path.isdir(args.langs):
@@ -166,11 +221,13 @@ def main():
 
     usage = None
     if args.source:
-        missing_src = [r for r in args.source if not os.path.isdir(r)]
+        missing_src = [r for r in args.source + (args.styles or [])
+                       if not os.path.isdir(r)]
         if missing_src:
             sys.stderr.write("no such directory: %s\n" % ", ".join(missing_src))
             return 2
-        usage = scan_usage(args.source)
+        constrained = scan_styles(args.styles) if args.styles else set()
+        usage = scan_usage(args.source, constrained)
 
     out = []
     out.append("i18n 文本膨胀候选（判据 I4：受约束容器）")
@@ -179,6 +236,11 @@ def main():
     out.append("基准          : %s（%d 个键）" % (args.base, len(base)))
     out.append("源码交叉核对  : %s" % (", ".join(args.source) if args.source
                                         else "未提供（不区分受约束与可换行）"))
+    out.append("样式交叉核对  : %s" % (", ".join(args.styles) if args.styles
+                                        else "未提供（会漏掉写在样式里的约束）"))
+    if args.styles:
+        out.append("                （从 %s 提取到 %d 个受约束类名）"
+                   % (os.path.basename(args.styles[0]), len(constrained)))
     out.append("候选判据      : 英文长度 %d-%d 且长度比 >= %.1f"
                % (args.min_base_len, args.short_len, args.min_ratio))
     out.append("")

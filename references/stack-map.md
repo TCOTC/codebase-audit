@@ -259,7 +259,12 @@
 
 - **关键路径**：`app/src/protyle/**`（编辑器交互）、`app/src/layout/dock/**`（面板与页签）、
   `app/src/dialog/**`、`app/src/menus/**`、`app/src/mobile/**`（键盘与触摸）、
-  `app/appearance/langs/*.json`
+  **`app/src/assets/scss/**`（应用样式，56 个文件）**、`app/appearance/langs/*.json`
+
+  > **样式位置是个容易找错的地方**：`app/appearance/themes/` 下只有两个 ~10KB 的
+  > 颜色变量文件（`daylight` / `midnight` 的 `theme.css`），**不是应用主样式**。
+  > 真正的主样式在 `app/src/assets/scss/`（sass-loader + MiniCssExtractPlugin 编译）。
+  > 只扫 `appearance` 会得出「本仓没有焦点相关 CSS」的错误结论。
 - **权威源**：
   - **同族互查**——多个列表视图 / 多个面板 / 多个对话框之间的行为应当一致；
     「某一处有、另一些没有」即候选（这是判据 D1 在本层的应用）
@@ -269,12 +274,17 @@
 - **高发形态**：
   - UI 状态矩阵（空 / 加载 / 错误 / 只读 / 超长）在兄弟实现之间覆盖不一致 → I1、D3
   - **交互态残留**：异常路径提前返回，`loading` / `disabled` / 遮罩 / 拖拽占位不被清理 → I2
-  - **焦点与键盘不可达**：新增入口只在 `mousedown` 里处理、对话框关闭后焦点不回位 → I3
+  - **焦点与键盘不可达**：新增入口只在 `mousedown` / `click` 里处理、对话框关闭后焦点不回位、
+    纯图标按钮无可访问名、焦点指示器被 `outline: none` 移除而未给替代 → I3
   - 受约束容器（`<option>` / `nowrap` / `ellipsis` / 固定宽度）配长译文溢出 → I4
   - 破坏性入口的确认 / 撤销不一致 → I5、D1
-- **既有校验器**：**没有**。`npx tsc` / `eslint` 都不看这些；
-  `scan_i18n_text_expansion.py`（配 `--source`）覆盖 I4 的候选。
-  **其余各条只能靠语义判断 + 真实渲染环境取证**——这正是本层值得单列的原因
+- **既有校验器**：`tsc` / `eslint` / 单测**都不看这层**。两个本 skill 的脚本只覆盖其中两项：
+  - `scan_i18n_text_expansion.py --langs <langs> --source <src> --styles <scss>`
+    覆盖 I4；**`--styles` 不可省**：约束写在样式文件里，只给 `--source` 会系统性低估候选
+  - `scan_a11y_antipatterns.py --root <src> --styles <scss>` 覆盖 I3 的三类可靠形态
+    （K2 正整数 `tabindex` / K5 `outline:none` 无替代 / A6 纯图标按钮无可访问名），
+    其余反模式只给提示位点
+  - I1 / I2 / I5 **无任何机械手段**，只能语义判断 + 真实渲染取证——这正是本层值得单列的原因
 - **取证陷阱**：
   - **读数不够**：状态残留与焦点问题常只在**特定操作顺序**下出现
     （先失败一次再成功、中途切走再回来），静态阅读看不到
@@ -346,6 +356,19 @@
 | `github/awesome-copilot` | MIT | `test-gap-audit` 的测试缺口审计、`docs-sync-audit` 的文档漂移、`poka-yoke` 的「让非法状态不可表达」、`github-actions-hardening` |
 | `samber/cc-skills-golang` | MIT | `golang-safety`（nil / append 别名 / 并发 map）、`golang-cli`（退出码与信号）、`golang-database`、`golang-context`、`golang-error-handling` |
 | `i18n-agent/i18nstack` | MIT | 占位符漂移与 locale 键完整性校验的思路 |
+| `github/awesome-copilot` 的 `a11y.instructions.md` | MIT | 无障碍反模式分类（语义 S / ARIA A / 键盘焦点 K / 表单 F / 视觉 V）、ARIA 五规则、键盘交互参考表 |
+| `github/awesome-copilot` 的 `accessibility-runtime-tester.agent.md` | MIT | 运行期无障碍测试流程（键盘优先、焦点管理、动态 UI、复合控件）与两条硬约束：「不得把推测的辅助技术行为当作事实」「Lighthouse 通过不是无障碍的证明」 |
+| `github/awesome-copilot` 的 `web-design-reviewer` | MIT | 多视口检查与「修复→重验」闭环；**其外观部分（配色/间距/视觉一致性）不属本 skill**，只借了「截图前后对比 + 一次只修一个问题」的工作方式 |
+
+**未采纳的 UI/UX 来源（附理由，避免重复评估）**：
+
+- `anti-ui-slop`（MIT）：核心价值是「用真实界面参考做产品化的视觉设计」，
+  且需要付费的 UIZZE MCP。**属外观设计，不在本 skill 范围**。
+- `premium-frontend-ui` / `penpot-uiux-design` / `gsap-framer-scroll-animation`：
+  动效与视觉设计实现指南，属外观。
+- `a11y.instructions.md` 里的 **V（视觉与颜色）与 D（媒体）两类反模式**：
+  对比度、只用颜色传达信息、固定字号、动效降级、字幕 —— 这些需要颜色计算与视觉基线，
+  取证手段与本 skill 完全不同（axe / Lighthouse / 设计审查），**有意不纳入**。
 
 `trailofbits/skills` 的**内容**许可为 CC-BY-SA-4.0，与本仓库及目标仓库（AGPL-3.0）不兼容：
 **只可参考其方法论，不得把正文整段复制进任一仓库。**

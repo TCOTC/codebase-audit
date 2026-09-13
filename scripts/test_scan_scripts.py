@@ -32,6 +32,9 @@
 8. `scan_i18n_text_expansion`：受约束容器的识别是承重的（`<option>` / `nowrap` /
    `ellipsis` / 同行固定宽度）；它必须**默认就不区分受约束与可换行**，
    不得假装自己知道谁在使用某个键。
+9. `scan_a11y_antipatterns`：K5 的两层降噪都是承重的——
+   ① 同选择器无 `:focus` 替代；② 类名落在可聚焦元素上（否则是容器，**不是缺陷**）。
+   实测不做第 ② 层时，`.av` / `.emojis` / `.b3-form` 这类容器会被报成缺陷。
 
 仅依赖标准库，无需第三方包。退出码 0 表示全部通过。
 """
@@ -53,6 +56,7 @@ SCAN_DOM = os.path.join(HERE, "scan_dom_type_literals.py")
 SCAN_IDX = os.path.join(HERE, "scan_regression_index.py")
 SCAN_PARITY = os.path.join(HERE, "scan_doc_parity.py")
 SCAN_I18N = os.path.join(HERE, "scan_i18n_text_expansion.py")
+SCAN_A11Y = os.path.join(HERE, "scan_a11y_antipatterns.py")
 EVIDENCE = os.path.join(SKILL_DIR, "references", "evidence.md")
 
 FAILURES = []
@@ -95,7 +99,8 @@ for script, name in ((SCAN_DUP, "scan_duplicated_literals"),
                      (SCAN_HTML, "scan_unescaped_html"),
                      (SCAN_DOM, "scan_dom_type_literals"),
                      (SCAN_PARITY, "scan_doc_parity"),
-                     (SCAN_I18N, "scan_i18n_text_expansion")):
+                     (SCAN_I18N, "scan_i18n_text_expansion"),
+                     (SCAN_A11Y, "scan_a11y_antipatterns")):
     flag = "--docs" if script == SCAN_PARITY else (
         "--langs" if script == SCAN_I18N else "--root")
     code, out, err = run(script, flag, missing)
@@ -221,7 +226,27 @@ check(code != 0 and "no such directory" in err,
       "语言目录缺失时主动报错而非崩溃", repr((out + err)[:140]))
 
 print()
-print("[7] scan_regression_index：空输入与缺失证据库不得静默成功")
+print("[7] scan_a11y_antipatterns：K5 的两层降噪都不得静默失效")
+spec = importlib.util.spec_from_file_location("scan_a11y", SCAN_A11Y)
+a11y = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(a11y)
+check(bool(a11y.POSITIVE_TABINDEX.search('tabindex="3"')),
+      "正整数 tabindex 能被识别（K2）", "POSITIVE_TABINDEX 是否被削弱")
+check(not a11y.POSITIVE_TABINDEX.search('tabindex="0"'),
+      "tabindex=\"0\" 不误报")
+check(not a11y.POSITIVE_TABINDEX.search('tabindex="-1"'),
+      "tabindex=\"-1\" 不误报")
+check(bool(a11y.OUTLINE_NONE.search("outline: none;")),
+      "`outline: none` 能被识别（K5）", "OUTLINE_NONE 是否被削弱")
+check(not a11y.OUTLINE_NONE.search("outline-offset: 2px;"),
+      "`outline-offset` 不误报为移除轮廓")
+# 选择器分块：容器与可聚焦元素要能区分（第二层降噪的前提）
+blocks = list(a11y.iter_scss_blocks(".a {\n  outline: none;\n}\n"))
+check(len(blocks) == 1 and ".a" in blocks[0][0],
+      "SCSS 选择器分块可用", "得到 %s" % (blocks[:1],))
+
+print()
+print("[8] scan_regression_index：空输入与缺失证据库不得静默成功")
 code, out, err = run(SCAN_IDX, "--evidence", missing)
 check(code != 0, "证据库不存在时退出码非 0（实际 %d）" % code)
 # 首行 ASCII 标记是四个脚本共用的契约（stderr 可能在任何控制台编码下被读）。
@@ -241,7 +266,7 @@ check(bool(m) and int(m.group(1)) > 0, "索引里的文件数 > 0（%s）"
        % (m.group(1) if m else "?"))
 
 print()
-print("[8] 目标仓库冒烟：能扫到文件并给出结论")
+print("[9] 目标仓库冒烟：能扫到文件并给出结论")
 repo = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("AUDIT_TARGET_REPO", "")).strip()
 if not repo:
     print("  SKIP  未提供目标仓库（传入路径参数或设 AUDIT_TARGET_REPO 即可启用）")
@@ -308,6 +333,37 @@ else:
                       "否则交叉核对形同虚设，等于没做")
         else:
             print("  SKIP  %s 下无 app/appearance/langs 或 app/src" % repo)
+        scss = os.path.join(repo, "app", "src", "assets", "scss")
+        if os.path.isdir(app_src):
+            args = ["--root", app_src]
+            if os.path.isdir(scss):
+                args += ["--styles", scss]
+            code, out, err = run(SCAN_A11Y, *args)
+            k2 = re.search(r"K2 正整数 tabindex[^：:]*[：:]\s*(\d+) 个", out)
+            a6 = re.search(r"A6 纯图标按钮无可访问名[：:]\s*(\d+) 个", out)
+            check(code == 0 and bool(k2) and bool(a6),
+                  "scan_a11y_antipatterns 给出 K2/A6 结论（%s / %s）"
+                  % (k2.group(1) if k2 else "?", a6.group(1) if a6 else "?"),
+                  repr(err[:140]))
+            if os.path.isdir(scss):
+                m = re.search(r"经源码核对落在可聚焦元素上[：:]\s*(\d+) 个", out)
+                c = re.search(r"未见落在可聚焦元素上[^：:]*[：:]\s*(\d+) 个", out)
+                # 断言必须**无条件**做：早先写成 `if m and c:`，
+                # 于是正则一旦失配（输出格式改了）整条断言就**静默消失**，
+                # 自检仍然全绿——这正是「假成功」在自检自己身上的表现。
+                check(m is not None and c is not None,
+                      "K5 的两条计数行都能解析",
+                      "经核对=%s 容器=%s" % (m.group(1) if m else "?",
+                                            c.group(1) if c else "?"))
+                if m and c:
+                    check(int(m.group(1)) + int(c.group(1)) > int(m.group(1)),
+                          "K5 的容器筛除确实生效（%s 确认 / %s 容器）"
+                          % (m.group(1), c.group(1)),
+                          "若容器数为 0，说明源码核对失效，容器会被当成缺陷上报")
+            else:
+                print("  SKIP  %s 下无 app/src/assets/scss，K5 未测" % repo)
+        else:
+            print("  SKIP  %s 下无 app/src" % repo)
 
 print()
 if FAILURES:
