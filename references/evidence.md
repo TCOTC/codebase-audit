@@ -636,3 +636,45 @@
    而是「会不会把加密笔记本的明文带进响应」，按此标准 `inbox` 的取舍才清楚；
    同时 `docs/ENCRYPTED-NOTEBOOK.md` 的成文政策（MCP 编辑操作应持租约）与实现不一致，属「白名单语义未对齐政策」。
 
+
+
+## 第十六轮（2026-09-13）：未覆盖区域定向（kernel/api、kernel/sql|search|treenode、app/src/menus、app/src/asset|card|search|editor）
+
+范围取舍：`app/src/data/**` 与 `app/src/export/**` **在本仓库不存在**（导出前端在 `app/src/protyle/export/**`），子代理已当场纠正范围。
+四路只读侦察 + 主线逐条取证，五条候选全部过两轮挑战门（其中四条 DOWNGRADED 到低，一条 CONFIRMED 到低）。
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1d（P19 增补） | `/api/av/changeAttrViewLayout`（`kernel/api/router.go:621`）是 `/api/av/*` 全部 48 条路由中**唯一**缺 `model.CheckReadonly` 的写端点；handler（`kernel/api/av.go:345`）→ `model.ChangeAttrViewLayout`（`kernel/model/attribute_view.go:1421`）确实落盘（`setNodeAttrs` 写 `.sy` IAL + `av.SaveAttributeView` 写 `storage/av/<avID>.json` + `ReloadAttrView`）。`kernel/av/` 全包 grep `util.ReadOnly` = 0，model 层无兜底 | 高（挑战门两轮：一轮 CONFIRMED、二轮维护者反驳后仍确认） | 未提 issue（待用户确认），严重度低 |
+| D1j（新 P30） | `kernel/sql/upsert.go:445-499` 的 `upsertTree` 先无条件删除 `spans`/`attributes`/`assets`/`refs`/`file_annotation_refs`，再调 `insertTree0`（:501-510），而 `insertTree0` 的**第一句**才是 indexignore 判断 → 命中忽略规则的文档在增量保存路径上「删了不插」。同族 `indexTree`（:438-443）无前置删除，是干净 no-op | 中（可达性逐环核实，未实测；挑战门一轮 DOWNGRADED、二轮维护者仍认为是真实结构不一致但低） | 附录主条目（严重度低，未提 issue） |
+| D1l（新 P32） | `app/src/search/toggleHistory.ts:14-18` 的 `toggleReplaceHistory` 把 storage 对象绑成 `list` 后按数组用（`list.length === 1 && list[0] === ...`），第三子条件恒 false；同族 `toggleAssetHistory`（:161-166）先取 `keys` 数组。替换一次「foo」即可复现「弹出只剩『清除历史』的菜单」 | 高（挑战门一轮 DOWNGRADED：只有第三个子条件恒假，不能写「守卫等于不存在」） | 未提 issue（待用户确认），严重度低 |
+| D1k（新 P31）/ D1e | `app/src/card/openCard.ts` 的 `allDone`（:911-922）隐藏 `[data-type="more"]` 及其 `previousElementSibling`，`nextCard`（:888-910）只恢复 `card__block`/`count`，漏 `more` → 换卡包后 ⋮（设置到期时间/统计/重置/移除卡片）不出现。`previousElementSibling` 在移动端是 `[data-type="filter"]`，连带隐藏筛选 | 高（挑战门两轮 CONFIRMED，二轮指出「同函数恢复了 `card__block` 却漏 `more`」是不对称而非设计） | 未提 issue（待用户确认），严重度低 |
+| D1 | `app/src/menus/tag.ts:19-40` 的 `openTagMenu` 无 `readonly` 守卫，而同族 `app/src/menus/bookmark.ts:19/52` 两处都有；`/api/tag/renameTag`、`/api/tag/removeTag`（`kernel/api/router.go:227-228`）与对应书签路由都带 `CheckReadonly`。同文件 `app/src/layout/dock/Tag.ts:49/50/83` 在只读下隐藏了 sort 与「更多」图标，唯独 `:81` 的 `rightClick` 无条件调用该菜单 | 高（挑战门两轮 CONFIRMED，二轮纠正「移动端无此入口、桌面与发布页才有」） | 未提 issue（待用户确认），严重度低 |
+
+### 子代理自验推翻 / 已驳回（勿重报，除非有新证据）
+
+- `kernel/sql/upsert.go` 同族的 `indexTree` 忽略早退本身**正确**，不是缺陷。
+- `kernel/sql/block_query.go:1225` 的 `containsLimitClause`（朴素 `strings.Contains(...," limit ")`）与同包 `query_limit.go:31` 的 `containsOuterLimitClause`（引号/注释/括号感知）语义分叉。误判为「有 LIMIT」会让 `Conf.Search.Limit` 失效，但需用户 SQL 含 `' limit '` 字面量才触发；`/api/query/sql` 路径不受影响。**未取证，仅观察项。**
+- `kernel/sql/block_query.go:307` 的 `queryDocTitles` 是四兄弟（`queryNames`/`queryAliases`/`queryRefTexts`）中唯一无 `LIMIT 10240` 的实现。是否「文档标题本就该全量」无法判定，仅记录。
+- `kernel/sql/encrypted_query.go:682` 的 `GetChildBlocksInBox` 缺 `CheckSingleStatement`/`CheckReadonlyStatement`（全局版 `block_query.go:1023` 有）。已逐调用点确认 `condition` 恒为 `""` → 当前不可达，纯 latent。
+- `kernel/treenode/node.go:504` 写两套键（裸 `defID` + `boxID\x00defID`），`:525-535` 的 `RemoveDynamicRefTexts(boxID)` 只按前缀删 box-aware 键 → 裸键永不逐出。对照 `kernel/cache/ial.go` 把「空 box」显式建模成 `"\x00"+id` 并把三种键一起删。已登记，未取证。
+- `kernel/api/router.go:119-122` 的 `updateRecentDocOpenTime/ViewTime/CloseTime/batchUpdateRecentDocCloseTime` 无 `CheckReadonly`，替代守卫 `skipReadonlyStorageMutation`（`kernel/api/contract_storage.go:11`）只看**角色**不看 `util.ReadOnly`；`kernel/model/storage.go` 全文件 grep `util.ReadOnly` = 0。影响限于应用态文件，未取证。
+- `kernel/api/storage.go:388` 的 `removeViewState` 成功路径复用 `contractFailure`（同族其它成员是「错误分支 failure、正常分支 Success」）。已逐字比对 `Response.MarshalJSON` 与 `Null`：线协议完全一致，属「成功构造点缺失」的潜在陷阱，无当前后果。
+- `kernel/api/system.go:217/226` 对 `custom["items"] = items` 写了两次，中间无读回，当前无副作用。
+- `app/src/menus/workspace.ts:85-99` 的「重命名布局」缺 `btnsElement[3]` 新建分支的 `hadName` 重名确认（`LOCAL_LAYOUTS` 全程以 `name` 为主键）→ 可产生同名布局，此后 `find` 只命中第一条。已读码确认，未过挑战门。
+- `app/src/menus/navigation.ts:311-316` 多选文档菜单的 `unpinDoc` 在 `canPin`（含 `isEncryptedBox`）之外，单选分支 `:849-857` 则 pin/unpin 同受该判据约束。已读码确认，未过挑战门。
+- `app/src/asset/index.ts:109` 的 `this.path.substr(this.path.lastIndexOf(".")).toLowerCase().split("?")[0]` 自解析扩展名（全仓其余 20+ 处走 `getAssetExtension`）。query 含点号（如 `?dataPath=/docs/a.sy`）时 `type` 落空 → 所有分支不命中 → 页签空白。**可达性未证实**（`?dataPath=` 主要由 `getAssetsPreviewPath` 生成给预览元素，且其 dataPath 末段扩展名与资源一致），仅观察项。
+- `app/src/menus/protyle.ts:2139` 图片「高度」子菜单项 `id: "width_" + label`。无消费方，已写入「已知误报」。
+- `app/src/menus/navigation.ts:1055-1065` `reloadDocTree` 的 `liElement.querySelector` 未判空。导入后节点通常仍在 DOM，未证可达。
+- 子代理自验推翻（不计入）：`menus/protyle.ts:1784` 的 `splice(indexOf("a"), 1)`（全部调用点都有 `includes("a")` 守卫）、`menus/protyle.ts:2556` `colIsPure` 不判空（合并单元格保留占位，行始终等宽）、`menus/navigation.ts:187` 多选笔记本隐藏导出（`exportNotebooksSYBundle` 对加密库直接 return）、`menus/dataMigration.ts:107` Obsidian 按钮不 disabled（导入时可新建笔记本）、`sql/av.go:1224` 与 `av/filter.go:1323` 都不注入繁简归一化（整体设计取舍）、`sql/span.go:107/129` 两处 `GROUP BY` 不同（只用返回 map 的 key）、`search/mark.go:90-96` 上下文多截 1 rune（`mark_test.go` 已固化为预期）、`asset/index.ts` 的 `pdfResize` 先读 `clientHeight` 后判空（仅 PDF 模板存在该元素）。
+- 机械复扫：重复字面量 **231** 条（P1 195 / P2 16 / P3 20，文件 1373）、未转义插值 **244** 条 / 95 文件，逐条核对仍为已知噪声；本轮 0 重复报告（开扫前已用登记表排除 15 组）。
+
+### 方法论教训
+
+1. **「同族其它实现都挂了该守卫」需要先分类再定论**。第二轮维护者指出：`CheckReadonly` 在本仓是**保守惯例**，连 `getAttributeViewItemStatuses`、`getAttributeViewSearchTarget`、`getAttributeViewKeysByAvID` 等**纯读**端点也挂着。因此「兄弟都有」不能单独证明此处是漏项。真正让本轮结论成立的是另外两条硬证据：用户指南明写「`--readonly=true` … **所有写入操作将被禁止**」（`app/guide/.../20200828105441-r76vmu5.sy:164`），以及**同一个能力经 `/api/transactions` 是被禁止的**（`kernel/api/router.go:457` 带 `CheckReadonly`，`kernel/model/transaction.go:440` 的 `doChangeAttrViewLayout`）——「布局属视图、可以豁免」的解释因此站不住。
+2. **维护者视角能挖出「机制层缺失」这个更大的问题**。二轮指出：`apicontract.Route`（`kernel/apicontract/routes.go:15-19`）只有 `Method/Path/Handler` 三个字段，**结构上容不下中间件声明**；`TestAPIContractRouterCoverage` 只断言路由集合相等，不看中间件。所以真正值得修的是「给契约加写属性元数据 + 一条覆盖全路由的断言」，只补一行等于把结构性盲区再埋回去。**报告应把「本行修复」与「机制缺失」分开写。**
+3. **守卫的「绝对位置」比守卫的「有无」更难发现**。P30 的形态是同族两条路径各有守卫、守卫内容也相同，唯一差别是它相对副作用的位置。判别法已固化为：先找共享函数里守卫在第几句，再问「调用方在调用它之前做了什么」。
+4. **`previousElementSibling` 在双模板下必然跨端漂移**。本轮 `allDone` 想隐藏的是分隔符，移动端同一位置却是功能按钮。凡见到位置选择器 + `/// #if MOBILE`，应直接把「两端命中的元素分别是谁」写成必答项。
+5. **挑战门第一轮的「描述失准」也要照单修**。第二轮把 `toggleHistory` 从「守卫等于不存在」纠正为「只有第三个子条件恒假」——这直接决定了修复面（改一个条件 vs 重写守卫），也决定了严重度（纯外观 vs 功能缺失）。**症状描述错会改变修法，不只是措辞问题。**
+6. **子代理纠正了本次的范围前提**：`app/src/data/**` 与 `app/src/export/**` 不存在。派发侦察前先让对方确认目录存在，比事后修补量少。
+7. **本轮机械扫描增量仍为 0**，五条发现全部来自定向语义核查（D1 及其子型），与前四轮结论一致。重复字面量条目数从 166 涨到 231 纯因扫描文件数从 1360 涨到 1373 与阈值波动，无新增可报项。

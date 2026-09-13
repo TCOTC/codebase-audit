@@ -861,3 +861,75 @@ Electron 44 下 `nodeIntegration` 默认 false、`sandbox` 默认 true → `requ
 3. 与同族的同步写入路径对比（同步路径通常会返回真实错误）。
 4. 修法优先级：先让调用方能拿到真实结果（或失败时不执行破坏性后续动作），再考虑其它。
 
+
+
+### P30 同族路径上「前置守卫」的位置漂移
+
+**对应判据**：D1j、D1、C。
+
+**定义**：同一份守卫（忽略规则、空值检查、存在性检查、只读检查）在两条同族执行路径上位于**不同位置**：一条在副作用之前（被拒即完整 no-op），
+另一条在副作用之后（被拒时副作用已发生）。表现是「同一个声明被拒绝的操作，在一条路径上什么都没做，在另一条路径上做了一半」。
+
+**为何出现**：守卫被放在**共享函数**的开头（合理的单一闸门），而某个调用方在调用共享函数之前就有自己的副作用（删除旧行、清缓存、写临时物）。
+共享函数的守卫只保护「插入/写入」这一步，不保护调用方的删除步骤。
+
+**实证案例（本仓库）**：`kernel/sql/upsert.go` 的 `upsertTree`（:445-499）先无条件 `deleteSpansByRootID`/`deleteAttributesByRootID`/`deleteAssetsByRootID`/`deleteRefsByPathTx`/`deleteFileAnnotationRefsByPathTx`，
+再调 `insertTree0`（:501-510），而 `insertTree0` 的**第一句**才是 `indexignore` 判断，命中即 `return`。
+同族的 `indexTree`（:438-443）没有任何前置删除，因此它的忽略早退是干净的 no-op。→ 命中忽略规则的文档在增量保存路径上「删了不插」。
+
+- 可达条件：文档已被索引 + 之后 indexignore 才生效（`IndexIgnoreCached` 是进程级一次性缓存，只在 `fullReindex` 重置；重启时 `InitBoxes` 因 `treenode.CountBlocks() > 0` 不做全量索引）+ 编辑该文档。
+- 部分自愈：`IndexRefs`/`upsertRefs` 不看忽略规则，重建时会把 refs 写回 → 只有 `spans`/`attributes` 的丢失是持久的。
+- 严重度低：只碰派生库，重建索引一步恢复；且用户按指南「改配置后手动重建索引」操作时不会遇到。
+
+**检查法**：
+
+1. 找到共享守卫函数，确认守卫在函数体内的**第几句**。
+2. 列出全部调用方，逐个确认「调用共享函数之前是否有副作用」。
+3. 与同族另一条路径对比副作用集合（本轮的权威侧是 `indexTree` 的「无副作用」）。
+4. 修法方向：把守卫前移到调用方入口，**不要**反向补齐副作用（会让两条路径更强地不一致，且永远到不了自洽状态）。
+
+### P31 模板条件隐藏集合 ⊋ 运行时恢复集合
+
+**对应判据**：D1k、C、D1e。
+
+**定义**：模板按同一条件给一批同层元素加 `fn__none`；运行时某状态函数把其中一部分隐藏（还常顺手隐藏其相邻兄弟），
+而恢复函数只恢复自己语义关心的那部分，`模板隐藏集合 \ 恢复集合` 里的元素永久保持隐藏。用户看到的是「功能入口消失、但主内容正常」。
+
+**为何出现**：隐藏是**一次性状态切换**（按当时的空/非空判断），恢复是**按需最小恢复**（谁隐藏谁恢复）；两侧的集合没有共同的载体，
+因此模板新增的隐藏条件、或隐藏时顺手加的相邻元素，都不会被恢复逻辑覆盖。
+
+**实证案例（本仓库）**：`app/src/card/openCard.ts`
+
+- `:100` 模板对 `[data-type="more"]` 按 `cards.length === 0` 加 `fn__none`；
+- `allDone`（:911-922）隐藏 `more` 及其 `previousElementSibling`；
+- `nextCard`（:888-910）只恢复 `card__block`（模板 `:111` 同样有初始 `fn__none`）与 `count`，**漏了 `more`** → 同函数内「恢复了同批的一个、漏了另一个」即强信号。
+- 跨端连带：`previousElementSibling` 在桌面是 `<div class="fn__space">`、移动端是 `[data-type="filter"]` 按钮（`:81-82`）→ 移动端连带隐藏筛选，反而使「切换卡包」这条恢复路径自身不可达。
+- 严重度低：关掉对话框重开即恢复；`重置`/`移除卡片` 有替代入口（`app/src/card/viewCards.ts`），`设置到期时间` 没有。
+
+**检查法**：
+
+1. 提取模板中所有条件 `fn__none`（集合 A）。
+2. 提取每个恢复函数的 `classList.remove("fn__none")` 目标（集合 B）。
+3. `A \ B` 即候选；再确认每个候选是否真的需要被恢复（无卡状态下 ⋮ 菜单确实打不开，此时隐藏是正确的）。
+4. `previousElementSibling`/`nextElementSibling` 一律按「跨端语义可能不同」处理，先 grep `/// #if` 双模板。
+5. 修复时用稳定选择器（`data-type`/`data-id`）替代位置选择器，并按端区分。
+
+### P32 同族复制粘贴读错绑定对象
+
+**对应判据**：D1l、D1f、D1。
+
+**定义**：同族函数结构相同，但其中一处把**容器对象**绑成局部变量后又按数组用。典型形态：
+`const list = storage[KEY]`（对象）之后写 `list.length === 1 && list[0] === value`，而正确的子数组在 `list.replaceKeys` 上。
+`list.length` 恒为 `undefined`，该子条件恒为 false。
+
+**与 D1f 的区别**：D1f 是「同一行内同一表达式写两遍」（复制后漏改下标）；本模式是「跨行复制后漏改**绑定对象**」，
+机械信号不是「重复」而是「对已知为对象的值读 `.length`/`[0]`」。
+
+**实证案例（本仓库）**：`app/src/search/toggleHistory.ts:14-18` 的 `toggleReplaceHistory`。
+storage 键 `local-searchkeys` 的默认值（`app/src/protyle/util/compatibility.ts:691`）是对象 `{keys, replaceKeys, col, row, layout, colTab, rowTab, layoutTab}`，
+清洗逻辑 `Object.assign(defaultStorage[key], parseData)` 也保证结果仍是对象。对照同族 `toggleAssetHistory`（:161-166）先取 `keys` 数组再判 `length`/`[0]`。
+
+- 定性注意：恒假的是**第三个子条件**，前两个（`!list.replaceKeys || list.replaceKeys.length === 0`）仍然生效。
+  因此报告必须写「守卫被削弱为只判空」，不能写「守卫等于不存在」——后者会被挑战门以「描述失准」降级。
+- 业务表现：替换一次「foo」后（`replaceKeys === ["foo"]` 且输入框仍为 `foo`），点历史图标会弹出只剩「清除历史」一项的菜单；`toggleAssetHistory` 同条件下不弹。纯 UI 冗余，无数据损害。
+- 修法：条件改为 `list.replaceKeys.length === 1 && list.replaceKeys[0] === ...`，与 `:164` 对齐。
