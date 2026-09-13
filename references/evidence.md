@@ -645,11 +645,24 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D1d（P19 增补） | `/api/av/changeAttrViewLayout`（`kernel/api/router.go:621`）是 `/api/av/*` 全部 48 条路由中**唯一**缺 `model.CheckReadonly` 的写端点；handler（`kernel/api/av.go:345`）→ `model.ChangeAttrViewLayout`（`kernel/model/attribute_view.go:1421`）确实落盘（`setNodeAttrs` 写 `.sy` IAL + `av.SaveAttributeView` 写 `storage/av/<avID>.json` + `ReloadAttrView`）。`kernel/av/` 全包 grep `util.ReadOnly` = 0，model 层无兜底 | 高（挑战门两轮：一轮 CONFIRMED、二轮维护者反驳后仍确认） | 未提 issue（待用户确认），严重度低 |
-| D1j（新 P30） | `kernel/sql/upsert.go:445-499` 的 `upsertTree` 先无条件删除 `spans`/`attributes`/`assets`/`refs`/`file_annotation_refs`，再调 `insertTree0`（:501-510），而 `insertTree0` 的**第一句**才是 indexignore 判断 → 命中忽略规则的文档在增量保存路径上「删了不插」。同族 `indexTree`（:438-443）无前置删除，是干净 no-op | 中（可达性逐环核实，未实测；挑战门一轮 DOWNGRADED、二轮维护者仍认为是真实结构不一致但低） | 附录主条目（严重度低，未提 issue） |
-| D1l（新 P32） | `app/src/search/toggleHistory.ts:14-18` 的 `toggleReplaceHistory` 把 storage 对象绑成 `list` 后按数组用（`list.length === 1 && list[0] === ...`），第三子条件恒 false；同族 `toggleAssetHistory`（:161-166）先取 `keys` 数组。替换一次「foo」即可复现「弹出只剩『清除历史』的菜单」 | 高（挑战门一轮 DOWNGRADED：只有第三个子条件恒假，不能写「守卫等于不存在」） | 未提 issue（待用户确认），严重度低 |
-| D1k（新 P31）/ D1e | `app/src/card/openCard.ts` 的 `allDone`（:911-922）隐藏 `[data-type="more"]` 及其 `previousElementSibling`，`nextCard`（:888-910）只恢复 `card__block`/`count`，漏 `more` → 换卡包后 ⋮（设置到期时间/统计/重置/移除卡片）不出现。`previousElementSibling` 在移动端是 `[data-type="filter"]`，连带隐藏筛选 | 高（挑战门两轮 CONFIRMED，二轮指出「同函数恢复了 `card__block` 却漏 `more`」是不对称而非设计） | 未提 issue（待用户确认），严重度低 |
-| D1 | `app/src/menus/tag.ts:19-40` 的 `openTagMenu` 无 `readonly` 守卫，而同族 `app/src/menus/bookmark.ts:19/52` 两处都有；`/api/tag/renameTag`、`/api/tag/removeTag`（`kernel/api/router.go:227-228`）与对应书签路由都带 `CheckReadonly`。同文件 `app/src/layout/dock/Tag.ts:49/50/83` 在只读下隐藏了 sort 与「更多」图标，唯独 `:81` 的 `rightClick` 无条件调用该菜单 | 高（挑战门两轮 CONFIRMED，二轮纠正「移动端无此入口、桌面与发布页才有」） | 未提 issue（待用户确认），严重度低 |
+| D1d（P19 增补） | `/api/av/changeAttrViewLayout`（`kernel/api/router.go:621`）是 `/api/av/*` 全部 48 条路由中**唯一**缺 `model.CheckReadonly` 的写端点；handler（`kernel/api/av.go:345`）→ `model.ChangeAttrViewLayout`（`kernel/model/attribute_view.go:1421`）确实落盘（`setNodeAttrs` 写 `.sy` IAL + `av.SaveAttributeView` 写 `storage/av/<avID>.json` + `ReloadAttrView`）。`kernel/av/` 全包 grep `util.ReadOnly` = 0，model 层无兜底 | 高（挑战门两轮：一轮 CONFIRMED、二轮维护者反驳后仍确认） | **与并行 B 线会话重复**：由该会话提为 issue #19461（本会话不重复提交，已在该 issue 下补入机制层证据：`apicontract.Route` 只有 Method/Path/Handler 三字段、无全路由中间件断言），严重度低 |
+| D1j（新 P30） | `kernel/sql/upsert.go:445-499` 的 `upsertTree` 先无条件删除 `spans`/`attributes`/`assets`/`refs`/`file_annotation_refs`，再调 `insertTree0`（:501-510），而 `insertTree0` 的**第一句**才是 indexignore 判断 → 命中忽略规则的文档在增量保存路径上「删了不插」。同族 `indexTree`（:438-443）无前置删除，是干净 no-op | 中（可达性逐环核实，未实测；挑战门一轮 DOWNGRADED、二轮维护者仍认为是真实结构不一致但低） | 已提 issue #19462，严重度低 |
+| D1l（新 P32） | `app/src/search/toggleHistory.ts:14-18` 的 `toggleReplaceHistory` 把 storage 对象绑成 `list` 后按数组用（`list.length === 1 && list[0] === ...`），第三子条件恒 false；同族 `toggleAssetHistory`（:161-166）先取 `keys` 数组。替换一次「foo」即可复现「弹出只剩『清除历史』的菜单」 | 高（挑战门一轮 DOWNGRADED：只有第三个子条件恒假，不能写「守卫等于不存在」） | 已提 issue #19463，严重度低 |
+| D1k（新 P31）/ D1e | `app/src/card/openCard.ts` 的 `allDone`（:911-922）隐藏 `[data-type="more"]` 及其 `previousElementSibling`，`nextCard`（:888-910）只恢复 `card__block`/`count`，漏 `more` → 换卡包后 ⋮（设置到期时间/统计/重置/移除卡片）不出现。`previousElementSibling` 在移动端是 `[data-type="filter"]`，连带隐藏筛选 | 高（挑战门两轮 CONFIRMED，二轮指出「同函数恢复了 `card__block` 却漏 `more`」是不对称而非设计） | 已提 issue #19464，严重度低 |
+| D1 | `app/src/menus/tag.ts:19-40` 的 `openTagMenu` 无 `readonly` 守卫，而同族 `app/src/menus/bookmark.ts:19/52` 两处都有；`/api/tag/renameTag`、`/api/tag/removeTag`（`kernel/api/router.go:227-228`）与对应书签路由都带 `CheckReadonly`。同文件 `app/src/layout/dock/Tag.ts:49/50/83` 在只读下隐藏了 sort 与「更多」图标，唯独 `:81` 的 `rightClick` 无条件调用该菜单 | 高（挑战门两轮 CONFIRMED，二轮纠正「移动端无此入口、桌面与发布页才有」） | 已提 issue #19465，严重度低 |
+
+### 第十六轮补记（2026-09-13，提交阶段）
+
+本轮与另一个并行会话（B 线：内核 CLI / server / sql）**同时且互不知情地跑第十六轮**，提交阶段才发现重叠。处理如下：
+
+1. **发现重复，不重复提交**：本会话的第 1 条（`changeAttrViewLayout` 漏挂 `CheckReadonly`）与 B 线的 #19461 是同一处缺陷（同 `file:line`、同结论）。**未另开 issue**，改为在该 issue 下补一条「机制层证据」评论
+   （`apicontract.Route` 只有 `Method`/`Path`/`Handler` 三字段结构上容不下中间件声明；`contract_test.go:61` 只断言路由集合；全仓唯一一处 `CheckReadonly` 断言是手写路由不覆盖真实路由表）。评论已逐字符回读校验（2146/2146）。
+2. **编号避让**：本会话先提交并推送了 `4f4d752`（P30/P31/P32 + D1j/D1k/D1l），B 线随后改用 **P34/P35/P36/P37 + D1m**，未发生编号冲突。
+   **教训：并行会话同时在跑时，编号分配必须「先提交先占用」并及时 push**；若双方都只在本地写、最后才合并，必然撞号。
+3. **去重手段**：提交前用 `gh api -X GET search/issues` 逐条检索（覆盖 open + closed）。注意 PowerShell 下带 `&per_page=` 的 URL 会被 `gh api` 拆成多个位置参数（报 `accepts 1 arg(s), received 3`），
+   改用 `gh api -X GET <endpoint> -f q=... -f per_page=8 --jq ...` 或写入 Python 脚本（本轮用后者）。
+4. **提交结果**：#19462（indexignore 先删后判）、#19463（替换历史守卫读错对象）、#19464（闪卡 ⋮ 不恢复）、#19465（标签菜单只读）——
+   四条均逐字段回读一致（title 与 body 完全相等，长度分别为 92/85/77/69 与 2580/1710/1770/1697）。
 
 ### 子代理自验推翻 / 已驳回（勿重报，除非有新证据）
 
