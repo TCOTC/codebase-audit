@@ -59,6 +59,8 @@ def check(condition, label, detail=""):
 
 
 def load_html_scanner():
+    # 用 importlib 从文件加载会写出 __pycache__，而这是要提交的仓库；关掉字节码写入。
+    sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_file_location("scan_unescaped_html", SCAN_HTML)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

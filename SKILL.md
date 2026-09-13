@@ -447,6 +447,9 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 7. **改完脚本必须跑两个自检**：`test_scan_scripts.py`（脚本行为 + 过滤规则）与
    `skill_self_check.py`（文档结构）。两条都要有**负向验证**（故意注入问题确认能被拦住），
    否则自检只是装饰。
+8. **提交前看 `git status` 与 `git diff --cached`**：Python 自检用 `importlib` 从文件加载模块时会写
+   `__pycache__/*.pyc`，一不小心就把字节码提交进仓库（本轮实际发生过，已在 `.gitignore` 里排除，
+   并让自检设 `sys.dont_write_bytecode`）。
 
 ## 修复时的硬约束
 
