@@ -29,6 +29,9 @@
 7. `scan_doc_parity`：目录不存在时不得输出「0 组」；且**交叉引用被本地化**
    必须被抵消（中文版指向 `X.zh-CN.md` 是正确行为）。实测不加抵消规则时，
    SY-FORMAT / TAB-BLOCK / WORKSPACE 三组会各报 1 条假差异。
+8. `scan_i18n_text_expansion`：受约束容器的识别是承重的（`<option>` / `nowrap` /
+   `ellipsis` / 同行固定宽度）；它必须**默认就不区分受约束与可换行**，
+   不得假装自己知道谁在使用某个键。
 
 仅依赖标准库，无需第三方包。退出码 0 表示全部通过。
 """
@@ -49,6 +52,7 @@ SCAN_HTML = os.path.join(HERE, "scan_unescaped_html.py")
 SCAN_DOM = os.path.join(HERE, "scan_dom_type_literals.py")
 SCAN_IDX = os.path.join(HERE, "scan_regression_index.py")
 SCAN_PARITY = os.path.join(HERE, "scan_doc_parity.py")
+SCAN_I18N = os.path.join(HERE, "scan_i18n_text_expansion.py")
 EVIDENCE = os.path.join(SKILL_DIR, "references", "evidence.md")
 
 FAILURES = []
@@ -90,8 +94,11 @@ missing = os.path.join(HERE, "___no_such_dir___")
 for script, name in ((SCAN_DUP, "scan_duplicated_literals"),
                      (SCAN_HTML, "scan_unescaped_html"),
                      (SCAN_DOM, "scan_dom_type_literals"),
-                     (SCAN_PARITY, "scan_doc_parity")):
-    code, out, err = run(script, "--root" if script != SCAN_PARITY else "--docs", missing)
+                     (SCAN_PARITY, "scan_doc_parity"),
+                     (SCAN_I18N, "scan_i18n_text_expansion")):
+    flag = "--docs" if script == SCAN_PARITY else (
+        "--langs" if script == SCAN_I18N else "--root")
+    code, out, err = run(script, flag, missing)
     check(code != 0, "%s 退出码非 0（实际 %d）" % (name, code))
     check("no such directory" in err,
           "%s 在 stderr 说明原因" % name, repr(err[:120]))
@@ -190,7 +197,31 @@ check(miss3 == ["A.md"] and extra3 == ["A.zh-CN.md"],
       "得到 miss=%s extra=%s" % (miss3, extra3))
 
 print()
-print("[6] scan_regression_index：空输入与缺失证据库不得静默成功")
+print("[6] scan_i18n_text_expansion：受约束容器识别不得静默失效")
+spec = importlib.util.spec_from_file_location("scan_i18n", SCAN_I18N)
+i18n = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(i18n)
+# `<option>` 是最确切的受约束容器（select 下拉项不换行）；实测历史面板的筛选下拉
+# 有 7 个 <option> 取自 history* 一族键，而 de/ar 译文长 2-4 倍
+OPTION_LINE = ('<option value="sync">${window.siyuan.languages.historySync}</option>')
+hit_signals = [why for sig, why in i18n.CONSTRAINED_SIGNALS if sig in OPTION_LINE]
+check(bool(hit_signals), "`<option>` 被识别为受约束容器",
+      "CONSTRAINED_SIGNALS 是否被削弱")
+check(bool(i18n.EXPLICIT_WIDTH.search('style="width: 80px"')),
+      "同行固定宽度被识别", "EXPLICIT_WIDTH 是否被削弱")
+check(not i18n.EXPLICIT_WIDTH.search('style="color: red"'),
+      "无宽度声明不误报为固定宽度")
+# i18n 取值的两种写法都要能抓到（含双引号下标形式）
+refs = [m.group(1) or m.group(2) for m in i18n.I18N_REF.finditer(
+    'languages.foo + languages["bar"]')]
+check(refs == ["foo", "bar"], "能同时提取点号与下标两种取值", "得到 %s" % refs)
+# 默认不得声称自己知道容器是否受约束
+code, out, err = run(SCAN_I18N, "--langs", missing)
+check(code != 0 and "no such directory" in err,
+      "语言目录缺失时主动报错而非崩溃", repr((out + err)[:140]))
+
+print()
+print("[7] scan_regression_index：空输入与缺失证据库不得静默成功")
 code, out, err = run(SCAN_IDX, "--evidence", missing)
 check(code != 0, "证据库不存在时退出码非 0（实际 %d）" % code)
 # 首行 ASCII 标记是四个脚本共用的契约（stderr 可能在任何控制台编码下被读）。
@@ -210,7 +241,7 @@ check(bool(m) and int(m.group(1)) > 0, "索引里的文件数 > 0（%s）"
        % (m.group(1) if m else "?"))
 
 print()
-print("[7] 目标仓库冒烟：能扫到文件并给出结论")
+print("[8] 目标仓库冒烟：能扫到文件并给出结论")
 repo = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("AUDIT_TARGET_REPO", "")).strip()
 if not repo:
     print("  SKIP  未提供目标仓库（传入路径参数或设 AUDIT_TARGET_REPO 即可启用）")
@@ -259,6 +290,24 @@ else:
                       "能给出结论行", repr(out[-160:]))
         else:
             print("  SKIP  %s 下无 docs" % repo)
+        langs = os.path.join(repo, "app", "appearance", "langs")
+        if os.path.isdir(langs) and os.path.isdir(app_src):
+            code, out, err = run(SCAN_I18N, "--langs", langs, "--source", app_src)
+            # 冒号用字符类兼容半角/全角：脚本的汇总行用全角，
+            # 而早期断言写的是半角，造成了一次假失败（断言与实现的格式漂移）。
+            m = re.search(r"已确认受约束的候选合计[：:]\s*(\d+)", out)
+            check(code == 0 and bool(m) and int(m.group(1)) > 0,
+                  "scan_i18n_text_expansion 给出受约束候选（%s）"
+                  % (m.group(1) if m else "?"), repr(err[:160]))
+            # 回归：给 --source 后必须真的按使用点过滤，不得等于未过滤的总数
+            raw = re.search(r"受约束候选合计[：:]\s*(\d+)", out)
+            if m and raw:
+                check(int(m.group(1)) < int(raw.group(1)),
+                      "--source 产生了实际过滤（%s < %s）"
+                      % (m.group(1), raw.group(1)),
+                      "否则交叉核对形同虚设，等于没做")
+        else:
+            print("  SKIP  %s 下无 app/appearance/langs 或 app/src" % repo)
 
 print()
 if FAILURES:
