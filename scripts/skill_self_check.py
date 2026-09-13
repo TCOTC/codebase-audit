@@ -9,7 +9,9 @@
 1. `已知误报` 与 `更新记录` 两张表必须连续（表内不得有空行）。
    实测：追加条目时在末尾留了空行，表被切成两张，末行渲染成**没有表头的表**；
    之后那条 MIME 记录就在表外，按「查表」去重的人根本看不到它。
-2. 各文件里的 `##` 标题不得重复。
+   两张表已移出 `SKILL.md`（见 `contributing.md` 第 10 条），检查点随之迁到
+   `references/known-false-positives.md` 与 `references/changelog.md`。
+2. 各 Markdown 文件里的 `##` 标题不得重复。
    实测：同一条结论曾以两行并列形式存在（一行说「已列入已知误报」、下一行说「已改判为真缺陷」），
    两行各自看似成立，按「先读登记表」去重时会采用错的那一半。
 3. `evidence.md` 的轮次章节必须按轮次号递增，且**不得嵌在另一个轮次之下**
@@ -72,23 +74,34 @@ def read(path):
 
 
 print("[1] 表格必须连续（表内不得有空行）")
-sk = read(SKILL_MD)
-for heading in ["## 已知误报（不要报告）", "## 更新记录"]:
+# 两张长表已移出 SKILL.md，检查点随之迁移（见 contributing.md 第 10 条）
+TABLES = [
+    (os.path.join(SKILL_DIR, "references", "known-false-positives.md"),
+     "## 已知误报（不要报告）"),
+    (os.path.join(SKILL_DIR, "references", "changelog.md"), "# 更新记录"),
+    # SKILL.md 里的路由表：格内出现未转义 `|` 会让「按需加载」的索引错位
+    (SKILL_MD, "## 工作模式"),
+    (SKILL_MD, "## 全栈层面导航"),
+    (SKILL_MD, "## 参考资源"),
+]
+for path, heading in TABLES:
+    lines = read(path)
+    name = os.path.basename(path)
     try:
-        start = next(i for i, l in enumerate(sk) if l.startswith(heading))
+        start = next(i for i, l in enumerate(lines) if l.startswith(heading))
     except StopIteration:
-        check(False, "找到章节：%s" % heading)
+        check(False, "找到章节：%s @ %s" % (heading, name))
         continue
-    end = next((i for i in range(start + 1, len(sk)) if sk[i].startswith("## ")), len(sk))
-    seg = sk[start:end]
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+               len(lines))
+    seg = lines[start:end]
     rows = [i for i, l in enumerate(seg) if l.startswith("|")]
     gaps = [(rows[k] + start + 1, rows[k + 1] + start + 1)
             for k in range(len(rows) - 1) if rows[k + 1] - rows[k] > 1]
     check(bool(rows) and not gaps,
-          "%s 的表格连续（%d 行）" % (heading, len(rows)),
+          "%s 的表格连续（%d 行）" % (name, len(rows)),
           "空行在第 %s 行" % gaps if gaps else "未找到表格行")
     if rows:
-        col = seg[rows[0]].count("|")
         # 单元格里的 `||` 等未转义竖线会把该行拆成更多列，Markdown 表格因此错位
         def unescaped_pipes(line):
             return len(re.findall(r"(?<!\\)\|", line))
@@ -96,20 +109,23 @@ for heading in ["## 已知误报（不要报告）", "## 更新记录"]:
         inconsistent = [(i + start + 1, unescaped_pipes(seg[i]))
                         for i in rows if unescaped_pipes(seg[i]) != base]
         check(not inconsistent,
-              "%s 的列数一致（%d 列分隔）" % (heading, base),
+              "%s 的列数一致（%d 列分隔）" % (name, base),
               "不一致行（应写 \\| 转义）：%s" % inconsistent[:3])
 
 print()
 print("[2] ## 标题在文件内不得重复")
-for name, path in (("SKILL.md", SKILL_MD), ("evidence.md", EVIDENCE)):
+REF_DIR = os.path.join(SKILL_DIR, "references")
+MD_FILES = [SKILL_MD] + sorted(
+    os.path.join(REF_DIR, n) for n in os.listdir(REF_DIR) if n.endswith(".md"))
+for path in MD_FILES:
     lines = read(path)
-    seen, dups = {}, []
+    name = os.path.relpath(path, SKILL_DIR).replace(os.sep, "/")
+    seen = {}
     for i, l in enumerate(lines, 1):
         if l.startswith("## "):
             seen.setdefault(l.strip(), []).append(i)
-    for title, at in seen.items():
-        if len(at) > 1:
-            dups.append("%s (第 %s 行)" % (title[:40], at))
+    dups = ["%s (第 %s 行)" % (title[:40], at)
+            for title, at in seen.items() if len(at) > 1]
     check(not dups, "%s 无重复 ## 标题" % name, "; ".join(dups[:3]))
 
 print()
@@ -143,8 +159,9 @@ check(not bad_order, "轮次号递增", "; ".join(bad_order[:3]))
 
 print()
 print("[4] SKILL.md 引用的本地文件必须存在")
+sk_text = "\n".join(read(SKILL_MD))
 missing = []
-for m in re.finditer(r"\]\(\./([^)]+)\)", "\n".join(sk)):
+for m in re.finditer(r"\]\(\./([^)]+)\)", sk_text):
     if not os.path.exists(os.path.join(SKILL_DIR, m.group(1).replace("/", os.sep))):
         missing.append(m.group(1))
 check(not missing, "引用路径均存在", ", ".join(sorted(set(missing))))
@@ -152,7 +169,7 @@ check(not missing, "引用路径均存在", ", ".join(sorted(set(missing))))
 print()
 print("[5] references/ 下的 Markdown 必须被 SKILL.md 引用（防孤儿文档）")
 referenced = set()
-for m in re.finditer(r"\]\(\./([^)]+)\)", "\n".join(sk)):
+for m in re.finditer(r"\]\(\./([^)]+)\)", sk_text):
     referenced.add(m.group(1).replace("\\", "/"))
 ref_dir = os.path.join(SKILL_DIR, "references")
 ref_mds = sorted(n for n in os.listdir(ref_dir) if n.endswith(".md")) if os.path.isdir(ref_dir) else []
@@ -164,6 +181,7 @@ check(bool(ref_mds) and not orphans,
 
 print()
 print("[6] SKILL.md 的判据字母不得重复")
+sk = read(SKILL_MD)
 letters = [m.group(1) for m in re.finditer(r"(?m)^### ([A-Z])\. ", "\n".join(sk))]
 dup_letters = sorted({c for c in letters if letters.count(c) > 1})
 # 并行会话撞过号；重复编号会让「按编号查既有结论」这一步给出错误答案
