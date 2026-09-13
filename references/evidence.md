@@ -579,6 +579,36 @@
    一旦 CI 或本地设了 `GOTMPDIR`，该用例级覆盖会**静默失效**。
 3. A 组断言整体包在 `filepath.Separator == '/'` 里，**Windows 上该分支被跳过**——本机全绿不代表 CI 绿。
 
+#### GOTMPDIR 会架空用例级 TMPDIR 覆盖（已提 issue #19480）
+
+维护者用 `t.Setenv("TMPDIR", "/var/tmp")` 满足 A 组前提，但这句只在 `GOTMPDIR` 为空时有效：
+`t.TempDir()` → `c.makeTempDir()` → `os.MkdirTemp(os.Getenv("GOTMPDIR"), pattern)`
+（`$GOROOT/src/testing/testing.go`），仅当 `GOTMPDIR` 为空时 `os.MkdirTemp` 才用 `os.TempDir()`
+（`$GOROOT/src/os/file_unix.go:390` 的 `tempDir`，**不缓存** `TMPDIR`）。
+
+**两向对照实验（与平台无关，可在 Windows 复现）**——同一测试跑两次，只差 `GOTMPDIR`：
+
+```text
+A) GOTMPDIR=""          → t.TempDir() = <系统临时目录>/TestTempDirHonorsGOTMPDIR3895509988/001
+B) GOTMPDIR=<自定义目录> → t.TempDir() = <自定义目录>/TestTempDirHonorsGOTMPDIR4182409269/001
+                          （用例内 TMPDIR="…/forced" 被忽略）
+```
+
+`cmd/go` 自身不写 `GOTMPDIR`（`cmd/go/**` 内无写入点，只经 `cfg.Getenv` 读取），
+所以这是**条件性**触发，不是必然——但一旦触发，失败信息完全看不出与环境变量有关。
+
+**残留缺陷的完整清点（已提 issue #19480，24 小时内第 5 条）**：
+① 不预设 `TMPDIR` 时按文档命令跑 `go test ./...`，Linux 上必红 10 个用例，且报错指向 Obsidian 校验而非夹具位置；
+② `GOTMPDIR` 非空时用例级覆盖静默失效（上面的实验）；
+③ A 组断言在 Windows 被平台守卫跳过；macOS 的 `TMPDIR` 默认 `/var/folders/…` 同属 `/var` 前缀、
+按同一机制会红，而文档只写了 Linux（此条**未在 macOS 实机验证**，属机制推断，报告中已如实标注）。
+
+**修复趋势**：维护者对 #19472 的处置是「让环境满足夹具」（CI 设变量 + 单用例再设回去），
+而不是「让夹具自足」。这类修复的特征是**把测试正确性外包给环境配置**，
+代价是同一命令在开发机与 CI 上结论不同。审查这类修复时，应逐一问：
+「换一台机器/换一个默认值，这条断言还成立吗？」「覆盖它依赖的那个前提，有没有被显式断言过？」
+
+
 
 #### 第十一轮的方法论教训
 
