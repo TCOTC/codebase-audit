@@ -770,3 +770,94 @@ Electron 44 下 `nodeIntegration` 默认 false、`sandbox` 默认 true → `requ
    必须采用前端临时载体；否则修法会从「体验缺陷」升级为「数据污染」。
 4. 补测试时同时断言「重渲后仍保留」与「用户主动取消后不再保留」。
 
+### P27 前端设置项有键、内核持久化结构无字段（静默无效的开关）
+
+**对应判据**：D3c、A、P15。
+
+**定义**：新增设置项时只改了前端（对话框、类型声明、消费点），**内核持久化 struct 与其镜像 DTO 未同步**。
+因解码走标准 `encoding/json` 且无 `DisallowUnknownFields`，多出来的键被静默丢弃；内核随后用少键版本
+覆盖前端 config，开关永远回到默认值。用户看到的是「设置项存在、可点、但完全不生效」——不是报错，也不是数据丢失，
+比 P15 更难被发现（P15 至少表现为数据消失）。
+
+**为何出现**：P15 是「抄写后冻结」，本模式是**方向反过来**：新字段先在前端落地（因为要在 UI 上先看得见），
+内核结构与其镜像 DTO（`apicontract` + `schema.json` + 生成的前端类型）三处都等着后续补，然后被遗忘。
+镜像 DTO 的存在会让「内核结构有 6 个键」看起来像「契约就是这样」，从而掩盖缺失。
+
+**附带症状（很有辨识度）**：若前端用对象深比较做保存守门（如 `objEquals` 先比 `Object.keys` 长度），
+「对话框 N+1 键 vs 配置 N 键」让守门**恒不成立** → 每次关闭面板都触发一次全命名空间写 + 广播，
+即使用户什么都没改。看到「某面板每次关闭都写一次配置」时，先查键数是否对齐。
+
+**实证案例（本仓库）**：设置 - 外观 - 通知 的「全选不完整提示」开关。
+- 前端 `app/src/config/tabs/appearanceTab.ts:1149-1160` 的 `NOTIFICATIONS_ITEMS` 有 7 项，`readNotificationsFromDialog`（`:1177-1188`）读 7 键；
+- 内核 `kernel/util/appearance.go:63-70` 的 `Notifications` 只有 6 字段（无 `SelectAllIncompleteTip`）；
+  镜像 `kernel/apicontract/bazaar.go:360-368` 的 `BazaarNotifications`、`schema.json`、生成物同样 6 字段；全内核 grep 零命中；
+- `kernel/api/setting.go:744` 解码无 `DisallowUnknownFields` → 静默丢弃；`:759` 覆盖 `model.Conf.Appearance`；`:775` 广播；
+- `app/src/index.ts:91` 的 WS 分支 `appearanceConfigApi.apply` → `applyAppearanceConfig`（`appearanceRuntime.ts:86`）整对象覆盖；
+- 消费点 `app/src/protyle/wysiwyg/keydown.ts:229-234` 判断 `=== false`，永远为假 → 该提示**无法关闭**，
+  且它没有兄弟项 `selectAllTip` 那样的「不再提醒」按钮，坏开关是唯一入口；
+- 附带：`app/src/util/functions.ts:98-106` 的 `objEquals` 先比键数 → 每次关闭对话框都写一次 `setAppearance`；
+- 同文件 `mountAppearanceSetStatusBar` 用同一守门且能命中，证明守门本身没问题，是键数不齐。
+
+**检查法**：
+1. grep 前端设置项字段名在「内核 struct / 镜像 DTO / schema / 生成物」四处的出现次数，缺即为漏项。
+2. 确认解码是否严格（无 `DisallowUnknownFields` → 静默）。
+3. 找消费点，确认它读的是「内核持久化配置」而不是前端本地状态（若是本地，则可能是有意设计）。
+4. 反证：该字段是否由 localStorage / 其它通道持久化？逐条排除后再定性。
+5. 不变量：前端读写路径涉及的键集合 ⊆ 内核 struct 的 `json` 键集合（Go 侧反射枚举 tag 做防漂移测试）。
+6. 修法注意：新增字段若用于「默认启用」的开关，**必须用 `*bool` + `omitempty`**——老配置里该对象非 nil，
+   整体补默认值不会触发，用 `bool` 会把存量用户反序列化成 `false`，造成反向行为变更。
+
+### P28 词法路径校验在符号链接面前失效（叶子 vs 中间组件）
+
+**对应判据**：D1h、E3、D1。
+
+**定义**：路径守卫用纯词法运算（`filepath.Clean` + `IsSubPath`、`strings.HasPrefix(rel, "..")`）判断「是否在本目录内」，
+不解析真实路径。同族其它实现都额外做了 `EvalSymlinks` 双侧校验、逐级 `Lstat` 拒绝 `ModeSymlink`、或改用 `os.Root`，
+唯独这一处（往往还是**唯一做破坏性操作**的那一处）只做词法校验。
+
+**关键区分（第一轮审查容易在这里失手）**：
+- **叶子是软链**：`unlink` 只删链接本身，`os.RemoveAll` 不会递归进目标 → 影响有限；
+- **中间组件是软链**：`unlink` 由内核解析全部前导组件，只对最后一段不 follow；`RemoveAll` 失败后
+  `OpenFile(parentDir)` 打开的是**链接目标**（该调用**没有 `O_NOFOLLOW`**，对比 `os.Root` 的 `openDirAt` 带 `O_NOFOLLOW`）
+  → 目录场景是**递归删除目录外的整棵树**。
+
+**实证案例（本仓库）**：`kernel/model/template.go:106-121` 的 `RemoveTemplate` 只做 `Clean` + `IsSubPath`，
+注释却写「防止任意文件被删除」。同族四处都做了软链防护：
+`kernel/api/template.go:159-176` `isPathInTemplatesDir`（`EvalSymlinks` 双侧 + 注释明确写「防止通过符号链接指向模板目录外的敏感文件」）、
+`kernel/model/template.go:1221-1245` `resolveDocContentTemplatePath`、
+`kernel/model/template_manage.go:98-115` `checkTemplateFilePath`（逐级 `Lstat` 拒绝 `ModeSymlink`）+ `:309-316` 用 `os.Root`、
+`kernel/model/template_doc_tree.go:405-434` `resolveTemplatePackageFile`；后三处都有软链测试，唯独 `RemoveTemplate` 没有。
+触发形态：`templates/link -> ..`（或任一目录外路径），`RemoveTemplate("link/conf")` 会递归删除 `<data>/conf`。
+附带同族缺口：`kernel/mcp/tools/template.go` 的 `resolveTemplatePath` 同样只做词法校验，读取路径也越界。
+
+**检查法**：
+1. grep 路径守卫的实现，按「词法 / realpath / `os.Root` / 逐级 Lstat」分组，找少数派与唯一做破坏性操作的那个。
+2. **分别构造「叶子软链」与「中间组件软链」两种输入**，确认 `Remove*`/`Read*`/`Write*` 的实际行为；
+   不要只验证叶子就下结论。
+3. 找同族测试：若其它实现都有软链回归测试而此处没有，是强信号。
+4. 注意同族不同实现的**口径**可能互不一致（`HasPrefix(rel, "..")` 会把名为 `..foo` 的合法子目录误判为越界），
+   修复应先把解析收敛到单一函数，而不是逐处打补丁。
+
+### P29 异步队列吞掉落盘错误使调用方假成功
+
+**对应判据**：D1i、P1、G2。
+
+**定义**：写入走「入队 + 只等队列排空」（`PerformTransactions` + `FlushTxQueue`）时，提交失败只在内部记日志并推送错误提示，
+**函数仍返回成功**。调用方据此判断「已落盘」并继续做破坏性动作（删除源文件、清理临时物、标记完成），
+一个可重试的失败就升级为**静默数据丢失**。
+
+**为何出现**：异步队列的接口设计成「排空即返回」，没有把单笔提交的结果回传给调用方；
+调用方（尤其是 CLI/MCP/批处理入口）只需要一个 `error`，于是拿到了无意义的 nil。
+
+**实证案例（本仓库）**：`model.CreateDocByMd` → `createDoc0` → `performCreateDocTransaction`
+（`kernel/model/file.go:2422-2430`）入队后只 `FlushTxQueue()`；落盘失败经 `kernel/model/transaction.go:120`/`:488`
+的 `logging.LogErrorf` + `util.PushTxErr` 上报（弹界面提示），`CreateDocByMd` 仍返回 `tree, nil`。
+`kernel/mcp/tools/inbox.go:208` 的 `inbox convert` 因此会在「本地 `.sy` 从未落盘」的情况下记为成功，
+并在默认 `remove_after=true` 下**删除云端原件**。
+
+**检查法**：
+1. grep 异步事务的排空函数，确认其签名与实现是否传播错误。
+2. 列出所有「基于返回 nil 推断落盘成功」的调用方，重点看其中是否有破坏性后续动作。
+3. 与同族的同步写入路径对比（同步路径通常会返回真实错误）。
+4. 修法优先级：先让调用方能拿到真实结果（或失败时不执行破坏性后续动作），再考虑其它。
+

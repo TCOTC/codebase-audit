@@ -576,3 +576,63 @@
    `app/src/protyle/render/av/virtualScroll.ts:252` 表格的 `galleryColumn` 被算成 2（性能面，非正确性）；
    `app/src/protyle/render/av/select.ts:626` 批量替换分支的 `mSelect` 访问是族内唯一未加可选链处。
 
+## 第十五轮（2026-09-13）：前端设置项 / 内核契约 / 路径校验 / MCP 租约
+
+范围：`app/src/protyle/wysiwyg` + `app/src/protyle/util`、`app/src/ai` + `app/src/plugin`、
+`app/src/config`（除 entryVisibility）+ `app/src/boot` + `app/src/util` + `app/src/dialog`、
+`kernel/{bazaar,job,plugin,mcp,task,cache,heif}`。四路只读侦察 + 主线取证，五条候选过挑战门。
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D3c（新 P27） | 设置 - 外观 - 通知 的「全选不完整提示」开关永不生效：前端 `APPearanceTab.ts:1149-1160` 有 7 项，内核 `kernel/util/appearance.go:63-70` 只有 6 字段（镜像 `apicontract/bazaar.go:360-368` 同），静默丢弃后被广播覆盖；消费点 `keydown.ts:229-234` 永远为假。附带 `objEquals` 恒不成立 → 每次关闭该对话框都写一次 `setAppearance` | 高（挑战门两轮 CONFIRMED，严重度中） | 待提 issue |
+| D1h（新 P28） | `kernel/model/template.go:106-121` `RemoveTemplate` 只做词法校验，`templates/link -> ..` 时 `RemoveTemplate("link/conf")` 会递归删除目录外的 `<data>/conf`；同族四处均有 realpath / 逐级 Lstat / `os.Root` 防护且带软链测试。`kernel/mcp/tools/template.go` 的读取路径同样缺校验 | 高（挑战门：第一轮误判降级，复活轮纠正后 CONFIRMED，严重度中） | 待提 issue |
+| F | `app/src/config/render/render.ts:72` 的 `textarea` 分支不转义（同函数 `:76`/`:80` 转义），7 个配置项受影响；`</textarea>` 提前闭合 + RCDATA 解码实体 → 面板显示值≠配置值并静默回写 | 高（挑战门两轮 CONFIRMED，严重度低） | 待提 issue |
+| D3（新 P29 附带） | `kernel/mcp/tools/box_lease.go:30-47` 的加密租约白名单缺 `inbox`（`inbox.go:208` 与白名单内的 `document.go:134` 调用同一句 `CreateDocByMd(notebook, …)`，且 resolver 已支持 `notebook` 键）；根因是 `performCreateDocTransaction` 吞掉落盘错误（`model/file.go:2422-2430` + `transaction.go:120/488`）→ 报成功却删云端原件 | 高（挑战门两轮 CONFIRMED；第一轮把 `tag`/`bookmark` 一并列入属误报，已剔除；严重度低） | 待提 issue |
+| D1 | `kernel/plugin/api_agent.go:174` 注册用局部名作键，返回值 `{id, name}` 都不等于该键，`unregisterCapability` 未命中时静默 resolve | — | **REJECTED**：petal `kernel.d.ts` 明确 `unregisterCapability` 接收注册时的局部名，按文档调用可正常注销；残留易用性问题见「未取证候选」 |
+
+### 已审查并驳回
+
+- **`tag` / `bookmark` 缺租约**（原与 `inbox` 同列一条）：这两个工具只能从**全局索引**取候选文档
+  （`model/tag.go:39/146` → `sql.QueryTagSpansByLabel`、`model/bookmark.go:41/113` → `sql.QueryBookmarkBlocks`，
+  均只查全局库），而加密笔记本的内容索引在独立 SQLCipher 库、未解锁时 fail-closed 不回退全局；
+  `docs/ENCRYPTED-NOTEBOOK.md` 明确标签/书签不支持加密笔记本。因此加入白名单是死代码，判为**有意排除**。
+- **`kernel/plugin/api_agent.go` 注册/注销键不一致**：见上表 REJECTED 理由。
+
+### 未取证候选（勿重报，除非有新证据）
+
+- `kernel/heif/convert.go:155-170` `ImageSize` 无 ctx/超时地阻塞在单槽信号量上（`convert` 侧有 `select` + 超时）。
+- `kernel/mcp/client/oauth_store.go:157-170` `removeOAuthCredential` 缺少另外三个函数都有的「Endpoint/Resource 归一化」
+  （当前唯一调用点传 `""` 故不可达）。
+- `kernel/plugin/api_agent.go` 的 API 易用性：`registerCapability` 返回 `{id, name}` 但两者都不是注销所需的局部名，
+  与前端 `addAgentCapability`（`app/src/plugin/index.ts:575-612` 返回 `id`、`uninstall.ts:80-84` 按 `id` 注销）
+  的约定不一致；且未命中时无日志。属契约回显缺口，非功能缺陷。
+- `kernel/model/template.go` 的 `RemoveTemplate` 与 MCP `resolveTemplatePath` 之外，
+  `kernel/cli/cmd/template.go:202-214` 的 `resolveTemplateAbs` 用 `strings.HasPrefix(rel, "..")`，
+  会把名为 `..foo` 的合法子目录误判为越界（同族实现口径不一致）。
+- `app/src/protyle/util/table.ts:258/377/403` 与 `tableControl.ts:2050/2652` 的 `querySelectorAll("col")` 缺 `:scope > colgroup > col`
+  作用域（同族 4 处已加），需表格缺 `<colgroup>` 且含嵌套表格才可达。
+- `app/src/protyle/util/tableControl.ts:2004-2011` 删除行/列不传 `options`，故 `table.ts:1201-1219` 的光标与滚动恢复不执行
+  （同函数为另一调用方实现了该恢复）。
+- `app/src/protyle/util/viewFold.ts:247-266` `applyFold` 展开时缺 `applyFoldState` 的三步收尾
+  （行号重排、`clearSelect`、`scrollCenter`）。
+- `app/src/plugin/index.ts:629-635` 的 `removePluginDock(this, id)` 按 id 在全部 dock type 中匹配，
+  同 id 跨 type 时会误删另一个停靠栏（需插件复用 id）。
+- `app/src/config/tabs/ai/aiUi.ts:164-172`/`:497-505` 用每帧 rAF 轮询 `document.contains` 来清理 `setInterval`。
+- `app/src/layout/dock/Inbox.ts:123/129` 的 `splice(indexOf(x), 1)` 未命中时删末尾（第 14 轮已记，仍未证可达）。
+
+### 方法论教训
+
+1. **文件系统语义必须区分「叶子」与「中间组件」**。本轮 `RemoveTemplate` 的第一轮审查只验证了「叶子是软链」，
+   据此把发现降级为「防御纵深不一致」；复活轮指出 `unlink` 会解析全部前导组件、`RemoveAll` 打开 parentDir 时无
+   `O_NOFOLLOW`，因此中间组件软链会操作链接目标（目录场景是**递归删除目录外整棵树**）。
+   **挑战门的第一轮也可能错**，对「降级理由本身是技术断言」的情况必须再验一次断言。
+2. **逐条核对行号与「同列发现」的独立性**。本轮把 `tag`/`bookmark` 与 `inbox` 合并成一条，前者实为误报
+   （候选来源是全局索引，物理上不含加密笔记本）；合并表述会让一条正确发现背上两条错误论据。
+3. **「一致性缺陷」要写清它是谁的不一致**：`appearanceTab` 的守门函数在同文件另一处能正常工作，
+   证明问题在键集合而不在守门逻辑——这类「同文件对照组」比引用外部规范更有说服力。
+4. **机械扫描的增量仍为 0**：`kernel/` 首次扫描得 27 条重复字面量（592 文件），逐条核对后无新命中；
+   本轮的 4 条发现全部来自定向语义核查。
+5. **白名单类缺陷要先判定「筛选标准是什么」**。`encryptedBoxScopedToolNames` 的真实标准不是「会不会碰到加密笔记本」
+   而是「会不会把加密笔记本的明文带进响应」，按此标准 `inbox` 的取舍才清楚；
+   同时 `docs/ENCRYPTED-NOTEBOOK.md` 的成文政策（MCP 编辑操作应持租约）与实现不一致，属「白名单语义未对齐政策」。
+
