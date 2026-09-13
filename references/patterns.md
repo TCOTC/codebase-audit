@@ -241,6 +241,45 @@
 4. 无测试覆盖的辅助/同义函数优先排查。
 5. 定性严重度前先确认**有无替代路径**（缓存类还要确认唯一的失效机制是否存在）。
 
+### P14 能力白名单漏掉上游新增的容器成员
+
+**对应判据**：D3（闭合集合漏项）、D2（同一操作多表面）。
+
+**定义**：一段手写的类型白名单充当「某能力是否适用」的判据（如「能否接收子块」「是否容器块」），
+而该能力的权威定义在上游库的类型方法里。上游新增成员后白名单未同步，
+于是同一个块在**读路径**与**写路径**上得到相反结论。
+
+**为何出现**：白名单没有单一真源（不是从类型定义 codegen 出来的，也不是跨语言常量表），
+新特性落地时只改了功能路径，没人回头核对这份枚举。
+**同包或同文件若另有一个委托给上游的等价函数（如 `CanContainBlock`），两者必然开始自相矛盾——
+这是最省力的发现信号：不必先确认可达性，自相矛盾本身即强证据。**
+
+**实证案例（本仓库）**：
+- `kernel/treenode/blocktree.go:499` `IsContainerType` 白名单 = `"d","b","l","i","s","callout"`，不含 `"tab"`。
+- 但 `kernel/treenode/node.go:413` 已登记 `NodeTabItem → "tab"`，`kernel/treenode/blocktree.go:837` 把该缩写写入 `blocktrees`。
+- 上游 lute `ast.Node.IsContainerBlock()` 含 `NodeTabs`/`NodeTabItem`；`CanContain(NodeTabItem, NodeParagraph) = true`。
+- 同包 `kernel/treenode/block_structure.go:29` `CanContainBlock` 委托上游 → 同包自相矛盾；
+  同包 `kernel/treenode/tabs.go` 的 `NormalizeTabs` 还主动为页签项补齐段落子块（`tabs_test.go:19` 断言之）。
+- 后果：`CheckContainerParent`（`:511`）对页签项报 `type "tab" is a leaf block and cannot have children`（`:524`），
+  而读路径 `kernel/model/block.go:1635` `getChildBlocksFromTree`（用上游方法）能正常列出其子块——
+  实测同一个页签项 ID：`get_children` 返回 5 个子块、`append(parentID=该ID)` 被拒。
+- 时间线：白名单 `db266e7fab`（2026-06-20），页签特性 `5b8556e965`（2026-09-05）——**晚 2.5 个月且未回头同步**。
+
+**本仓库候选位置**：
+- 两份同义白名单：`treenode.IsContainerType`（缩写集合）与 `model.Block.IsContainerBlock`（全名集合），
+  后者唯一消费点是 `kernel/model/search.go:528`。
+- 任何以 `case "d", "b", …` / `case "NodeDocument", …` 手写枚举「能容纳子块 / 可编辑 / 可搜索 / 可导出」的函数。
+
+**检查法**：
+1. grep 出「把类型名或缩写列表写进 `case`」的能力判定函数（容器、可编辑、可搜索、可导出…）。
+2. 找同包/同文件**委托给上游类型方法的等价函数**，逐项 diff 两边成员集合；差异即候选。
+3. 判定权威侧：优先上游库类型方法（`IsContainerBlock` / `CanContain`），
+   再看同包是否有函数主动构造出该结构（如 `NormalizeTabs` 造 `TabItem > Paragraph`）。
+4. 用「读路径 vs 写路径」两端对照确认可达性（本例：读子块成功 = 写子块被拒，一条命令即可证）。
+5. 注意差异方向可能相反（白名单超收 / 漏收），不要一律向成员多的一侧补；
+   本例 `NodeTabs` 是**故意不收**（上游 `CanContain(NodeTabs, …)` 只允许 IAL），
+   所以「把上游两个成员都塞进白名单」是错的修法。
+
 ## 如何扩充本库
 
 1. 从一次**已确认的缺陷**出发（而非猜测），确认它为何未被既有判据捕获。

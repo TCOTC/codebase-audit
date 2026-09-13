@@ -219,6 +219,24 @@
 4. **缓存类缺陷要同时确认「唯一的失效路径」**。本轮逐一排除了 mtime 比较、启动清理、退出清理、cache-busting URL：启动清理（`kernel/util/working.go:365-368`）与退出清理（`kernel/model/conf.go:1500-1513`）的目录清单都不含 `thumbnails`，只有用户手动的 `clearTempFiles`（`kernel/model/box.go:870-873`）含之。**确认「无替代失效机制」后，死守卫才等价于永久陈旧。**
 5. **子代理并行侦察 + 主上下文自验的组合有效但需强约束**。三个 Explore 子代理各返回 2-3 条候选，其中 4 条经自验后为误报或不可达；要求「必须给出反证检查结果与置信度」显著降低了噪声。**子代理产出只能当候选，取证必须在主上下文重做。**
 
+### 第七轮（2026-09-13）
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D3（新 P14） | `kernel/treenode/blocktree.go:499` `IsContainerType` 白名单漏掉 `"tab"`（页签项）→ `CheckContainerParent`（`:511`）对页签项报 `type "tab" is a leaf block and cannot have children`（`:524`）。上游 lute `IsContainerBlock`/`CanContain` 与同包 `CanContainBlock`（`block_structure.go:29`）都认定页签项是容器块；同包 `NormalizeTabs` 还主动为其补段落子块。受影响的写路径共 14 处：API（`kernel/api/block_op.go:452,534,575,624,738`）、MCP（`kernel/mcp/tools/block.go:202,259,303,456`）、CLI（`kernel/cli/cmd/block.go:208,250,290,470`）、`kernel/model/block_operation.go:34`、`kernel/model/attribute_view_create.go:58` | 高（实测复现：同一页签项 ID `get_children` 返回 5 个子块、`append(parentID=该ID)` 被拒，报错串与 `:524` 完全一致） | 待提 issue |
+| D3（同源第二处） | `kernel/model/block.go:87` `Block.IsContainerBlock()` 同样漏掉 `NodeTabs`/`NodeTabItem`。唯一消费点 `kernel/model/search.go:528`（`((` 引用候选排除父块，issue #4538）；仅当用户在「搜索 - 页签项」开启该类型（`kernel/conf/search.go:47,93` 默认 false、`app/src/search/menu.ts:150`）时才可达，未实测 | 中 | 观察项，随主条目一并修复 |
+| A / F | 机械复扫：重复字面量 136 条（P1 100/P2 16/P3 20）、未转义插值 244 条/95 文件；逐条核对仍为已知噪声（`assets/`、`/stage/loading-pure.svg`、受 `app/src/types/api/index.d.ts` 联合类型约束的 `/api/` 字面量、CSS 选择器、`z-index` 插值） | — | 未命中 |
+| D4（脚本化复扫） | 子代理按「零值变量在函数内无二次赋值」复扫 `kernel/model`、`kernel/av`、`kernel/sql`、`kernel/search`、`kernel/treenode`，定式 `\w+\.\w+ \+= \w+$` 全仓 16 处逐一读毕，无反转 | — | 未命中（该类已随 #19398 清零） |
+
+### 第七轮的方法论教训
+
+1. **「同包自相矛盾」是闭合集合漏项的最省力入口**。本轮不必先证明可达性：同包 `CanContainBlock`（委托上游）说页签项能容纳段落，而 `IsContainerType` 说它是叶子块，二者必有一错。**在一个包里找同一语义的两份判定，diff 它们的成员集合，比通读调用链快一个数量级。**
+2. **手写能力白名单要按「特性时间线」核对**。白名单 `db266e7fab`（2026-06-20）早于页签特性 `5b8556e965`（2026-09-05）2.5 个月——**用 `git log -S` 定位白名单与新特性的引入顺序，能一眼判定「漏项」而非「有意排除」**。
+3. **权威侧判定的顺序：上游库类型方法 > 同包委托上游的函数 > 同包主动构造该结构的函数 > 手写枚举**。本例三者一致指向「页签项是容器」，白名单是唯一少数派。
+4. **差异方向要逐成员定性，修法不是「往多的一侧补」**。上游 `IsContainerBlock` 含 `NodeTabs` 与 `NodeTabItem` 两个成员，但 `CanContain(NodeTabs, …)` 只允许 IAL——直接补齐两个会放行非法嵌套。**写建议时必须给出「只补 `tab`，或改用 `CanContain` 语义判定」这类精确修法。**
+5. **一票否决的实测优势：拒绝型缺陷可以零副作用复现**。`append(parentID=页签项ID)` 预期失败，执行后工作区无任何写入，因此可以放心在真实实例上取证；相比之下「写入成功型」缺陷需要建临时文档并回删。**优先挑选零副作用的复现场景。**
+6. **MCP 工具可直接充当内核 API 的取证探针**，无需本机 HTTP：`mcp_siyuan_block` 的 `append/move/insert` 走的就是 `CheckContainerParent` 同一条路径，`get_children` 则是读路径对照。注意 `mcp_siyuan_sql` 只暴露主库，`blocktrees` 表不可查（`no such table: blocktrees`），页签项的 `type='tab'` 只能在 `blocks` 表验证，`blocktrees` 侧靠 `blocktree.go:837` 的写入代码佐证。
+
 ## 如何更新本文
 
 每轮审计后追加：
