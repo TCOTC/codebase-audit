@@ -132,7 +132,7 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D3 / B（新 P11） | `kernel/util/path.go:341` `SiYuanAssetsAudio` 漏 `.aac`，TS `app/src/constants.ts:878` 含之；`IsDisplayableAsset` 为 false 使快照中的 `.aac` 退化为文本路径 | 高（代码可证，挑战门两轮 CONFIRMED） | 待提 issue |
+| D3 / B（新 P11） | `kernel/util/path.go:341` `SiYuanAssetsAudio` 漏 `.aac`，TS `app/src/constants.ts:878` 含之；`IsDisplayableAsset` 为 false 使快照中的 `.aac` 退化为文本路径 | 高（代码可证，挑战门两轮 CONFIRMED） | 已提 issue #19400 |
 | D3（反向漂移，观察项） | `SiYuanAssetsImage`（`path.go:340`）缺 `.tif`/`.tiff`，TS 侧含之；方向相反，需先定权威侧 | 中 | 观察项，不并入上条 |
 
 ### 第三轮的方法论教训
@@ -154,7 +154,7 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D1 / B（新 P12） | `app/src/util/pathName.ts:174` `getAssetName` 的资源 ID 后缀正则未锚定结尾，剥**首个**匹配而非**结尾** ID，泄漏内部资源 ID 到重命名默认名 / 另存为默认名 / 数据库资源单元格 / 资源提示链接文字 | 高（Node 实测 + 5 处权威实现对照，挑战门两轮 CONFIRMED，严重度 low） | 待提 issue |
+| D1 / B（新 P12） | `app/src/util/pathName.ts:174` `getAssetName` 的资源 ID 后缀正则未锚定结尾，剥**首个**匹配而非**结尾** ID，泄漏内部资源 ID 到重命名默认名 / 另存为默认名 / 数据库资源单元格 / 资源提示链接文字 | 高（Node 实测 + 5 处权威实现对照，挑战门两轮 CONFIRMED，严重度 low） | 已提 issue #19419 |
 | F / A / E3 | 未转义插值、重复字面量、`HasSuffix`/`HasPrefix` 边界等机械候选（本轮复扫 128/243 条）均逐条核对为误报或低危 | — | 未命中 |
 | C（状态保持） | 逐条核对了快捷键面板搜索重置、AV 插入行清空搜索、历史面板切换仓库清空搜索：均有两处以上同类实现或存在功能性理由，判为有意设计 | — | 不报告 |
 | D1 | `kernel/av/sort.go` 的 `KeyTypeNumber`/`KeyTypeDate` 空值分支逻辑不满足反对称性，但唯一调用方 `sort.SliceStable` 已在外层用 `isSortValueEmpty` 过滤空值 → 死代码，无观测行为 | 高 | 观察项，不报告 |
@@ -181,7 +181,7 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D1（同构分支判空缺失） | `kernel/av/calc.go` 中 relation 与 rollup 的 `CalcOperatorCountValues` 只做裸非空判断（`:1687`、`:1778`），而同函数的 `CountEmpty`/`CountNotEmpty` 按 `len(BlockIDs)`/`len(Contents)` 判空。因单元格在 `Calc` 之前已被 `fillAttributeViewBaseValue`（`kernel/sql/av.go:553`）经 `FillAttributeViewNilValue`（`:1100`）/`GetAttributeViewDefaultValue`（`kernel/av/value.go:3194`）无条件补成 `&ValueRelation{}`/`&ValueRollup{}`，该守卫恒真 → 「值数量」恒等于「条目数」 | 高（归一化链逐环核实；挑战门两轮 CONFIRMED，严重度 low） | 待提 issue |
+| D1（同构分支判空缺失） | `kernel/av/calc.go` 中 relation 与 rollup 的 `CalcOperatorCountValues` 只做裸非空判断（`:1687`、`:1778`），而同函数的 `CountEmpty`/`CountNotEmpty` 按 `len(BlockIDs)`/`len(Contents)` 判空。因单元格在 `Calc` 之前已被 `fillAttributeViewBaseValue`（`kernel/sql/av.go:553`）经 `FillAttributeViewNilValue`（`:1100`）/`GetAttributeViewDefaultValue`（`kernel/av/value.go:3194`）无条件补成 `&ValueRelation{}`/`&ValueRollup{}`，该守卫恒真 → 「值数量」恒等于「条目数」 | 高（归一化链逐环核实；挑战门两轮 CONFIRMED，严重度 low） | 已提 issue #19422 |
 | A / F / E3 | 机械复扫：重复字面量 135 条、未转义插值 244 条、前端 `/api/` 路由字面量 462 个、前端 i18n 键 0 缺失、内核 `Conf.Language(n)` 索引 0 越界；逐条核对后无新命中 | — | 未命中 |
 | P10 | 把「累加器恒为初值」一般化为脚本（零值变量在函数内无二次赋值）后复扫全仓，`assigns=0` 仅 8 处，逐条核对均为结构体字段初始化或合法守卫 | — | 未命中（该 bug 类已随 #19398 修复） |
 | C | 并行核查编辑器 / 设置对话框 / 移动端的状态保持，确认存在 `valid()`/`epoch`/`revision` 二次校验与显式 scroll/focus/展开态保存恢复；仅 AI 设置的三处开关存在「旧数组快照整段覆盖」的丢失更新（窄窗口，未报告） | 中 | 观察项，不报告 |
@@ -207,7 +207,7 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D1b（新 P13）/ E3 | `kernel/util/file.go:417` `IsCompressibleAssetImage` 的 `HasPrefix(p, "assets/")` 守卫恒为 false（唯一调用点 `kernel/model/assets.go:237` 传绝对路径），函数体却用 `strings.Cut(p, "assets/")` 按绝对路径切片；后果是 `temp/thumbnails/assets/**` 永不失效 | 高（调用链逐点核实；挑战门第一轮 CONFIRMED、第二轮 DOWNGRADED 严重度为低） | 待提 issue |
+| D1b（新 P13）/ E3 | `kernel/util/file.go:417` `IsCompressibleAssetImage` 的 `HasPrefix(p, "assets/")` 守卫恒为 false（唯一调用点 `kernel/model/assets.go:237` 传绝对路径），函数体却用 `strings.Cut(p, "assets/")` 按绝对路径切片；后果是 `temp/thumbnails/assets/**` 永不失效 | 高（调用链逐点核实；挑战门第一轮 CONFIRMED、第二轮 DOWNGRADED 严重度为低） | 已提 issue #19424 |
 | 候选（未过挑战门） | `kernel/av/filter.go:799-807` 汇总筛选 `None + Is empty` 在「存在空目标值」时 `return true`，与同输入的 `Any`（`:716` 亦 true）、`All`（`:758` false）冲突，且与本分支紧随的循环（发现空即 `return false`）方向相反 | 中 | 附录观察项 |
 | A / F | 机械复扫：重复字面量 136 条、未转义插值 244 条；逐条核对仍为已知噪声（`conf.json`、CSS 选择器、受类型约束的 `/api/` 路由、数值字符串） | — | 未命中 |
 
@@ -223,7 +223,7 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D3（新 P14） | `kernel/treenode/blocktree.go:499` `IsContainerType` 白名单漏掉 `"tab"`（页签项）→ `CheckContainerParent`（`:511`）对页签项报 `type "tab" is a leaf block and cannot have children`（`:524`）。上游 lute `IsContainerBlock`/`CanContain` 与同包 `CanContainBlock`（`block_structure.go:29`）都认定页签项是容器块；同包 `NormalizeTabs` 还主动为其补段落子块。受影响的写路径共 14 处：API（`kernel/api/block_op.go:452,534,575,624,738`）、MCP（`kernel/mcp/tools/block.go:202,259,303,456`）、CLI（`kernel/cli/cmd/block.go:208,250,290,470`）、`kernel/model/block_operation.go:34`、`kernel/model/attribute_view_create.go:58` | 高（实测复现：同一页签项 ID `get_children` 返回 5 个子块、`append(parentID=该ID)` 被拒，报错串与 `:524` 完全一致） | 待提 issue |
+| D3（新 P14） | `kernel/treenode/blocktree.go:499` `IsContainerType` 白名单漏掉 `"tab"`（页签项）→ `CheckContainerParent`（`:511`）对页签项报 `type "tab" is a leaf block and cannot have children`（`:524`）。上游 lute `IsContainerBlock`/`CanContain` 与同包 `CanContainBlock`（`block_structure.go:29`）都认定页签项是容器块；同包 `NormalizeTabs` 还主动为其补段落子块。受影响的写路径共 14 处：API（`kernel/api/block_op.go:452,534,575,624,738`）、MCP（`kernel/mcp/tools/block.go:202,259,303,456`）、CLI（`kernel/cli/cmd/block.go:208,250,290,470`）、`kernel/model/block_operation.go:34`、`kernel/model/attribute_view_create.go:58` | 高（实测复现：同一页签项 ID `get_children` 返回 5 个子块、`append(parentID=该ID)` 被拒，报错串与 `:524` 完全一致） | 已提 issue #19428 |
 | D3（同源第二处） | `kernel/model/block.go:87` `Block.IsContainerBlock()` 同样漏掉 `NodeTabs`/`NodeTabItem`。唯一消费点 `kernel/model/search.go:528`（`((` 引用候选排除父块，issue #4538）；仅当用户在「搜索 - 页签项」开启该类型（`kernel/conf/search.go:47,93` 默认 false、`app/src/search/menu.ts:150`）时才可达，未实测 | 中 | 观察项，随主条目一并修复 |
 | A / F | 机械复扫：重复字面量 136 条（P1 100/P2 16/P3 20）、未转义插值 244 条/95 文件；逐条核对仍为已知噪声（`assets/`、`/stage/loading-pure.svg`、受 `app/src/types/api/index.d.ts` 联合类型约束的 `/api/` 字面量、CSS 选择器、`z-index` 插值） | — | 未命中 |
 | D4（脚本化复扫） | 子代理按「零值变量在函数内无二次赋值」复扫 `kernel/model`、`kernel/av`、`kernel/sql`、`kernel/search`、`kernel/treenode`，定式 `\w+\.\w+ \+= \w+$` 全仓 16 处逐一读毕，无反转 | — | 未命中（该类已随 #19398 清零） |
@@ -241,7 +241,7 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D3c（新 P15）/ A / P4 | 搜索「保存条件」静默丢弃 `tabs`/`tabItem` 两个类型过滤开关：权威集合 `kernel/conf/search.go:46-47` 的 `conf.Search.Tabs`/`TabItem`（`TypeFilter()` 与 `kernel/model/search.go:2090-2091` 的 `buildTypeFilter` 都按这两个键读），但 `kernel/model/storage.go:142` 的 `model.CriterionTypes` 与 `kernel/apicontract/criterion.go:20` 的 `apicontract.CriterionTypes` 都只有 18 字段。前端 `app/src/search/menu.ts:347` 把 20 键的 `config.types` 整体 POST，经 `criterionModel` 指针强转落盘；读回时 `app/src/search/config.ts:198` 又用条件的 `types` 整体替换当前 config。实测 POST 20 键 → GET 18 键，`tabs`/`tabItem` 消失 | 高（本机运行实例实测；挑战门两轮 CONFIRMED） | 待提 issue |
+| D3c（新 P15）/ A / P4 | 搜索「保存条件」静默丢弃 `tabs`/`tabItem` 两个类型过滤开关：权威集合 `kernel/conf/search.go:46-47` 的 `conf.Search.Tabs`/`TabItem`（`TypeFilter()` 与 `kernel/model/search.go:2090-2091` 的 `buildTypeFilter` 都按这两个键读），但 `kernel/model/storage.go:142` 的 `model.CriterionTypes` 与 `kernel/apicontract/criterion.go:20` 的 `apicontract.CriterionTypes` 都只有 18 字段。前端 `app/src/search/menu.ts:347` 把 20 键的 `config.types` 整体 POST，经 `criterionModel` 指针强转落盘；读回时 `app/src/search/config.ts:198` 又用条件的 `types` 整体替换当前 config。实测 POST 20 键 → GET 18 键，`tabs`/`tabItem` 消失 | 高（本机运行实例实测；挑战门两轮 CONFIRMED） | 已提 issue #19429 |
 | 观察项（未过业务表现门槛） | `app/src/protyle/wysiwyg/index.ts:2172` 划选探测的容器类名表含 `callout` 但不含 `tabs`/`tab-item`，而同一调用链 `app/src/protyle/wysiwyg/getBlock.ts:235` 的块级判定含之；因 `elementFromPoint` 基本命中 `.tab-item-content` 内的段落，无法稳定构造输入 → 不上报 | 低 | 附录观察项 |
 | 观察项（未过业务表现门槛） | `app/src/protyle/wysiwyg/getBlock.ts:172` `getNoContainerElement` 的容器类名表缺 callout/tabs/tab-item，唯一调用点是面包屑兜底；容器块自身 ID 本就可查面包屑，倾向有意省略 | 低 | 附录观察项 |
 | A / F | 机械复扫：重复字面量 136 条（P1 100/P2 16/P3 20）、未转义插值 244 条；逐条核对仍为已知噪声 | — | 未命中 |
@@ -385,10 +385,38 @@
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D1 / B（新 P18） | 数据库汇总列（rollup）的 `Percent checked` / `Percent unchecked` 算成了裸整数：`kernel/av/value.go:3167`/`:3179` 的 `(*ValueRollup).calcContents` 用 `float64(countChecked*100/len(r.Contents))` + `NumberFormatNone`（赋值 `:3177`/`:3189`）；而同 switch 的三个兄弟分支（`:2824`/`:2834`/`:2846`）与**同一算子的另一条路径** `calcFieldCheckbox`（`kernel/av/calc.go:1654-1679`）都用比值 + `NumberFormatPercent`。`formatNumber`（`:2247`）对 Percent 会乘 100 并补 `%`，故错误分支是「先乘 100 再不打百分号」。业务表现：汇总列选「已完成占比」，2/3 显示 `66`（应 `66.67%`），**1/200 显示 `0`**（应 `0.5%`，整数除法截断）。渲染链 `kernel/sql/av.go:816` → `BuildContents` → `calcContents`，前端 `attributeValue.ts:78` / `cell.ts:1387` 直出 `formattedContent`，无二次归一化 | 高（代码可证 + 同包两处权威侧对照；挑战门两轮 CONFIRMED / 第二轮把严重度收窄至低） | 待提 issue |
+| D1 / B（新 P18） | 数据库汇总列（rollup）的 `Percent checked` / `Percent unchecked` 算成了裸整数：`kernel/av/value.go:3167`/`:3179` 的 `(*ValueRollup).calcContents` 用 `float64(countChecked*100/len(r.Contents))` + `NumberFormatNone`（赋值 `:3177`/`:3189`）；而同 switch 的三个兄弟分支（`:2824`/`:2834`/`:2846`）与**同一算子的另一条路径** `calcFieldCheckbox`（`kernel/av/calc.go:1654-1679`）都用比值 + `NumberFormatPercent`。`formatNumber`（`:2247`）对 Percent 会乘 100 并补 `%`，故错误分支是「先乘 100 再不打百分号」。业务表现：汇总列选「已完成占比」，2/3 显示 `66`（应 `66.67%`），**1/200 显示 `0`**（应 `0.5%`，整数除法截断）。渲染链 `kernel/sql/av.go:816` → `BuildContents` → `calcContents`，前端 `attributeValue.ts:78` / `cell.ts:1387` 直出 `formattedContent`，无二次归一化 | 高（代码可证 + 同包两处权威侧对照；挑战门两轮 CONFIRMED / 第二轮把严重度收窄至低） | 已提 issue #19435 |
 | A / F | 机械复扫：重复字面量 153 条（P1 117 / P2 16 / P3 20）、未转义插值 244 条 / 95 文件；逐条核对仍为已知噪声（`assets/`、`/stage/loading-pure.svg`、受 `app/src/types/api/index.d.ts` 约束的 `/api/` 字面量、`conf.json`、CSS 选择器、`z-index` 插值） | — | 未命中 |
 | 子代理候选（未通过本上下文取证或挑战门） | `kernel/model/export.go:1898` PDF 书签 `bms[h.ID]` 无 `ok` 判断（兄弟分支 `:1886` 有）；`kernel/model/import.go:2240` 图片 `title` 建 `NodeLinkTitle` 时未写 `Tokens`（`<a>` 分支 `:2300` 有）；`kernel/model/carddav.go:625` 多卡 vCard 拆分时 map key 用循环不变量 `path.Base(filename)`；`kernel/model/template.go:156` 对必为空的 `ret` 排序；`app/src/protyle/render/av/col.ts:723` 列名未 `escapeHtml` | 中 | 附录观察项，未核 |
 | 已核实为误报/已存在覆盖 | `SetAssetHash` 的 `assets/` 守卫（调用点均传 `assets/` 前缀）、agent SSE 事件集（内核 14 个 emit 与前端 16 个 `case` 双向覆盖）、`SiYuanAssetsImage` 缺 `.tif`（第三轮已登记为观察项）、`query_embed` 六处引用 | — | 不报告 |
+
+#### 第十一轮的修复影响面（实测，供修复者参考）
+
+用户追问「改数据类型吗 / 影响模板字段吗 / 补百分号会怎样」，逐项取证如下。
+
+**类型层零改动**：列类型仍是 `number`（`kernel/av/value.go:3177` 写死 `Type: KeyTypeNumber`），JSON 结构与前端 `IAVCellValue.number`（`app/src/types/index.d.ts:1521-1525`）都不变，`"percent"` 本就是数字列的合法格式（`AttributeViewKeyNumberFormats` 含之）。变的只是三个字段的值：`content` 33→0.3333、`format` `""`→`"percent"`、`formattedContent` `"33"`→`"33.33%"`。
+
+**补 `%` 必须与量纲同时改，三者实测对照**（用临时数字列在真实实例上跑，测完已删）：
+
+| 改法 | 数值 | format | 实际显示 |
+|---|---|---|---|
+| 只补格式、不动量纲 | 33 | percent | `3300%`（灾难：`formatNumber` 会再乘 100） |
+| 只改量纲、不补格式 | 0.3333 | 空 | 数字列显示 `0.3333333333333333`；汇总路径按 `%.5f` 分支约为 `0.33333` |
+| 两者同时改 | 0.3333 | percent | `33.33%`（正确） |
+
+结论：分母里的 `*100` 本身就是多余的，正解就是 `calcFieldCheckbox` 那样「比值 + `NumberFormatPercent`」，乘 100 与补 `%` 都交给格式化函数。
+
+**模板字段受影响，且补 `%` 对它无效**：`kernel/sql/av.go:421` 把汇总的 number 值以 `[]float64` 放进模板 dataModel，取的是 `content.Number.Content`（原始值），完全不读 `formattedContent`。实测：模板内容 `.action{.勾选占比}` 现在输出 `[33]`，改成比值后输出 `[0.3333333333333333]`；`.action{.勾选占比_str}` 现状即为 `<no value>`（rollup 分支不提供 `_str`）。要让模板也可读，得在 dataModel 构建处单独处理，这不属于「改两行」的范围。
+
+**其余消费点**：
+- 筛选受量纲影响：`kernel/av/filter.go:1086` 用 `number.content` 直接比大小，0-100 改 0-1 会让用户已设好的百分比阈值失效（写 `> 50` 将永不成立）
+- 列底部 Sum/Average 显示变化：`kernel/av/calc.go:1772` 起求和读原始 `content`，而汇总列不能设置数字格式（`kernel/model/attribute_view_key_config.go:68`），3 项相加会从 `99` 变成 `0.9999`
+- 排序不受影响：`kernel/av/sort.go:452` 读同一个 `content`，乘 0.01 是单调变换
+- 无需数据迁移：`Rollup.Contents` 虽会写盘（`CloneStoredValue` 只剥离 `RenderedContent`，`kernel/av/render_template.go:25`），但每次渲染由 `BuildContents` 重算并置空（`kernel/av/value.go:2663`）
+
+**复现夹具（用户工作区，非仓库内）**：文档 `/db test 2`，两个数据库分别演示「截断」（3 行勾 1 行 → 页脚 `33.33%` vs 汇总 `33`）与「归零」（103 行勾 1 行 → 页脚 `0.97%` vs 汇总 `0`），并把复选框列的页脚计算设为同一算子做同屏对照。
+
+**已提 issue #19435**（state=open；title 74/74、body 1549/1549 逐字符回读一致；labels 被静默丢弃，符合已知权限限制）
 
 #### 第十一轮的方法论教训
 
