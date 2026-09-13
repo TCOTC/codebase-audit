@@ -349,6 +349,29 @@
    `IsContainerType` 漏 `tab`、搜索条件 DTO 丢键这 8 组——本轮**零重复报告**。
    先前几轮只核过「键完整性 / 索引越界」，故本条不属于重复。
 
+### 第十轮（2026-09-13）：架构层定向扫描（跨仓公开类型契约）
+
+本轮同样是「非代码层面」的定向扫描，命中一个**跨仓契约**缺口。
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| A / D3 / G1（新 P17） | 插件公开契约 `TOperation`（petal 的 npm 包 `siyuan`，经 `petal/types/protyle.d.ts:316 protyle.transaction(...)` 消费）是 `app/src/types/index.d.ts` 同名联合类型的手工镜像，仓内**无任何子集断言**；`AGENTS.md` 明文要求同任务同步 petal，实测积压 **15 项**（2026-06-16 → 2026-09-04），而 petal 仍在主动增补（2026-08-24 两项）→ 积压而非冻结；第二维是 `IOperation` 的 `cellUpdates`/`viewIDs` 载荷字段也缺 | 高（三方成员集合与差集实测、生产者逐条定位、两侧 git 历史核对；挑战门两轮分别 CONFIRMED / DOWNGRADED 至低） | 待提 issue |
+| — | 候选：内核→前端 WS 推送命令集是否有双向漂移。**排除**：机械提取 70 个内核推送 cmd 与前端 396 个句柄字面量做双向 diff，仅 `updateids` 无前端 `case`——但它由 `emitToPlugins("ws-main", data)` 原样转给插件（issue #13434 的原意即「给插件用」），非缺口。**本轮的教训：前端分派大量使用 Yoda 写法 `"msg" === response.cmd`，只 grep `case` 会造出大批假漂移**（首版脚本报 9 条，修正后仅 1 条） | 高 | 排除，不报告 |
+| — | 候选：AV 定义存放在笔记本容器之外（普通库全局 `data/storage/av/`、加密库 `<boxID>/storage/av/`），归属只能靠进程级 `pendingAVBox` + 磁盘探测推断。**排除**：跨加密边界的守卫极完整（`IsSameCryptoBoundary` 覆盖文档移动、块移动、块引、资源、AV 镜像、关系共 47 处），且「加密笔记本是资源孤岛」在两处有显式注释 | 中 | 排除，不报告 |
+| A / F | 机械复扫：重复字面量 153 条（P1 117 / P2 16 / P3 20）、未转义插值沿用历轮阈值；逐条核对仍为已知噪声（`assets/`、`/api/` 受类型约束路由、CSS 选择器、`conf.json`） | — | 未命中 |
+
+#### 第十轮的方法论教训
+
+1. **子代理纠正了我两处承重事实，其中一处本想当作主证据**。我以为「第 4 处副本（`apicontract` 的 9 项 `enum=`）与内核 96 项同集合」——子代理指出 `kernel/api/contract_block_transaction.go:15` **显式拒绝 AV 载荷**（`operation.Srcs != nil || len(operation.CellUpdates) > 0`），该 enum 属标题转换端点的载荷域，不含 `setAttrView*` 是设计正确。另一处：petal 的 `TOperation` 在 2026-08-24 仍被增补了两项，我「9 个月未同步」的说法不成立。
+   **教训：跨仓/跨作用域的集合配对，必须先确认两侧「消费域相同」再 diff 成员**，否则成员数差异会被读成漏项。已写入「已知误报」。
+2. **机械提取前端分派时必须覆盖 Yoda 写法**。首版脚本只抓 `case "..."`，报出 9 个「无前端处理」的内核 cmd；补上 `"x" === cmd` 形式后只剩 1 个（且经查为插件通道）。**「差集很大」要先怀疑提取器，而不是先立论。**
+3. **历史轮次的「排除清单」本身就是资产**。本轮开扫前先读登记表，直接跳过同步忽略规则、`statTypesByPath`、`.aac`、`getAssetName`、`calc.go` 恒真守卫、缩略图恒假守卫、`IsContainerType` 漏 `tab`、搜索条件丢键、i18n 契约 9 组，零重复报告。
+4. **「有生成器」不等于「覆盖该集合」**。本仓 `apigen` 已有「声明 → 生成 → `TestGeneratedArtifacts` 断言」的成熟模式，且它也写 petal——但唯一写入是 `petal/types/api/index.d.ts`（`kernel/apicontract/cmd/apigen/main.go:85-86`），**完全不碰 `siyuan.d.ts`**。查「是否存在自动化修复机制」时必须读到**写入路径的具体行**，不能停在「有生成器」。
+5. **不变量要取单向子集，不要取相等**。本轮的不变量最终定为 `petal.TOperation ⊆ app.TOperation`：内核 `switch`（96）与 app 的 `TOperation`（94）**本来就不等**（`create` 仅内核内部建文档树、`updateAttrs` 仅内核下推给前端，见 `kernel/model/blockial.go:544` + `app/src/protyle/wysiwyg/transaction.ts:947`）。**先找出合法非对称成员，再写不变量**，否则修复方案会把它们判成假阳性。
+6. **严重度由「权威侧是否承诺稳定」定档**。本轮决定性降级依据是 `docs/API.md:139` 明文把 `/api/transactions` 操作列为内部实现、不承诺兼容性，`docs/API-CONTRACTS.md:91` 又说明跨仓同步不进入 CI。**判定「应补全」前先找反向声明**；找不到反向声明的「应补全」只是审计者意见。
+7. **运行时无兜底分支会让「声明漏项」仅停留在类型层**。内核 `switch op.Action` 无 `default:`（事务开关在 `kernel/model/transaction.go:466` 闭合，`ret` 保持 nil）→ 未知 action 静默 no-op。因此本轮的后果**必须**限定为「伪造编译错误」，不能写成功能阻断。**审计「闭合集合漏项」时要分开写「声明层后果」与「运行层后果」。**
+8. **零副作用的取证方式：只读跨仓对比**。本轮全程未写入任何工作区数据，未建临时文档、未调写接口；机械脚本与比对脚本都放在仓库外 `%TEMP%\audit-r10\`。**跨仓契约类审计天然可零副作用完成。**
+
 ## 如何更新本文
 
 每轮审计后追加：
