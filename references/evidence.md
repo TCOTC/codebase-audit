@@ -418,220 +418,7 @@
 
 **已提 issue #19435**（state=open；title 74/74、body 1549/1549 逐字符回读一致；labels 被静默丢弃，符合已知权限限制）
 
-## 第十七轮（2026-09-13）：已提 issue 的修复验证
-
-范围：本 skill 历轮产出的 **37 条 issue 全量核对**（#19397–#19465，含并行 B 线的 #19456–#19461）。
-方法固定为四步：**issue 状态 → 修复提交 → 代码现状 → 回归测试**。
-
-### 结论
-
-| 项 | 结果 |
-|---|---|
-| issue 状态 | 37/37 `closed`（#19432 在 `petal` 仓库修复，非本仓） |
-| 代码已改 | 37/37，位置与本轮报告一致 |
-| 新增/补测 | 21 处（含 1 条 i18n CI workflow） |
-| 受影响包完整测试 | `av` `sql` `conf` `treenode` `apicontract` `mcp/tools` `api` `cli/cmd` `model` 全绿；`server` 仅 1 处**宿主 MIME 差异**失败（见下，非回归） |
-| 前端（09-14 补正） | 本轮相关 105 条全绿；**全量套件有 13 处失败，其中 10 处为源码测试的真实失败**（原记录「1 处」是我只读输出尾部造成的误判，见下） |
-| **由修复引入的回归** | **0** |
-
-### 方法要点（新增，可复用）
-
-- **编号 → 提交的映射必须回读代码补齐**：`git log --format="%h|%ad|%s" -500 | Select-String "issues/194"` 只覆盖「提交信息带该编号」的情形。
-  #19429（保存条件丢页签过滤器）的修复藏在 `2b26d96ec6`（提交信息写的是 #19378）里，`git log --grep=19429 --all` 空手而归。
-  **只看提交信息会把已修的判成未修**，最终以代码现状为准。
-- **修复可能换思路，验证要落到显示链路末端**：#19435 维护者没按「比值 + percent」改量纲，而是保留 `content = ratio*100`
-  以维持筛选/模板/底部统计的既有语义，只把 `FormattedContent` 覆盖为 `formatNumber(ratio, NumberFormatPercent)`
-  （`kernel/av/value.go:3186-3192` 的 `newRollupCheckboxPercent`）。验证时必须回读消费端：
-  `app/src/protyle/render/av/cell.ts:1242` 与 `attributeValue.ts:131` 都取 `formattedContent || content`，
-  而筛选 `filter.ts:615` 读原始 `content` —— 两条路径各取到正确的那个字段，修复成立。
-- **修复常比最小改动更彻底**：`buildSearchRequest` 提取为单一真源并同时替换桌面与移动端两处复制（#19442）；
-  新建 `app/src/protyle/render/av/locateState.ts` 承载「临时展开态」（#19448）；
-  `scripts/check-lang-keys.py` 新增占位符维度校验并接入 `.github/workflows/i18n.yml`（#19430，直接补掉了本轮报告的「无有效校验 + 不在 CI」）。
-- **本轮预警的修法陷阱被全部规避**（可视为判据有效性的正反馈）：
-  #19448 未写回 `groupFolded`（改存 WeakMap + 交互事件清理）；#19439 用 `webdav.NewHTTPError(http.StatusNotFound, …)`
-  而非兄弟路径的普通 error（避免把幂等重试变 500）；#19464 改用 `[data-type="more"], [data-type="more-space"]` 选择器取代
-  `previousElementSibling`（避开移动端语义差异）；#19456 未复用按前缀判定的敏感目录黑名单、也未一律禁软链。
-
-### 宿主 MIME 注册表决定内联白名单（09-14 从「误报」改判为**真缺陷**，已提 #19475）
-
-`kernel/server/serve.go:917` 的 `isAssetInlineUnsafe` 用 `mime.TypeByExtension` 取媒体类型再按白名单决定是否强制附件下载。
-本机 `HKLM\SOFTWARE\Classes\.jpg` 的 `Content Type` 为 `application/jpg`（同机 `.jpeg` 仍为 `image/jpeg`），
-于是 `TestSecureAssetContentHeadersAllowsInlineSafeAssets` 在 Windows 上必失败。
-**机制**：Windows 上 Go 的 `initMimeWindows`（`$GOROOT/src/mime/type_windows.go`）遍历 `HKEY_CLASSES_ROOT`
-并用 `setExtensionType` **覆盖内置表**，仅对 `.js` 硬编码豁免 `text/plain`（Go issue #32350）。
-逐扩展名比对 19 项，只有 `.jpg` 与内置表不同；`.js` 注册表值为 `text/plain`（恰在白名单内）—— 说明注册表确实能给出「内联安全」的类型。
-**影响面已实测夹逼**：Chromium **忽略子资源上的 `Content-Disposition` 与错误 Content-Type**，
-四个对照端点（正常 / 仅附件头 / 仅 `application/jpg`+nosniff / 两者兼具）在 `<img>` 中全部渲染成功；
-真正受影响的是顶层导航（`setAssetsAttachmentDisposition` 的注释本身写明该头用于「让浏览器 window.open 触发下载而非内联预览」）。
-**教训**：上一轮把这条写成「环境差异、不要报」的误报，实际是「产品行为依赖宿主配置」的真缺陷；
-**「因为 CI 跑不到」不能当作排除理由**，那是判据 G4 的独立发现，不是免报牌。
-
-### 前端测试套件实况（09-14 补正，新判据 G3/G4）
-
-`cd app && pnpm test`（`dev` = `e4960b6553`）：`tests 2474 / pass 2455 / fail 13`，去重后共 13 个失败用例。
-**上一轮只读了输出尾部（`Select-Object -Last 15`）就写下「仅 1 处无关失败」，实为 13 处 —— 误判直接进了结论。**
-逐个单跑仍失败，排除了测试间干扰。
-
-按根因分四类：
-
-| 类别 | 数量 | 机制 | 实例 |
-|---|---|---|---|
-| 测试发现非 hermetic | 3 | `"test": "node --import tsx --test"` 未限定路径，递归扫到被 `.gitignore:14` 忽略的 `app/build/win-unpacked/resources/app/`（electron-builder 副本）。把 `app/build` 移出 `app/` 后：`tests` 2474→2427、`fail` 13→10 | `build\win-unpacked\...\{connectionManager,remoteKernel,windowMessaging}.test.js` |
-| 测试替身/白名单漂移（G3） | 5 | 桩对象存在但缺新导出（`TypeError: (0 , m_1.f) is not a function`）；模块白名单缺新 import；DOM 替身缺新调用的方法 |  `topBar.test.ts:270` 缺 `isInMobileApp`；`transactionAV.test.ts`×2 缺 `getEditorTransaction`；`backlinkReference.test.js` 缺 `setBacklinkTypeFoldExpandHandler`；`mobileBacklinks.test.js` 缺 `editor/assetOpen`；`image.test.ts` 的 `classList` 只有 `toggle` 没有 `remove` |
-| 断言未随生产变更更新 | 4 | 断言写死了实现细节 | `fontPreview.test.ts:45` 要求 `rootMargin === undefined` 而实现传 `"100px 0px"`；`fileTreeReorder.test.ts:54` 用 `strictEqual` 要求返回原对象而实现已改为投影；`entryVisibility.test.ts:32` 插件槽位期望基于字体项位于 `text` 之后（默认条目 09-09 已移到之前） |
-| 行尾敏感 | 1 | 按 `"\n    });\n"` 切片源码；`.gitattributes` 对 `.js` 只写 `* text=auto`，本机 `core.autocrlf=true` 检出为 CRLF → 锚点不匹配 | `electron/windowMessaging.test.js:100`；`app/electron/main.js` 实测 4497 CRLF / 0 孤立 LF，`b"\n    });\n" in file` = False、`b"\r\n    });\r\n"` = True。同目录 `crashHistory.test.js:10` 用 `"\n};"`（无尾随换行）故不受影响 |
-
-**引接各条的生产提交**：`27d54e1809`(#19467)、`0a1b5b424e`(#19378)、`99e5bd19ac`(#19257)、`6ed4866976`(#19378)、
-`4de337d316`(#19407)、`ff239fd9b3`(#19323)、`aaf5f44829`(#19378)、`b1077b520a`(#19226)。
-其中 `aaf5f44829` 的改动经核验对消费方安全：`Files.ts:1031`、`MobileFiles.ts:502`、`PinnedDocs.ts:499` 都只读 `result.notebook` 与 `result.parentPath`。
-
-### CI 执行集缺口（新判据 G4，已提 #19472）
-
-`.github/workflows/api-contracts.yml` 是唯一跑单测的 workflow，且是白名单式：
-内核只跑 `./apicontract/...` 与带 `-run` 过滤的 `./api ./plugin ./model`；前端 `pnpm exec tsx --test` 只列 7 个文件。
-对照 `go list ./...` 的 30 个包与 358 个前端测试文件，未覆盖面极大（`server` `sql` `av` `conf` `treenode` `mcp/tools` `cli/cmd` 等）。
-**后果**：本地全量一跑就红、CI 恒绿，于是没人能区分新回归与存量噪声 —— 我自己的误判就是这套机制的直接产物。
-
-### 本轮已提 issue
-
-#19472（绝大多数单测不在 CI 执行集）、#19473（`pnpm test` 收集被忽略的 `app/build`）、
-#19474（前端 10 处测试失败：替身/白名单/断言/行尾）、#19475（`isAssetInlineUnsafe` 依赖宿主 MIME 注册表）。
-四条均 title/body 逐字符回读一致（长度差 1 为 GitHub 自动追加的尾部换行）。
-
-**取证工具**：`%TEMP%\audit-r18\`（Go 探针 + Python 脚本），事后已删除；本轮未在仓库内留任何文件。
-
-### 收官复核（2026-09-14），四条的最终归宿
-
-| issue | 状态 | 修复提交 | 说明 |
-|---|---|---|---|
-| #19472 | **open**（CI 已通过，维护者未关闭） | `a846821ec2` + `8f0071886c` + `22a727db07` | CI 从白名单改为 `go test -tags "fts5 sqlcipher" ./... -count=1` + `pnpm test`；文档同步 |
-| #19473 | closed | `d32b6592f6` | `"test"` 加 `--test-concurrency=4` 与四个 glob，排除 `app/build` |
-| #19474 | closed | `dc55a0635a` | 补齐替身与响应字段、更新断言、消除 CRLF 敏感匹配 |
-| #19475 | closed | `2d0561daf5` | 新增固定映射 `assetInlineMediaType`，并在 `secureAssetContentHeaders` 里显式写死 `Content-Type` |
-
-**本地复验（Windows，`8f0071886c`）**：`pnpm test` = `tests 2418 / pass 2412 / fail 0 / skipped 6`（改前 2474/13）；
-`go test -tags "fts5 sqlcipher" ./...` 26 个包全部 `ok`。两端均全绿。
-
-**#19475 的修法与报告建议一致且更完整**：除了判断本身，还顺带把允许内联资产的 `Content-Type` 固定下来
-（`context.Header("Content-Type", mediaType)`），理由是宿主 MIME 同样会影响预览行为——这比我报告里只写
-「替换判定的输入」更彻底；`.svg`/`.html`/`.js` 依旧不在映射表内即强制下载，安全公告的约束保持不变。
-
-#### 教训：CI 覆盖补全后必然以「三连提交」暴雷
-
-`a846821ec2`（把 CI 改为全量）→ **failure**，且失败原因与我的 issue 描述**不同**，是新增暴露的**测试环境前提冲突**：
-
-- `contracts` 失败 1（Linux）：`kernel/model` 的 `import_obsidian_test.go:92`
-  `Obsidian Vault path is unsafe: selected Vault path is sensitive`；
-  同因还挂了 `kernel/server` 的 `TestRegisterStaticFileHandlers`/`TestWidgetResponseCacheControl`/
-  `TestTemplatesAndExportRequireAdministrator`/`TestSnippetPublishAccess`/`TestPluginPublishAccess`。
-  根因：这些夹具建在 `t.TempDir()`，而 GitHub Linux runner 的 `TMPDIR` 默认是 `/tmp`，
-  `kernel/util/path.go` 的 `isSensitivePath` 系统前缀黑名单含 `/tmp` 与 `/var`。
-- `frontend-tests` 失败 1（Windows）：`Error: spawn EBUSY`（Electron 并发启动争用）。
-
-于是 `8f0071886c` 两处修：CI 加 `TMPDIR: ${{ runner.temp }}`、并发降到 1。
-但**又把前提推过头**：`TestIsSensitivePathSymlinkWorkspace` 的末句断言
-（`isSensitivePath(realWorkspace+"-outside/public.txt")` 必须为 `true`）**依赖夹具落在黑名单前缀下**，
-`TMPDIR` 变到 runner 目录后就不再成立 → 该 commit 的 CI 仍 `failure`（`kernel/util`）。
-`22a727db07` 再给这一个测试 `t.Setenv("TMPDIR", "/var/tmp")`，CI 才 `success`。
-
-**可复用判据（已并入 G4）**：同一套夹具里存在**互相矛盾的环境前提**——一组要求临时根目录命中系统路径黑名单、
-另一组要求不命中。检查法：grep 夹具的 `TempDir`/`MkdirTmp` 与环境变量，再 grep 路径黑名单常量，
-找出「断言真值依赖二者前缀关系」的测试。可靠修法是构造显式路径（工作空间内、或直接指向黑名单目录），
-而不是依赖环境的临时根。
-
-**并记一条验证纪律**：`a846821ec2` 的提交信息写着「Run all kernel and frontend tests in CI」，
-看起来一次性修好了，但该 commit 的 CI 实际是 `failure`；**判定 `fixed` 必须用
-`gh run list --json conclusion` → `gh run view <id> --json jobs` 看真实结论**，
-维护者评论里的「本地全量测试通过」同理不能等同 CI 通过。
-
-#### 矛盾前提的 2×2 取证（三次 CI 运行即为完整证明）
-
-`kernel/util/path.go:470` 的 `isSensitivePath` 对**工作空间外**路径做硬编码 UNIX 前缀匹配
-（`/.` `/etc` `/root` `/var` `/proc` `/sys` `/run` `/bin` `/boot` `/dev` `/lib` `/srv` `/tmp` `/usr` `/opt` `/sbin`，
-`path.go:487-509`）。两组测试把这一事实当作**相反的前提**：
-
-- **A 组必须命中前缀**：`kernel/util/path_test.go:173` `TestIsSensitivePathSymlinkWorkspace` 末句
-  `path_test.go:220-225` 断言 `isSensitivePath(realWorkspace+"-outside/public.txt")` 为 `true`。
-  该路径与工作空间是**字符串前缀相同但路径边界不同**的兄弟目录，`IsSubPath` 判定为工作空间外，
-  所以它只能靠系统前缀黑名单命中；而黑名单是 `HasPrefix(path, "/var")` 这种**锚定路径开头**的匹配，
-  夹具路径里那层 `.var/app/org.b3log.siyuan/SiYuan` 帮不上忙 → 必须 `TMPDIR` 以 `/tmp` 或 `/var` 开头。
-- **B 组必须不命中前缀**：`kernel/model/import_obsidian.go:576` 的 `validateObsidianVaultRoot` 对 vault 根调
-  `util.IsSensitivePath`，`kernel/server` 的静态伺服同理；夹具全是 `t.TempDir()`。若 `TMPDIR=/tmp`，
-  则 root = `/tmp/TestXxx…/001` → 命中 `/tmp` → 报 `Obsidian Vault path is unsafe: selected Vault path is sensitive`
-  而非期望的 `errObsidianVaultConfigMissing`。
-
-| CI 运行 | commit | `TMPDIR` | A 组 `kernel/util` | B 组 `kernel/model` + `kernel/server` |
-|---|---|---|---|---|
-| 34771606033 | `a846821ec2` | 未设 → Linux 默认 `/tmp` | `ok … kernel/util 2.318s` ✓ | **FAIL**（15 个用例） |
-| 34771876307 | `8f0071886c` | `${{ runner.temp }}` | **FAIL**（`TestIsSensitivePathSymlinkWorkspace`） | 通过 ✓ |
-| 34772185308 | `22a727db07` | `runner.temp` + 用例级 `/var/tmp` | 通过 ✓ | 通过 ✓ |
-
-第三行不是「找到了兼顾的取值」，而是那个测试**在自己的作用域内把变量改回去**——
-因为 A 通过要求 `TMPDIR` 命中黑名单、B 通过要求不命中，**同一变量上不可同时满足**，
-这是由黑名单定义直接推出的，不需要实测反例。
-
-**修复的残余脆弱点（值得再修）**：
-1. 修复把「夹具可用」寄托在 CI 的 `TMPDIR` 取值上，而非让夹具自造所需路径。后果是
-   **`go test ./...` 在 macOS（`TMPDIR` 天然为 `/var/folders/…`，同属 `/var` 前缀）上仍会红 B 组**。
-2. `t.Setenv("TMPDIR", …)` 生效的前提是 `GOTMPDIR` 为空：`t.TempDir()` 走
-   `os.MkdirTemp(os.Getenv("GOTMPDIR"), pattern)`（`$GOROOT/src/testing/testing.go` 的 `makeTempDir`），
-   仅当 `GOTMPDIR` 为空才回落到 `os.TempDir()`（`$GOROOT/src/os/file_unix.go:390` 的 `tempDir`，**不缓存** `TMPDIR`）。
-   一旦 CI 或本地设了 `GOTMPDIR`，该用例级覆盖会**静默失效**。
-3. A 组断言整体包在 `filepath.Separator == '/'` 里，**Windows 上该分支被跳过**——本机全绿不代表 CI 绿。
-
-#### GOTMPDIR 会架空用例级 TMPDIR 覆盖（已提 issue #19480）
-
-维护者用 `t.Setenv("TMPDIR", "/var/tmp")` 满足 A 组前提，但这句只在 `GOTMPDIR` 为空时有效：
-`t.TempDir()` → `c.makeTempDir()` → `os.MkdirTemp(os.Getenv("GOTMPDIR"), pattern)`
-（`$GOROOT/src/testing/testing.go`），仅当 `GOTMPDIR` 为空时 `os.MkdirTemp` 才用 `os.TempDir()`
-（`$GOROOT/src/os/file_unix.go:390` 的 `tempDir`，**不缓存** `TMPDIR`）。
-
-**两向对照实验（与平台无关，可在 Windows 复现）**——同一测试跑两次，只差 `GOTMPDIR`：
-
-```text
-A) GOTMPDIR=""          → t.TempDir() = <系统临时目录>/TestTempDirHonorsGOTMPDIR3895509988/001
-B) GOTMPDIR=<自定义目录> → t.TempDir() = <自定义目录>/TestTempDirHonorsGOTMPDIR4182409269/001
-                          （用例内 TMPDIR="…/forced" 被忽略）
-```
-
-`cmd/go` 自身不写 `GOTMPDIR`（`cmd/go/**` 内无写入点，只经 `cfg.Getenv` 读取），
-所以这是**条件性**触发，不是必然——但一旦触发，失败信息完全看不出与环境变量有关。
-
-**残留缺陷的完整清点（已提 issue #19480，24 小时内第 5 条）**：
-① 不预设 `TMPDIR` 时按文档命令跑 `go test ./...`，Linux 上必红 10 个用例，且报错指向 Obsidian 校验而非夹具位置；
-② `GOTMPDIR` 非空时用例级覆盖静默失效（上面的实验）；
-③ A 组断言在 Windows 被平台守卫跳过；macOS 的 `TMPDIR` 默认 `/var/folders/…` 同属 `/var` 前缀、
-按同一机制会红，而文档只写了 Linux（此条**未在 macOS 实机验证**，属机制推断，报告中已如实标注）。
-
-**修复趋势**：维护者对 #19472 的处置是「让环境满足夹具」（CI 设变量 + 单用例再设回去），
-而不是「让夹具自足」。这类修复的特征是**把测试正确性外包给环境配置**，
-代价是同一命令在开发机与 CI 上结论不同。审查这类修复时，应逐一问：
-「换一台机器/换一个默认值，这条断言还成立吗？」「覆盖它依赖的那个前提，有没有被显式断言过？」
-
-
-
-#### 第十一轮的方法论教训
-
-1. **「同一算子的多条实现路径」是 P11/P12 之外的新入口，比跨仓比对省力**。本轮无需跨语言、跨包，
-   仅在一个包内比对「枚举常量名 → 两条赋值路径」即可定位权威侧。把 `grep` 的目标从「函数名」改为
-   **「枚举常量名 + 该枚举的字符串字面量」**，能同时覆盖定义点与所有消费点。
-2. **整数除法是最硬的反例**。`countChecked*100/len(...)` 在 Go 中先截断，1/200 得 `0`。
-   这个反例**不依赖任何单位约定**——无论维护者主张量纲是 0–1 还是 0–100，「200 条里勾了 1 条显示 0」都错。
-   第五轮的教训（选「任何合理语义下都错的输入」）在本轮再次生效。**先找不需要解释就错的输入。**
-3. **挑战门第二轮给出了「不要承诺一行修复」的约束**。维护者立场指出：改量纲会同时改变
-   `av/sort.go` 排序、`av/filter.go` 的数值筛选阈值、嵌套汇总的 Sum/Average、`model/export.go` 导出文本。
-   因此报告的建议必须写成「对齐 + 评估下游筛选语义」，而非「改一行」。
-   **凡是会改变已落盘/已消费数值量纲的修复，都要先列下游消费点。**
-4. **「同一个 UI 菜单项落到两个不同内核函数」是最有说服力的业务表现**。
-   目标字段是复选框时，`app/src/protyle/render/av/calc.ts:169` 的菜单只给四个算子；
-   同一项用于列底部计算走 `calcFieldCheckbox`（正确），用于汇总列走 `calcContents`（错误）。
-   用户在同一数据集里能直接对比出 `66.67%` 与 `66`。**把「同一入口、两条后置路径」写成业务表现，比描述代码更有效。**
-5. **本轮的先验收益来自「未覆盖区域清单」而非更聪明的搜索**。开扫前先排除历轮 10 组，
-   再把子代理的侦察范围限定在 `export/import/template`、`flashcard/av/sql`、`card/search/history/export/protyle-render-av`
-   三个从未被系统看过的区域，命中率明显高于历史轮次的散点搜索。
-   **子代理产出仍只能当候选**：3 个候选里有 2 个经本上下文核对后不可达或已被上游保护。
-
-### 第十二轮（2026-09-13）：机械复扫 + 三个未覆盖区域的子代理侦察
+## 第十二轮（2026-09-13）：机械复扫 + 三个未覆盖区域的子代理侦察
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
@@ -643,7 +430,7 @@ B) GOTMPDIR=<自定义目录> → t.TempDir() = <自定义目录>/TestTempDirHon
 | 候选（未取证） | `app/src/asset/renderAssets.ts:67-85`：`genAssetHTML` 的 audio/image/video/a 分支裸插 `pathString`，而同文件 `renderAssetsPreview` 与安全公告修复 `2229686df9` 覆盖的 `asset/index.ts` 都转义了；Windows 文件名限制使其不可达 | 中低 | 附录观察项 |
 | 子代理自验推翻 | 候选 4 条：`carddav.go:625` 多卡 vCard 用原文件名做 key（可达性需手工放文件，且重启自愈）、`export.go:4830` 把行 ID 当定义块 ID 写入 `defBlockIDs`（当前无可见后果）、`export.go:1580` 聚焦导出对页签项丢容器（GUI 传文档 ID 不可达，仅 MCP/API 可达）、`publish_access.go:1717` 用 `passwordID` 作守卫（遍历可达状态后确认不可达） | 中 | 自行降级，未上报 |
 
-#### 第十二轮的方法论教训
+### 第十二轮的方法论教训
 
 1. **「同族方法只有一个缺守卫」是 D1 的独立高点位**。本轮不必先证明可达性：同文件四个兄弟方法都有 not-found 分支、
    两个常量已定义却无人使用，**自相矛盾本身就是强证据**（与第七轮「同包自相矛盾」同一手法，但范围缩小到一个文件内）。
@@ -672,17 +459,6 @@ B) GOTMPDIR=<自定义目录> → t.TempDir() = <自定义目录>/TestTempDirHon
    已备份工作树后用 `git checkout -- .` 恢复。**教训：每轮开扫前不仅要读登记表，还应确认登记表本身是最新的**——
    本轮若不是先读 `evidence.md` 再核对工作树，会基于残缺的判据库做去重，重现第八轮的重复报告。
    备份留在 `%TEMP%\skill-bak-r12\`，确认无误后删除。
-
-## 如何更新本文
-
-每轮审计后追加：
-
-1. 本轮实际命中（判据编号、发现、置信度）
-2. 新增的误报模式
-3. 阈值调整（若脚本参数变化）
-4. 方法论教训
-
-数据用于校准下一轮的判据与阈值，避免重复劳动。
 
 ## 第十三轮（2026-09-13）：前端定向扫描（app/src）
 
@@ -928,7 +704,216 @@ B) GOTMPDIR=<自定义目录> → t.TempDir() = <自定义目录>/TestTempDirHon
 5. **「无返回值 + WS-only 错误通道」是 CLI 的普遍盲区**：本轮一条发现串起了 `block delete`、`repo checkout`、
    `export *` 三类命令，说明按「CLI 子命令 → model 函数签名」的机械扫描（grep 是否有返回值）是高效入口。
 
-### 第十八轮（2026-09-14）：API 契约重构（#19378）遗留的类型与契约缺陷
+## 第十七轮（2026-09-13）：已提 issue 的修复验证
+
+范围：本 skill 历轮产出的 **37 条 issue 全量核对**（#19397–#19465，含并行 B 线的 #19456–#19461）。
+方法固定为四步：**issue 状态 → 修复提交 → 代码现状 → 回归测试**。
+
+### 结论
+
+| 项 | 结果 |
+|---|---|
+| issue 状态 | 37/37 `closed`（#19432 在 `petal` 仓库修复，非本仓） |
+| 代码已改 | 37/37，位置与本轮报告一致 |
+| 新增/补测 | 21 处（含 1 条 i18n CI workflow） |
+| 受影响包完整测试 | `av` `sql` `conf` `treenode` `apicontract` `mcp/tools` `api` `cli/cmd` `model` 全绿；`server` 仅 1 处**宿主 MIME 差异**失败（见下，非回归） |
+| 前端（09-14 补正） | 本轮相关 105 条全绿；**全量套件有 13 处失败，其中 10 处为源码测试的真实失败**（原记录「1 处」是我只读输出尾部造成的误判，见下） |
+| **由修复引入的回归** | **0** |
+
+### 方法要点（新增，可复用）
+
+- **编号 → 提交的映射必须回读代码补齐**：`git log --format="%h|%ad|%s" -500 | Select-String "issues/194"` 只覆盖「提交信息带该编号」的情形。
+  #19429（保存条件丢页签过滤器）的修复藏在 `2b26d96ec6`（提交信息写的是 #19378）里，`git log --grep=19429 --all` 空手而归。
+  **只看提交信息会把已修的判成未修**，最终以代码现状为准。
+- **修复可能换思路，验证要落到显示链路末端**：#19435 维护者没按「比值 + percent」改量纲，而是保留 `content = ratio*100`
+  以维持筛选/模板/底部统计的既有语义，只把 `FormattedContent` 覆盖为 `formatNumber(ratio, NumberFormatPercent)`
+  （`kernel/av/value.go:3186-3192` 的 `newRollupCheckboxPercent`）。验证时必须回读消费端：
+  `app/src/protyle/render/av/cell.ts:1242` 与 `attributeValue.ts:131` 都取 `formattedContent || content`，
+  而筛选 `filter.ts:615` 读原始 `content` —— 两条路径各取到正确的那个字段，修复成立。
+- **修复常比最小改动更彻底**：`buildSearchRequest` 提取为单一真源并同时替换桌面与移动端两处复制（#19442）；
+  新建 `app/src/protyle/render/av/locateState.ts` 承载「临时展开态」（#19448）；
+  `scripts/check-lang-keys.py` 新增占位符维度校验并接入 `.github/workflows/i18n.yml`（#19430，直接补掉了本轮报告的「无有效校验 + 不在 CI」）。
+- **本轮预警的修法陷阱被全部规避**（可视为判据有效性的正反馈）：
+  #19448 未写回 `groupFolded`（改存 WeakMap + 交互事件清理）；#19439 用 `webdav.NewHTTPError(http.StatusNotFound, …)`
+  而非兄弟路径的普通 error（避免把幂等重试变 500）；#19464 改用 `[data-type="more"], [data-type="more-space"]` 选择器取代
+  `previousElementSibling`（避开移动端语义差异）；#19456 未复用按前缀判定的敏感目录黑名单、也未一律禁软链。
+
+### 宿主 MIME 注册表决定内联白名单（09-14 从「误报」改判为**真缺陷**）
+
+`kernel/server/serve.go:917` 的 `isAssetInlineUnsafe` 用 `mime.TypeByExtension` 取媒体类型再按白名单判内联，
+而 Windows 上 Go 的 `initMimeWindows`（`$GOROOT/src/mime/type_windows.go`）会遍历 `HKEY_CLASSES_ROOT`
+用 `setExtensionType` **覆盖内置表**（仅 `.js` 硬编码豁免 `text/plain`，Go issue #32350）。
+本机 `.jpg` 注册为 `application/jpg`、`.jpeg` 仍为 `image/jpeg`；逐扩展名比对 19 项只有 `.jpg` 与内置表不同，
+而 `.js` 的注册表值 `text/plain` 恰在白名单内 —— **证明注册表确实能给出「内联安全」的类型**。
+
+影响面已夹逼且**不可夸大**：Chromium 忽略子资源上的 `Content-Disposition` 与错误 Content-Type
+（四个对照端点正常/仅附件头/仅 `application/jpg`+nosniff/两者兼具，`<img>` 全渲染成功），
+真正受影响的是顶层导航（仓库注释自述该头用于让 `window.open` 触发下载）。
+
+**教训（已写入 SKILL.md「曾被误判为误报、实为真缺陷」）**：上轮以「测试早于改动数周、CI 不复现」为由判为环境噪声，
+理由不成立 —— **测试在 Windows 上确定失败说明它不可移植，而白名单来源可被本机改写是产品层设计缺陷**。
+**「CI 跑不到」不是免报牌，它是判据 G4 的独立发现。**
+
+### 前端测试套件实况（09-14 补正，新判据 G3/G4）
+
+`cd app && pnpm test`（`dev` = `e4960b6553`）：`tests 2474 / pass 2455 / fail 13`，去重后共 13 个失败用例。
+**上一轮只读了输出尾部（`Select-Object -Last 15`）就写下「仅 1 处无关失败」，实为 13 处 —— 误判直接进了结论。**
+逐个单跑仍失败，排除了测试间干扰。
+
+按根因分四类：
+
+| 类别 | 数量 | 机制 | 实例 |
+|---|---|---|---|
+| 测试发现非 hermetic | 3 | `"test": "node --import tsx --test"` 未限定路径，递归扫到被 `.gitignore:14` 忽略的 `app/build/win-unpacked/resources/app/`（electron-builder 副本）。把 `app/build` 移出 `app/` 后：`tests` 2474→2427、`fail` 13→10 | `build\win-unpacked\...\{connectionManager,remoteKernel,windowMessaging}.test.js` |
+| 测试替身/白名单漂移（G3） | 5 | 桩对象存在但缺新导出（`TypeError: (0 , m_1.f) is not a function`）；模块白名单缺新 import；DOM 替身缺新调用的方法 |  `topBar.test.ts:270` 缺 `isInMobileApp`；`transactionAV.test.ts`×2 缺 `getEditorTransaction`；`backlinkReference.test.js` 缺 `setBacklinkTypeFoldExpandHandler`；`mobileBacklinks.test.js` 缺 `editor/assetOpen`；`image.test.ts` 的 `classList` 只有 `toggle` 没有 `remove` |
+| 断言未随生产变更更新 | 4 | 断言写死了实现细节 | `fontPreview.test.ts:45` 要求 `rootMargin === undefined` 而实现传 `"100px 0px"`；`fileTreeReorder.test.ts:54` 用 `strictEqual` 要求返回原对象而实现已改为投影；`entryVisibility.test.ts:32` 插件槽位期望基于字体项位于 `text` 之后（默认条目 09-09 已移到之前） |
+| 行尾敏感 | 1 | 按 `"\n    });\n"` 切片源码；`.gitattributes` 对 `.js` 只写 `* text=auto`，本机 `core.autocrlf=true` 检出为 CRLF → 锚点不匹配 | `electron/windowMessaging.test.js:100`；`app/electron/main.js` 实测 4497 CRLF / 0 孤立 LF，`b"\n    });\n" in file` = False、`b"\r\n    });\r\n"` = True。同目录 `crashHistory.test.js:10` 用 `"\n};"`（无尾随换行）故不受影响 |
+
+**引接各条的生产提交**：`27d54e1809`(#19467)、`0a1b5b424e`(#19378)、`99e5bd19ac`(#19257)、`6ed4866976`(#19378)、
+`4de337d316`(#19407)、`ff239fd9b3`(#19323)、`aaf5f44829`(#19378)、`b1077b520a`(#19226)。
+其中 `aaf5f44829` 的改动经核验对消费方安全：`Files.ts:1031`、`MobileFiles.ts:502`、`PinnedDocs.ts:499` 都只读 `result.notebook` 与 `result.parentPath`。
+
+### CI 执行集缺口（新判据 G4，已提 #19472）
+
+`.github/workflows/api-contracts.yml` 是唯一跑单测的 workflow，且是白名单式：
+内核只跑 `./apicontract/...` 与带 `-run` 过滤的 `./api ./plugin ./model`；前端 `pnpm exec tsx --test` 只列 7 个文件。
+对照 `go list ./...` 的 30 个包与 358 个前端测试文件，未覆盖面极大（`server` `sql` `av` `conf` `treenode` `mcp/tools` `cli/cmd` 等）。
+**后果**：本地全量一跑就红、CI 恒绿，于是没人能区分新回归与存量噪声 —— 我自己的误判就是这套机制的直接产物。
+
+### 本轮已提 issue 与最终归宿
+
+四条均 title/body 逐字符回读一致（长度差 1 为 GitHub 自动追加的尾部换行）；取证工具在 `%TEMP%` 下（已删除），仓库内零残留。
+
+| issue | 状态 | 修复提交 | 说明 |
+|---|---|---|---|
+| #19472 | open（CI 已通过，维护者未关闭） | `a846821ec2` + `8f0071886c` + `22a727db07` | CI 从白名单改为 `go test -tags "fts5 sqlcipher" ./... -count=1` + `pnpm test`，文档同步 |
+| #19473 | closed | `d32b6592f6` | `"test"` 加四个 glob 排除 `app/build`；并发先 4 后降到 1 |
+| #19474 | closed | `dc55a0635a` | 补齐替身与响应字段、更新断言、消除 CRLF 敏感匹配 |
+| #19475 | closed | `2d0561daf5` | 新增固定映射 `assetInlineMediaType`，并在 `secureAssetContentHeaders` 里显式写死 `Content-Type` |
+
+**本地复验（Windows，`8f0071886c`）**：`pnpm test` = `tests 2418 / pass 2412 / fail 0 / skipped 6`（改前 2474/13）；
+`go test -tags "fts5 sqlcipher" ./...` 26 个包全部 `ok`。两端均全绿。
+
+**#19475 的修法与报告建议一致且更完整**：除了判断本身，还顺带把允许内联资产的 `Content-Type` 固定下来
+（`context.Header("Content-Type", mediaType)`），理由是宿主 MIME 同样会影响预览行为——这比我报告里只写
+「替换判定的输入」更彻底；`.svg`/`.html`/`.js` 依旧不在映射表内即强制下载，安全公告的约束保持不变。
+
+#### 教训：CI 覆盖补全后必然以「三连提交」暴雷
+
+`a846821ec2`（把 CI 改为全量）→ **failure**，且失败原因与我的 issue 描述**不同**，是新增暴露的**测试环境前提冲突**：
+
+- `contracts` 失败 1（Linux）：`kernel/model` 的 `import_obsidian_test.go:92`
+  `Obsidian Vault path is unsafe: selected Vault path is sensitive`；
+  同因还挂了 `kernel/server` 的 `TestRegisterStaticFileHandlers`/`TestWidgetResponseCacheControl`/
+  `TestTemplatesAndExportRequireAdministrator`/`TestSnippetPublishAccess`/`TestPluginPublishAccess`。
+  根因：这些夹具建在 `t.TempDir()`，而 GitHub Linux runner 的 `TMPDIR` 默认是 `/tmp`，
+  `kernel/util/path.go` 的 `isSensitivePath` 系统前缀黑名单含 `/tmp` 与 `/var`。
+- `frontend-tests` 失败 1（Windows）：`Error: spawn EBUSY`（Electron 并发启动争用）。
+
+于是 `8f0071886c` 两处修：CI 加 `TMPDIR: ${{ runner.temp }}`、并发降到 1。
+但**又把前提推过头**：`TestIsSensitivePathSymlinkWorkspace` 的末句断言
+（`isSensitivePath(realWorkspace+"-outside/public.txt")` 必须为 `true`）**依赖夹具落在黑名单前缀下**，
+`TMPDIR` 变到 runner 目录后就不再成立 → 该 commit 的 CI 仍 `failure`（`kernel/util`）。
+`22a727db07` 再给这一个测试 `t.Setenv("TMPDIR", "/var/tmp")`，CI 才 `success`。
+
+**可复用判据（已并入 G4）**：同一套夹具里存在**互相矛盾的环境前提**——一组要求临时根目录命中系统路径黑名单、
+另一组要求不命中。检查法：grep 夹具的 `TempDir`/`MkdirTmp` 与环境变量，再 grep 路径黑名单常量，
+找出「断言真值依赖二者前缀关系」的测试。可靠修法是构造显式路径（工作空间内、或直接指向黑名单目录），
+而不是依赖环境的临时根。
+
+**并记一条验证纪律**：`a846821ec2` 的提交信息写着「Run all kernel and frontend tests in CI」，
+看起来一次性修好了，但该 commit 的 CI 实际是 `failure`；**判定 `fixed` 必须用
+`gh run list --json conclusion` → `gh run view <id> --json jobs` 看真实结论**，
+维护者评论里的「本地全量测试通过」同理不能等同 CI 通过。
+
+#### 矛盾前提的 2×2 取证（三次 CI 运行即为完整证明）
+
+`kernel/util/path.go:470` 的 `isSensitivePath` 对**工作空间外**路径做硬编码 UNIX 前缀匹配
+（`/.` `/etc` `/root` `/var` `/proc` `/sys` `/run` `/bin` `/boot` `/dev` `/lib` `/srv` `/tmp` `/usr` `/opt` `/sbin`，
+`path.go:487-509`）。两组测试把这一事实当作**相反的前提**：
+
+- **A 组必须命中前缀**：`kernel/util/path_test.go:173` `TestIsSensitivePathSymlinkWorkspace` 末句
+  `path_test.go:220-225` 断言 `isSensitivePath(realWorkspace+"-outside/public.txt")` 为 `true`。
+  该路径与工作空间是**字符串前缀相同但路径边界不同**的兄弟目录，`IsSubPath` 判定为工作空间外，
+  所以它只能靠系统前缀黑名单命中；而黑名单是 `HasPrefix(path, "/var")` 这种**锚定路径开头**的匹配，
+  夹具路径里那层 `.var/app/org.b3log.siyuan/SiYuan` 帮不上忙 → 必须 `TMPDIR` 以 `/tmp` 或 `/var` 开头。
+- **B 组必须不命中前缀**：`kernel/model/import_obsidian.go:576` 的 `validateObsidianVaultRoot` 对 vault 根调
+  `util.IsSensitivePath`，`kernel/server` 的静态伺服同理；夹具全是 `t.TempDir()`。若 `TMPDIR=/tmp`，
+  则 root = `/tmp/TestXxx…/001` → 命中 `/tmp` → 报 `Obsidian Vault path is unsafe: selected Vault path is sensitive`
+  而非期望的 `errObsidianVaultConfigMissing`。
+
+| CI 运行 | commit | `TMPDIR` | A 组 `kernel/util` | B 组 `kernel/model` + `kernel/server` |
+|---|---|---|---|---|
+| 34771606033 | `a846821ec2` | 未设 → Linux 默认 `/tmp` | `ok … kernel/util 2.318s` ✓ | **FAIL**（15 个用例） |
+| 34771876307 | `8f0071886c` | `${{ runner.temp }}` | **FAIL**（`TestIsSensitivePathSymlinkWorkspace`） | 通过 ✓ |
+| 34772185308 | `22a727db07` | `runner.temp` + 用例级 `/var/tmp` | 通过 ✓ | 通过 ✓ |
+
+第三行不是「找到了兼顾的取值」，而是那个测试**在自己的作用域内把变量改回去**——
+因为 A 通过要求 `TMPDIR` 命中黑名单、B 通过要求不命中，**同一变量上不可同时满足**，
+这是由黑名单定义直接推出的，不需要实测反例。
+
+**修复的残余脆弱点（值得再修）**：
+1. 修复把「夹具可用」寄托在 CI 的 `TMPDIR` 取值上，而非让夹具自造所需路径。后果是
+   **`go test ./...` 在 macOS（`TMPDIR` 天然为 `/var/folders/…`，同属 `/var` 前缀）上仍会红 B 组**。
+2. `t.Setenv("TMPDIR", …)` 生效的前提是 `GOTMPDIR` 为空：`t.TempDir()` 走
+   `os.MkdirTemp(os.Getenv("GOTMPDIR"), pattern)`（`$GOROOT/src/testing/testing.go` 的 `makeTempDir`），
+   仅当 `GOTMPDIR` 为空才回落到 `os.TempDir()`（`$GOROOT/src/os/file_unix.go:390` 的 `tempDir`，**不缓存** `TMPDIR`）。
+   一旦 CI 或本地设了 `GOTMPDIR`，该用例级覆盖会**静默失效**。
+3. A 组断言整体包在 `filepath.Separator == '/'` 里，**Windows 上该分支被跳过**——本机全绿不代表 CI 绿。
+
+#### GOTMPDIR 会架空用例级 TMPDIR 覆盖（已提 issue #19480）
+
+维护者用 `t.Setenv("TMPDIR", "/var/tmp")` 满足 A 组前提，但这句只在 `GOTMPDIR` 为空时有效：
+`t.TempDir()` → `c.makeTempDir()` → `os.MkdirTemp(os.Getenv("GOTMPDIR"), pattern)`
+（`$GOROOT/src/testing/testing.go`），仅当 `GOTMPDIR` 为空时 `os.MkdirTemp` 才用 `os.TempDir()`
+（`$GOROOT/src/os/file_unix.go:390` 的 `tempDir`，**不缓存** `TMPDIR`）。
+
+**两向对照实验（与平台无关，可在 Windows 复现）**——同一测试跑两次，只差 `GOTMPDIR`：
+
+```text
+A) GOTMPDIR=""          → t.TempDir() = <系统临时目录>/TestTempDirHonorsGOTMPDIR3895509988/001
+B) GOTMPDIR=<自定义目录> → t.TempDir() = <自定义目录>/TestTempDirHonorsGOTMPDIR4182409269/001
+                          （用例内 TMPDIR="…/forced" 被忽略）
+```
+
+`cmd/go` 自身不写 `GOTMPDIR`（`cmd/go/**` 内无写入点，只经 `cfg.Getenv` 读取），
+所以这是**条件性**触发，不是必然——但一旦触发，失败信息完全看不出与环境变量有关。
+
+**残留缺陷的完整清点（已提 issue #19480，24 小时内第 5 条）**：
+① 不预设 `TMPDIR` 时按文档命令跑 `go test ./...`，Linux 上必红 10 个用例，且报错指向 Obsidian 校验而非夹具位置；
+② `GOTMPDIR` 非空时用例级覆盖静默失效（上面的实验）；
+③ A 组断言在 Windows 被平台守卫跳过；macOS 的 `TMPDIR` 默认 `/var/folders/…` 同属 `/var` 前缀、
+按同一机制会红，而文档只写了 Linux（此条**未在 macOS 实机验证**，属机制推断，报告中已如实标注）。
+
+**修复趋势**：维护者对 #19472 的处置是「让环境满足夹具」（CI 设变量 + 单用例再设回去），
+而不是「让夹具自足」。这类修复的特征是**把测试正确性外包给环境配置**，
+代价是同一命令在开发机与 CI 上结论不同。审查这类修复时，应逐一问：
+「换一台机器/换一个默认值，这条断言还成立吗？」「覆盖它依赖的那个前提，有没有被显式断言过？」
+
+
+
+#### 第十一轮的方法论教训
+
+1. **「同一算子的多条实现路径」是 P11/P12 之外的新入口，比跨仓比对省力**。本轮无需跨语言、跨包，
+   仅在一个包内比对「枚举常量名 → 两条赋值路径」即可定位权威侧。把 `grep` 的目标从「函数名」改为
+   **「枚举常量名 + 该枚举的字符串字面量」**，能同时覆盖定义点与所有消费点。
+2. **整数除法是最硬的反例**。`countChecked*100/len(...)` 在 Go 中先截断，1/200 得 `0`。
+   这个反例**不依赖任何单位约定**——无论维护者主张量纲是 0–1 还是 0–100，「200 条里勾了 1 条显示 0」都错。
+   第五轮的教训（选「任何合理语义下都错的输入」）在本轮再次生效。**先找不需要解释就错的输入。**
+3. **挑战门第二轮给出了「不要承诺一行修复」的约束**。维护者立场指出：改量纲会同时改变
+   `av/sort.go` 排序、`av/filter.go` 的数值筛选阈值、嵌套汇总的 Sum/Average、`model/export.go` 导出文本。
+   因此报告的建议必须写成「对齐 + 评估下游筛选语义」，而非「改一行」。
+   **凡是会改变已落盘/已消费数值量纲的修复，都要先列下游消费点。**
+4. **「同一个 UI 菜单项落到两个不同内核函数」是最有说服力的业务表现**。
+   目标字段是复选框时，`app/src/protyle/render/av/calc.ts:169` 的菜单只给四个算子；
+   同一项用于列底部计算走 `calcFieldCheckbox`（正确），用于汇总列走 `calcContents`（错误）。
+   用户在同一数据集里能直接对比出 `66.67%` 与 `66`。**把「同一入口、两条后置路径」写成业务表现，比描述代码更有效。**
+5. **本轮的先验收益来自「未覆盖区域清单」而非更聪明的搜索**。开扫前先排除历轮 10 组，
+   再把子代理的侦察范围限定在 `export/import/template`、`flashcard/av/sql`、`card/search/history/export/protyle-render-av`
+   三个从未被系统看过的区域，命中率明显高于历史轮次的散点搜索。
+   **子代理产出仍只能当候选**：3 个候选里有 2 个经本上下文核对后不可达或已被上游保护。
+
+## 第十八轮（2026-09-14）：API 契约重构（#19378）遗留的类型与契约缺陷
 
 用户要求核查「端到端类型契约重构完成后是否还有实际问题」。范围是契约层本身：生成器、schema、路由覆盖、
 跨仓产物、声明与实现一致性、请求绑定语义。
@@ -939,7 +924,7 @@ B) GOTMPDIR=<自定义目录> → t.TempDir() = <自定义目录>/TestTempDirHon
 | — | 机械与实证核对为**无缺陷**的环节（同一批结论，供后续轮次跳过） | — | 排除，不报告 |
 | 无 | 未取得其他可判定发现 | — | — |
 
-#### 本轮判为干净的环节（附实测口径，后续轮次不必重做）
+### 本轮判为干净的环节（附实测口径，后续轮次不必重做）
 
 1. **契约与真实响应一致**：把 `kernel/apicontract/schema.go` 的 `validate` 与 `schema_numbers.go` 的辅助函数
    忠实移植到 Python（`decodeSchemaJSON` 需 `parse_float/parse_int=Decimal`，`equalSchemaValue` 需两边同为 Decimal，
@@ -958,7 +943,7 @@ B) GOTMPDIR=<自定义目录> → t.TempDir() = <自定义目录>/TestTempDirHon
 6. **跨仓产物同步**：petal `origin/main` 的 `types/api/index.d.ts` 与当前契约逐字节等价
    （586648 字符 / 620 路由 / 1116 类型全等），生成器 `api:check --petal` 通过。
 
-#### 第十八轮的方法论教训
+### 第十八轮的方法论教训
 
 1. **「有生成器 + 有 CI 门禁」不等于「已验证」**。本轮先按经验怀疑响应校验有盲区，实测后反而证明响应面很干净；
    真正的缺口在**请求绑定语义**——它是唯一「转换用户输入」的环节，而门禁只比对声明集合与产物一致性，
@@ -975,3 +960,14 @@ B) GOTMPDIR=<自定义目录> → t.TempDir() = <自定义目录>/TestTempDirHon
 6. **第三方 Python 校验器不可用时，移植 + 自检是可行路线**。本机无 `jsonschema`，但**不能**直接 `pip install`
    （仓库校验器是自定义子集：类型敏感的 `equalSchemaValue`、`minItems`/`maxItems` 与 `anyOf` 语义都与 JSON Schema 有差异），
    移植后用 Go 侧原有夹具自检，比引入一个语义不同的库更可靠。
+## 如何更新本文
+
+每轮审计后追加：
+
+1. 本轮实际命中（判据编号、发现、置信度）
+2. 新增的误报模式
+3. 阈值调整（若脚本参数变化）
+4. 方法论教训
+
+数据用于校准下一轮的判据与阈值，避免重复劳动。
+
