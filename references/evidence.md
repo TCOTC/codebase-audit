@@ -267,6 +267,32 @@
    且丢失是单向的（写 20 读 18），本地缓存还会被同一次点击写坏。判定「有意设计」时要问：
    这个「有意」是否解释了全部可观测后果？
 
+### 第八轮补记（2026-09-13，主条目之外的追加取证）
+
+1. **类型过滤真实门控结果（把「丢键」升级为「结果变化」）**：在同一运行实例上对
+   `/api/search/fullTextSearchBlock` 用同一关键字做对照，`types` 其余 18 键完全相同，仅切
+   `tabs`/`tabItem`：`matchedBlockCount` 由 **301（关闭）→ 311（开启）**。
+   即丢失这两个键会让搜索结果少掉页签/页签项容器块的 10 条命中，
+   **不是纯展示差异**，而是「保存的条件不能复现保存时的结果集」。
+2. **同一契约内的严格度不对称（P15 新增检查点）**：`apicontract.Criterion.SubTypes`
+   （`kernel/apicontract/criterion.go:71-75`）是 `map[string]bool`，未知键在往返中被**保留**；
+   同一请求里的 `Types` 是 struct，未知键被**丢弃**。
+   → 「宽松解析」不是一条被声明的契约原则，而是 struct/map 选择的副作用；
+   同一个载荷里两个字段的保真度不同，这正是漂移能长期不被察觉的原因。
+   检查闭合集合 DTO 时，**优先怀疑 struct 型（而非 map 型）成员**。
+3. **零副作用的复现脚本（三次 API 调用）**：
+   1. POST `/api/storage/setCriterion`，`criterion.types` 带 20 个键（含 `tabs`/`tabItem`）
+   2. POST `/api/storage/getCriteria`，该条件 `types` 只剩 18 个键
+   3. POST `/api/search/fullTextSearchBlock` 两次（仅切这两个键），比较 `matchedBlockCount`
+   最后用 `/api/storage/removeCriterion` 删除测试条件，工作区恢复原状。
+   **写入型缺陷也可以做到零残留取证**：关键是「写入 → 回读 → 删除」三步同轮完成并回读确认删除。
+4. **文档枚举会随契约生成物一起被「冻结成看似有意」**：`docs/API.md:2824`、
+   `API.zh-CN.md:2779`、`API.ja.md:2761` 三语版都精确列出 18 个键，`kernel/apicontract/schema.json`
+   与生成的 `app/src/types/api/index.d.ts:147,149` 也是 18 个。
+   契约迁移（`debc9a74cb`，2026-09-13）晚于页签特性（`5b8556e965`，2026-09-05），
+   于是把漏项**复制进了文档与生成物**。判定权威侧时不能把「生成物/文档也这么说」当作独立证据——
+   它们与 DTO 同源，只能算同一份证据的多个副本。
+
 ## 如何更新本文
 
 每轮审计后追加：
