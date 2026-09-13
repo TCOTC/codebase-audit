@@ -104,14 +104,39 @@
 
 ## 5 验证闭环（阶梯，逐级不可跳）
 
+> **先分清两类命令**：仓库自带的校验器里有**会改写工作区**的。只读审计只能跑左侧那列；
+> 修复模式才可跑右侧。搞错会让「只读审计」在用户不知情的情况下改掉源码。
+>
+> | 只读（审计可用） | 会改写（仅修复模式） |
+> |---|---|
+> | `npx tsc -p tsconfig.typecheck.json`、`npx tsc -p tsconfig.api.json` | `pnpm run lint`（= typecheck + `eslint . --fix --cache`，`semi`/`quotes` 可自动修复） |
+> | `npx eslint .` | `npx eslint . --fix`（并写 `.eslintcache`） |
+> | `go test -tags "fts5 sqlcipher" ./...` | `pnpm test`（会重写 `app/pnpm-lock.yaml`） |
+> | `gofmt -l`（只列不改） | `gofmt -w`、`pnpm build`（**禁止**，与开发者的 `pnpm dev` 冲突） |
+
 | 级 | 动作 | 不通过时 |
 |---|---|---|
-| 1 | 编译 / 格式化：`gofmt`（Go）、`pnpm run lint`（工作目录 `app/`） | 先修，不进下一步 |
+| 1 | 编译 / 格式化：`gofmt -l`（Go，只列）、`npx tsc -p tsconfig.typecheck.json`（前端） | 先修，不进下一步 |
 | 2 | 跑**受影响包**的单测，并**读全汇总行** | 读全失败清单，不允许用输出尾部代替汇总（曾把 13 处写成 1 处） |
 | 3 | **该测试是否在 CI 执行集内**（判据 G4） | 不在 → 「已修复」只在本地成立，必须同时报告，不能写 `fixed` |
 | 4 | **CI 实际结论**：`gh run list --json databaseId,status,conclusion,headSha` → `gh run view <id> --json jobs` | 提交信息与维护者评论**都不算**；以最后一个引用该 issue 的提交的 CI 结论收口 |
 | 5 | 端到端：从**用户可见入口**走一遍报告里的「业务表现」路径 | 实际表现 ≠ 预期表现则未修好 |
 | 6 | 回归测试的写法检查 | 见下 |
+
+### 回归风险先扫一遍，再逐项验证
+
+改动落在**历轮已报告过的位置**时，回归概率显著高于新代码。开工验证前先跑：
+
+```bash
+cd <目标仓库>
+git diff --name-only <修复前的提交> > <工作区外临时文件>
+python "<skill-dir>/scripts/scan_regression_index.py" < <工作区外临时文件>
+# 或：python "<skill-dir>/scripts/scan_regression_index.py" --git <仓库> --rev HEAD~1
+```
+
+输出会列出「本次变更命中历轮发现」的文件、当时轮次、issue 与行号，以及**高复发文件**排行。
+命中不等于回归——行号是当时的位置，后续提交会偏移——但它把「该重点看哪几个文件」
+从经验判断变成了机械排序。**这一步之前一直靠人翻千行 `evidence.md`。**
 
 **回归测试的两条硬要求**：
 

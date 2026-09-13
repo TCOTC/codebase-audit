@@ -110,6 +110,9 @@ python "<skill-dir>/scripts/scan_duplicated_literals.py" \
   --root kernel --root app/src --out <工作区外临时路径>
 python "<skill-dir>/scripts/scan_unescaped_html.py" \
   --root app/src --out <工作区外临时路径>
+# 前端 DOM 契约（data-type）的闭合集合——权威源是 Lute 输出的 NodeType
+python "<skill-dir>/scripts/scan_dom_type_literals.py" \
+  --root app/src --kind node --out <工作区外临时路径>
 # 改了脚本后跑一次自检（含「根不存在时不得假成功」与默认值一致性）
 python "<skill-dir>/scripts/test_scan_scripts.py" <目标仓库根目录>
 ```
@@ -473,8 +476,13 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 修改前必须遵守目标仓库的 `AGENTS.md`：
 
 - **禁止** `git commit` / `git push`，除非用户明确要求
-- 改 `app/` 下的代码后，以 `app/` 为工作目录跑 `pnpm run lint`；**不要**跑 `pnpm build`
-  （会与开发者的 `pnpm dev` 冲突并产出坏包）
+- **只读审计禁用一切会改写工作区的命令**。已知的三个：
+  - `pnpm run lint` 实际是 `pnpm run typecheck && eslint . --fix --cache`——
+    `semi` / `quotes` 都是可自动修复规则，**会直接改写源码**，且 `--cache` 会写 `.eslintcache`。
+    只读等价形式：`npx tsc -p tsconfig.typecheck.json`、`npx tsc -p tsconfig.api.json`、
+    `npx eslint .`（**不要** `--fix`）。修复模式下才可跑带 `--fix` 的形式。
+  - `pnpm test` 会重写 `app/pnpm-lock.yaml`
+  - `pnpm build` **禁止**（会与开发者的 `pnpm dev` 冲突并产出坏包）
 - 改 Go 代码后跑 `gofmt`，但**不要**编译内核二进制，也不要重启正在运行的内核
 - 改 i18n 后跑 `python scripts/check-lang-keys.py`
 - 涉及同步忽略规则、加密笔记本、快照格式时先读 `AGENTS.md` 兼容性条款——
@@ -505,7 +513,10 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 | 写「既往记录」字段 | [实证数据](./references/evidence.md) | 历轮发现登记表（去重的第二来源）与量化结论 |
 | 修改本 skill | [维护规范](./references/contributing.md) · [更新记录](./references/changelog.md) | 追加与整理规范、版本管理、编辑坑；历次变更历史 |
 
-`scripts/` — 两个机械扫描脚本（判据 A、F）与两个自检：
+`scripts/` — 三个机械扫描脚本与两个自检：
+`scan_duplicated_literals.py`（判据 A）、`scan_unescaped_html.py`（判据 F）、
+`scan_dom_type_literals.py`（前端 DOM 契约的闭合集合，服务判据 A/D3）、
+`scan_regression_index.py`（历轮发现的回归索引，服务修复验证）、
 `test_scan_scripts.py`（脚本行为与过滤规则）、`skill_self_check.py`（本文档库的 7 组结构检查）。
 
 ## 更新记录

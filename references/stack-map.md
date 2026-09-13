@@ -128,20 +128,30 @@
 ## L6 编辑器内核（Protyle）
 
 - **关键路径**：`app/src/protyle`（`render/`、`wysiwyg/`、`util/`、`undo/`、`render/av/`、`export/`）
-- **权威源**：渲染契约与 DOM 契约（`data-type`、`data-node-id`）；
-  同一控件在多视图中的取数/取值实现（表格 vs 画廊 vs 看板）
+- **权威源**：
+  - **DOM 契约（`data-type`）的权威源是 Lute 输出的 NodeType**，不在前端。
+    前端只有散落的裸字面量——实测 `app/src` 下约 **2000 处 `data-type` 引用、
+    85 个不同值**，而无任何常量表或类型约束。这是判据 A 里风险最高的一类
+    （「裸字符串，无任何校验」）。用 `scan_dom_type_literals.py` 提取闭合集合后与 NodeType diff
+  - 同一控件在多视图中的取数/取值实现（表格 vs 画廊 vs 看板）——三者是**互查的权威侧**
 - **高发形态**：
   - 重建 / 重渲 / 清空时状态丢失（写死初始值而非读当前值）→ C、P8、P26
   - 同族多实现里唯一一处读错 DOM 属性（`contenteditable` 的 div 读 `.value`）→ D1e、P20
   - 动态插值未转义 → F、P9
   - 定位 / 折叠等**临时展现态没有跨重渲载体** → P26
-- **既有校验器**：`pnpm run lint`（工作目录 `app/`）；`pnpm test`（`node --test`）
+  - `data-type` 闭合集合漏掉 Lute 新增的节点类型 → D3、P14
+- **既有校验器**（必读：`pnpm run lint` **会改写文件**，只读审计用下面的等价形式）：
+  - `npx tsc -p tsconfig.typecheck.json`（应用代码类型）；`npx tsc -p tsconfig.api.json`（API 契约类型）
+  - `npx eslint .`（**不加 `--fix``— 加了就是修复模式；`pnpm run lint` = typecheck + `--fix`）
+  - `pnpm test`（`node --test`；会重写 `app/pnpm-lock.yaml`）
 - **取证陷阱**：
   - 编辑器是**虚拟滚动**，`querySelectorAll` 拿不到视口外的块 → 必须滚动后分两次采样
   - `/// #if MOBILE` / `/// #if !MOBILE` 是**编译期剔除**，跨端对比前先 grep 保护块，
     否则会把「该端根本没有此设置」写成漏实现（已列入已知误报）
   - 移动端与桌面端用**不同模板**，`previousElementSibling` 指向的对象可能不同
   - 前端测试的桩是手写白名单，源码新增一个 import 就会让多个测试文件一起挂 → G3
+  - `--test` 的 glob 包含 `tests/**/*.test.js`，而 `app/build/` 下的构建副本里也有同名目录 →
+    构建产物会被当成测试收集，制造与源码无关的失败。取证前先把 `build/` 移开
 
 ## L7 UI 框架与配置
 
@@ -154,7 +164,10 @@
   - 前端有键、内核 struct 无字段（静默无效的开关）→ D3c、P27
   - 只读守卫缺位或**位置漂移**（副作用夹在守卫与动作之间）→ D1d、D1j、P30
   - 设置面板 textarea 分支未转义 → F
-- **既有校验器**：`pnpm run lint`；entryVisibility 一致性测试（catalog ↔ 菜单声明 ↔ 顺序迁移）
+- **既有校验器**：
+  - `npx tsc -p tsconfig.api.json`（配置字段与契约类型）
+  - `npx eslint .`（只读）；entryVisibility 一致性测试（catalog ↔ 菜单声明 ↔ 顺序迁移）
+  - **不要**在只读审计时跑 `pnpm run lint`（带 `--fix`）
 - **取证陷阱**：
   - 配置命名空间是**整体写入**：前端缺字段会让「对象深比较」保存守门**恒不成立**，
     把「显示错误」升级为「每次关对话框都无谓落盘」
@@ -163,6 +176,10 @@
   - `catalog.ts` 的顺序定义内置顺序与「新条目并入既有 profile 的位置」，不是纯展示；
     分隔符必须有稳定 `data-id` 并登记
   - 隐藏是靠 catalog 有该 path 时才生效（未知 id 宽松放行），漏登记等于守卫失效
+  - L7 的 `data-type` 大量用于**非块** UI 标记（`av-*` 系列、`available-fonts`、
+    `backlink` 等），它们与 L6 的块类型**共用同一个属性名**。
+    用 `scan_dom_type_literals.py` 时必须分别看待：`--kind node` 只看 `Node*`，
+    其余值需逐个人工确认（脚本会列入「仅出现一次的值」段）
 
 ## L8 Electron 宿主与打包
 
@@ -172,7 +189,7 @@
   - 同类宿主页面的配置不对称（9 处有 `nodeIntegration`，唯独 boot window 没有）→ D1g、P25
   - 平台/宿主环境假设（注册表、换行符、临时目录归属）→ E2
   - 构建产物被测试框架收集成假失败 → G4 变体
-- **既有校验器**：无专用；靠 `pnpm run lint` 与人工核对
+- **既有校验器**：无专用；靠 `npx tsc -p tsconfig.typecheck.json` 与人工核对
 - **取证陷阱**：
   - 本机 `app/electron/*.js` 检出为 **CRLF**（`core.autocrlf=true`）；`.gitattributes` 的
     `*.ts text eol=lf` 只保证 TS，**按 `"\n"` 切片源码的测试在本机必失败**
