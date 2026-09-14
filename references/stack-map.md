@@ -153,6 +153,14 @@
   - 前端测试的桩是手写白名单，源码新增一个 import 就会让多个测试文件一起挂 → G3
   - `--test` 的 glob 包含 `tests/**/*.test.js`，而 `app/build/` 下的构建副本里也有同名目录 →
     构建产物会被当成测试收集，制造与源码无关的失败。取证前先把 `build/` 移开
+  - **`pnpm dev` 只重建 Electron 用的 `app` 产物**（`webpack.config.js`）；
+    浏览器/平板使用的 `stage/build/desktop` 与 `mobile` 产物由 `pnpm dev:desktop` / `pnpm dev:mobile`
+    单独构建，不随 `pnpm dev` 更新。实测：改完 `protyle/util` 后 `desktop/main.*.js` 里新符号命中 **0**，
+    在浏览器验证会得到「功能完全没生效」的**假阴性**。在浏览器里验证前端行为前，先确认对应产物已重建，
+    或改用 Electron 端；也可用「bundle 里 grep 新符号」当作产物新鲜度的判据
+  - **不要向运行中的应用发送键盘输入来导航**（实测事故）：`Ctrl+P` 未打开搜索时，后续键入会落进
+    当前聚焦的输入框（文档标题），造成改名 + 回车提交 + 改名被内核同步进块引用文本。
+    UI 取证用 DOM 合成 `click` 与真实鼠标坐标点击；确实需要键盘时，先断言焦点在预期元素上
 
 ## L7 UI 框架与配置
 

@@ -1620,6 +1620,35 @@ html += '<button class="x" data-action="copy"><svg>…</svg></button>';
    但「跑出 0 个」这个**观测结果**可能来自方法失效（选择器写错、时机不对）。
    **对照组的成本很低，缺了它整次检测的结论不可用。**
 
+## 第二十六轮（2026-09-14）：聚焦临时展开机制（#8956 / #19483）定向审计
+
+用户提问「目前的机制会产生 BUG 吗」。范围＝`f91cf6b9ed`（列表项）+ `60fa553984`（标题）两个提交引入的前端纯视图态机制：
+`protyle/util/focusFold.ts`、`viewFold.ts` 的 loader、`heading.ts` 的 `getFocusedHeadingChildren`、`blockFold.ts` / `onGet.ts` / `destroy.ts` 的接入点。
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D3 | 自动展开的块类型集合只含 `NodeListItem`/`NodeHeading`（`focusFold.ts:41`），而仓内两处权威集合都是 **5 类**：`blockFold.ts:287` 的 `isFoldable` 与 `gutter/index.ts:3542` 的 `foldRecursive` 菜单门控（`NodeHeading`/`NodeListItem`/`NodeBlockquote`/`NodeCallout`/`NodeSuperBlock`）；CSS `_wysiwyg.scss:889-895` 对 `.bq`/`.callout` 折叠确实隐藏后续子块。用户折叠引述/标注/超级块后聚焦，仍只显示一行 | 高（代码可证 + UI 路径可达） | 本轮已确认，低 |
+
+- **业务表现**：光标放进引述块 → 块菜单「折叠/展开」→ 块折叠（只剩第一行）→ 块菜单「聚焦」→ 期望与列表项/标题一致地临时展开，实际仍是一行；全程无任何反馈。
+- **预期表现的权威依据**（不是审计者偏好）：`blockFold.ts:287` 与 `gutter/index.ts:3542` 两处独立给出同一个 5 类可折叠集合，而机制自身已为其中两类实现展开。
+- **修法量级同列表项**：`.bq`/`.callout`/`.sb` 折叠时子块**仍在 DOM**（内核只对标题做可见性裁剪，见 `kernel/model/render_fold_test.go` 的 `TestCleanRenderNodesKeepsFoldedContainerChildren`），因此去掉 `fold` 即可，不需要新请求、不涉及内核。
+
+**核过但未发现缺陷的环节（后续轮次勿重做）**：
+
+- 快照/还原：`data-view-fold-source` 与视图折叠共用，`sanitizeViewFoldHTML`（`viewFold.ts:485`）与 `clear.ts:17` 的 `clearViewState` 都会把它翻回真实 `fold`，所以复制、剪切、事务序列化都不会把临时态写进文档；`clearBlockElement` 只作用于克隆（`paste.ts:1114`、`commonHotkey.ts:332/339/377/382` 全是 clone/temp 元素）。
+- 手动接管：`stopFocusFold` 由 `setFold` 的 toggle 分支（`blockFold.ts:67`）与 `prepareViewFoldTransaction`（按 op 的 fold 值）覆盖 `setFold`/`toggleListFold`/`foldBlocksRecursively`/`foldHeadingGroup` 的全部折叠写入口；`setFoldById`（远端 `unfoldHeading` 推送）用显式 `isOpen`，既不触发接管也不误清快照。
+- 竞态：`generation` + `isValid()` 覆盖「加载中切聚焦 / 加载中编辑 / 元素被替换 / destroy」四种；`transaction.ts:576` 的 `invalidateViewFoldRequests` 与 `transaction.ts:614` 的 `applyViewFoldStates` 顺序保证被作废的加载在同一轮重新发起。
+- 写入面：loader 只做 DOM 合并（按 `data-node-id` 去重、保留已有元素），`renderHeadingChildren` 的重渲染与 `queueHeadingNumberRefresh` 的 `/api/outline/getDocHeadingNumbers` 都是只读 →「不写文档、不产生撤销记录」成立。
+- 测试：`focusFold.test.ts` + `focusHeading.test.ts` 共 18 例本地全绿；CI 前端 job 已是**全量** `pnpm test`（`.github/workflows/api-contracts.yml` 的 frontend-tests），新测试在 CI 执行 —— 早先的 G4「白名单式 CI」问题已不成立。
+
+**观察项**（无业务表现，勿单独立项）：`data-view-heading-owner` 在聚焦路径写了但没有消费者；`restoreElement` 在退出聚焦路径上是死代码（`showAll` 只在 `onGet` 变 false，而 `onGet` 必替换内容），仅在「聚焦期间元素被替换」时生效。
+
+**未取证候选**（勿重报，除非有新证据）：临时展开的标题子块是**异步**插入的（`viewFold.ts:161` 的 loader 内 `await fetchSyncPost`），而 `onGet` 之后同步运行的消费者仍按「DOM 已完整」假设 —— `menus/protyle.ts:1105-1132`（`zoomOut` 的 `focusId` 定位，失败才回落 `getUnfoldedParentID`）与 `setHTML` 内的滚动/光标定位是候选点；需要一条「`focusId` 落在本次临时展开区间内」的可达路径才能定性。
+
+**取证陷阱（新，重要）**：本机 `pnpm dev` 只重建 **Electron 用的 `app` 产物**；浏览器/平板使用的 `stage/build/desktop` 与 `mobile` 产物不会随之更新。实测 `stage/build/desktop/main.*.js` 中 `applyFocusFold` / `getFocusedHeadingChildren` / `invalidateFocusFoldRequests` 命中 **0**（`data-view-fold-source` 命中，因为视图折叠是旧代码）。据此在浏览器里验证该功能会得到「完全没生效」的**假阴性**。改前端后要在浏览器验证，必须先确认对应产物已重建，或改用 Electron 端。
+
+**方法论教训（新）**：**不要向运行中的应用发送键盘输入来导航**。本轮用 `Ctrl+P` 想打开搜索但并未打开，随后的键入落进了文档标题输入框，把用户文档「db test 2」改名成「fold focus auditdb test 2」，并新增了一个空段落（块引用文本被内核同步改名）。用 `/api/history` 的 14:22 快照比对确认改动来源后，rename 回原名 + 删除空段落，并逐项回读三个块引用（现均为 `db test 2`）。UI 取证改用 DOM 合成 click 与真实鼠标坐标点击（hover 块 → 点块标图标 → 点菜单项）。
+
 ## 如何更新本文
 
 每轮审计后追加：
