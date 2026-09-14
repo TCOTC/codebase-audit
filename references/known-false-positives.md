@@ -45,6 +45,9 @@
 | `aria-hidden="true"` 元素被判为「里面可能有可聚焦内容」（A2） | `rating.ts` 的星级与分布条、`export/index.ts` 的 pdf 图标、`fontControls.ts` 的图标（8 处） | **逐条回读后 8/8 全为假阳性**：都是装饰性 `svg` / `span`，没有 `tabindex`、没有原生可聚焦元素。把 `aria-hidden` 用在装饰图标上是**正确实践**（也正是「不把推测的辅助技术行为当作事实」的反面）。判 A2 要看元素**内部**有没有可聚焦内容，不能看到 `aria-hidden` 就报 |
 | `role="combobox"` 被判为「缺必需 aria-*」（A3） | `protyle/toolbar/fontFamilyMenu.ts:164` 的字体搜索框 | **实现是完整的**：同时有 `role` / `aria-expanded` / `aria-controls`（指向 `role="listbox"` 的列表）/ `aria-label`，选项有 `role="option"` + `aria-selected`，并有 `syncActiveDescendant()` 维护 `aria-activedescendant`、roving tabindex。判 A3 要**列出该 role 要求的属性再逐项核对**，不能按「出现了 role 就怀疑缺属性」 |
 | `mouseenter`/`mouseover` 处理器被判为「缺配对 focus」（K6） | 资源/文档预览、浮动停靠栏 hover 展开、`AgentChat` 导航栏展开、评分预览、菜单 `--current` 高亮（11 处） | **三条排除依据**：① 评分预览（`config/bazaar/rating.ts:647`）**已有完整键盘支持**（方向键/Home/End + `aria-checked` + roving tabindex），hover 只是额外的预览高亮；② 菜单的 `--current` 高亮正是键盘方向键导航设置的同一状态；③ 其余属**辅助信息或鼠标特性**（预览、hover 展开），键盘无等价物也不阻断功能。判 K6 要问「这个 hover 做的是**功能**还是**预览/装饰**」，只看「有没有 focus 配对」会把预览类全部误报 |
+| 「菜单没有把 DOM 焦点移入」被判为缺焦点管理（K3） | `.b3-menu__item--current`（38 处 `classList.add/remove`）、`menus/Menu.ts` 无 `focus()` | **菜单用方向键 + `--current` 修饰类导航，不移动 DOM 焦点，是有意设计**：维护者在 #19493 的评论里明确写了菜单项由兜底提供焦点环、且菜单主要靠方向键。判 K3 前先确认该组件的键盘导航模型（DOM 焦点 / roving tabindex / 纯修饰类），三种都合法。**同理 `block__popover` 是 hover 触发，无需移入焦点** |
+| 「有弹层开合类名就一定缺焦点陷阱」（K3/K7 的 123 处） | `classList.(add\|remove)` 命中 `dialog\|modal\|popover\|menu` 的 123 处 | **信号极松**：实际构成是 38 处 `b3-menu__item--current`（键盘导航高亮）、15 处 `b3-menu__item--show`（图标显隐）、其余多为菜单外观类；**真正涉及弹层开合的只有 7 处**。判前必须先按类名归并，把「高亮/显隐/外观」与「弹层本体出现与消失」分开 |
+| 「Esc 没在组件内部处理就是缺配对」（K7） | 组件文件里搜不到 `Escape` | **先查全局处理器**：`boot/globalEvent/keydown.ts` 的 Escape 分支按 9 级优先级统一处理（`formatPainter` → `cancelDrag` → 图片预览 → 菜单 → `av__panel` → 对话框 → 块浮层 → 光标在文档树时回编辑器 → `focusByRange` 兜底），组件内不写 Esc 是正常的。**这是一处做得相当完整的地方，不要按「有没有 Esc」一律怀疑** |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 

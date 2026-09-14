@@ -518,6 +518,13 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
    实测一例：提交信息写「Run all kernel and frontend tests in CI」（看似已修复），
    但同一 commit 的 CI 为 `failure`；后续又需两个提交（`TMPDIR` → 单测级 `TMPDIR`）才转 `success`。
    同理，维护者评论里的「本地全量测试通过」也不等于 CI 通过。验证轮应以**最后一个引用该 issue 的提交的 CI 结论**收口。
+   ⑥ **先确认工作树是否落后于 `origin/dev`**：`git fetch origin` 后看
+   `git rev-list --count HEAD..origin/dev`。**`git status` 干净不代表代码是最新的**
+   —— 第三十一轮实测：工作树停在 `bc64d1677b`，`origin/dev` 已到 `51e0174081`，**落后 9 个提交**，
+   其中就包含刚被修复的那批。判据是 `git merge-base --is-ancestor <sha> HEAD`（退出码 0）；
+   **`git cat-file -t <sha>` 返回 `commit` 只证明对象被 fetch 过，不能证明工作树包含它**（我据此误判过一次）。
+   仍想在正确基线上工作时用 `git archive origin/dev <paths> | tar -x` 导出到临时目录，让脚本指过去。
+   该陷阱影响的不只是验证，**任何依据源码下的结论都受影响**（详见层面地图的「环境与取证前提」）。
 2. **确认范围**。全仓库还是指定包？先问清楚，避免无边界扫描。
 3. **跑机械筛选**。执行判据 A、F 的脚本，并按需扩展到其它层面：
 

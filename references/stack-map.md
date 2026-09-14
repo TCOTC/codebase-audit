@@ -552,6 +552,45 @@ fixed 元素不再相对视口，而是相对该祖先定位。
 - 本机 `mime.TypeByExtension(".jpg")` 返回 `application/jpg`（Windows 注册表覆盖内置表），
   相关测试失败**非回归**；Chromium 会忽略子资源上的 `Content-Disposition`
 
+## **工作树可能落后于 `origin/dev`（2026-09-14 实测，最严重的一类污染）**
+
+**先做这一步，再做任何源码级结论**：
+
+```
+cd <repo>
+git fetch origin
+git rev-list --left-right --count HEAD...origin/dev      # 左边非 0 就说明你在旧代码上工作
+git diff --stat HEAD origin/dev | tail -40               # 看差异是否碰到你要判定的文件
+```
+
+实测：本地工作树停在 `bc64d1677b`（17:12:30），而 `origin/dev` 已到 `51e0174081`（17:29:08），
+**落后 9 个提交**，其中包含 6 个由本 skill 上一轮上报而刚被修复的提交。后果：
+
+- 对**已修复**的代码做「验证」会得出「没有修复」的错误结论（本轮实际发生：
+  我先按工作树读出 `_tooltips.scss` 仍是 `:hover` 专属、`dialog/index.ts` 仍无焦点管理，
+  直接与维护者评论冲突；`git merge-base --is-ancestor` 才是判据）
+- 对**新方向**做源码级判定会基于过期代码（本轮把焦点陷阱的分析整个重做了一遍）
+
+**关键点**：修复提交**存在于本地对象库**（`git cat-file -t <sha>` 返回 `commit`），
+但它们**不是 HEAD 的祖先**——`git cat-file` 只证明对象被 fetch 过，**不能证明工作树包含它**。
+唯一可靠的判据是 `git merge-base --is-ancestor <sha> HEAD`（退出码 0）或
+`git rev-list --count HEAD..origin/dev`（为 0）。
+
+**在正确基线上工作而不改动只读仓库的办法**（目标仓库要求零改动）：
+
+```
+git archive --format=tar --output=<tmp>/dev.tar origin/dev app/src app/appearance
+mkdir <tmp>/devsrc && cd <tmp>/devsrc && tar -xf <tmp>/dev.tar
+# 然后让扫描器指向 <tmp>/devsrc/app/src —— 与旧版数量对比即可看出哪些缺口已被上游修掉
+```
+
+本轮用这个方法得到**当前权威状态**：焦点可见性缺口 **0**（旧树上是 2）、
+K2 **0**、A6 **0**、K5 的「确认」由 18 降到 16（剩下的正是已判定为容器/内容区的那些）。
+
+**与「产物新鲜度」陷阱的区别**：那条讲的是 `pnpm dev` 只重建 `app` 产物、浏览器用的是旧 bundle；
+这一条讲的是**源码本身**就是旧的。两条都会造成假阴性，但这一条更隐蔽——
+读源码时不会觉得自己在读过期的代码。
+
 # 来源与许可
 
 本文件的层面划分与检查点，是把下列公开 Agent Skill 的方法论**用自己的话重新表述**后落到本仓库结构上，

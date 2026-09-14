@@ -657,20 +657,49 @@ else:
                                  os.path.join(repo, "app", "appearance"))
             mn = re.search(r"无焦点指示\s*:\s*(\d+)", out)
             mu = re.search(r"表单控件使用点\s*:\s*(\d+)", out)
+            mc = re.search(r"有焦点指示\s*:\s*(\d+)", out)
+            mk = re.search(r"含可见焦点变化的类\s*:\s*(\d+)", out)
             check(code == 0 and mn is not None and mu is not None,
                   "scan_focus_coverage 给出使用点与缺口计数（%s / %s）"
                   % (mu.group(1) if mu else "?", mn.group(1) if mn else "?"),
                   repr(err[:140]))
             # 承重断言：必须写出「不等于缺陷」的限界，否则使用者会把
-            # 462 条计数当成 462 个缺陷直接上报。
+            # 几百条计数当成几百个缺陷直接上报。
             check("必须回读使用点" in out,
                   "限界声明未被删掉（无焦点指示不等于缺陷）",
                   "缺失则计数会被当成结论")
-            if mn and mu:
-                check(0 < int(mn.group(1)) < int(mu.group(1)),
-                      "缺口数介于 0 与总数之间（%s < %s）"
-                      % (mn.group(1), mu.group(1)),
-                      "为 0 说明降噪过度，等于总数说明没在判定")
+            # **活体检查（liveness）**，不是「降噪过度」的检查。
+            # 这条原先写成 `0 < 缺口 < 总数`，理由是「为 0 说明降噪过度」——
+            # 该理由在第三十一轮失效：上游把缺口全部修完后，本仓库的真实状态就是 **0**，
+            # 于是断言把「正确地报 0」误判成失败（**正确的状态被断言挡住**）。
+            # 降噪过度改由夹具断言覆盖（第 11 组的 :is()/特异性/嵌套 :not 等用例，
+            # 与仓库无关、可稳定区分两种行为）；这里只需要证明
+            # **判定管线还活着**：样式解析出了焦点规则、且每个使用点都拿到了判定。
+            check(mc is not None and mk is not None,
+                  "能解析出「有焦点指示」与「含可见焦点变化的类」两行",
+                  "mc=%s mk=%s" % (mc.group(1) if mc else "?",
+                                   mk.group(1) if mk else "?"))
+            if mn and mu and mc and mk:
+                n_gap, n_use = int(mn.group(1)), int(mu.group(1))
+                check(0 < n_use and n_gap <= n_use,
+                      "缺口数不超过使用点总数（%s <= %s）" % (n_gap, n_use),
+                      "缺口大于总数说明统计口径错了")
+                check(int(mk.group(1)) > 0,
+                      "样式侧解析出了焦点规则（含可见焦点变化的类 %s 个）"
+                      % mk.group(1),
+                      "为 0 说明 CSS 解析失效，缺口会是假结果")
+                # 缺口为 0 时，必须同时有大量「有焦点指示」——
+                # 否则「0 缺口」来自「所有使用点都被丢弃」而不是「都被覆盖」。
+                if n_gap == 0:
+                    check(int(mc.group(1)) > 0,
+                          "缺口为 0 且仍有 %s 个使用点被判为有焦点指示"
+                          % mc.group(1),
+                          "两个都是 0 说明使用点全被丢弃，不是真的干净")
+                else:
+                    check(int(mc.group(1)) + n_gap == n_use,
+                          "有焦点指示 + 无焦点指示 == 使用点总数（%s + %s == %s）"
+                          % (mc.group(1), n_gap, n_use),
+                          "两者之和不等于总数，说明有使用点没被判定")
         else:
             print("  SKIP  %s 下无 app/src 或 scss，焦点覆盖未测" % repo)
 
