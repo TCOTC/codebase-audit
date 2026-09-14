@@ -7,6 +7,10 @@
 目标仓库根目录也可用环境变量 `AUDIT_TARGET_REPO` 提供；不提供则只跑前两组
 检查（它们不依赖任何外部仓库）。
 
+**第 [4] 组是历史空档**（原第 [4] 组的内容已并入第 [3] 组），
+组号**不重排**，同 patterns 里 P33 空缺的约定——因此输出从 [3] 直接跳到 [5]，
+不是漏跑。
+
 自检项（都是实际踩过的坑，不是通用断言）：
 
 1. 根目录不存在时**不得**输出「0 个文件 / 0 条发现」并以 0 退出
@@ -35,12 +39,13 @@
 9. `scan_a11y_antipatterns`：K5 的两层降噪都是承重的——
    ① 同选择器无 `:focus` 替代；② 类名落在可聚焦元素上（否则是容器，**不是缺陷**）。
    实测不做第 ② 层时，`.av` / `.emojis` / `.b3-form` 这类容器会被报成缺陷。
-10. `scan_css_token_contract`：**三条件合取里，条件 ③（源码写入）是承重的**。
-    关掉它时，实测 SiYuan 的 17 条「无 fallback 的疑似缺失」**全部是假阳性**
-    （都由 `setProperty` / `removeProperty` / 注入的 CSS 模板串写入）。
-    另两件必须被固定的事：① 条件 ③ 用「源码提及」的**宽规则**而非窄的形态匹配
-    （窄规则把 `--b3-font-family-editor` 漏过一次）；② 测试文件必须排除
-    （实测 9 个候选里 7 个只出现在 `*.test.ts` 的断言串里）。
+10. **扫描根与 cwd 不同盘时不得崩溃**。`os.path.relpath(p)` 不传第二个参数时以 cwd 为基准，
+    扫描根在另一个盘（如仓库在 `D:` 而本 skill 在 `C:`）时抛
+    `ValueError: path is on mount`，整个脚本崩溃、一条结论都输不出。
+    该缺陷长期存在而未被发现，因为自检恰好在与仓库同盘的 cwd 下跑过——
+    **测试结果依赖 cwd 的通过是假通过**。
+    本组必须同时断言「不抛异常」与「输出不含绝对路径」：
+    后者是必需的，只靠 `try/except` 吞掉异常并退回绝对路径也能“不崩”而输出不可读。
 
 仅依赖标准库，无需第三方包。退出码 0 表示全部通过。
 """
@@ -63,7 +68,6 @@ SCAN_IDX = os.path.join(HERE, "scan_regression_index.py")
 SCAN_PARITY = os.path.join(HERE, "scan_doc_parity.py")
 SCAN_I18N = os.path.join(HERE, "scan_i18n_text_expansion.py")
 SCAN_A11Y = os.path.join(HERE, "scan_a11y_antipatterns.py")
-SCAN_CSS = os.path.join(HERE, "scan_css_token_contract.py")
 EVIDENCE = os.path.join(SKILL_DIR, "references", "evidence.md")
 
 FAILURES = []
@@ -73,7 +77,7 @@ def run(script, *args, **kwargs):
     # stdin 必须显式关掉：子进程会继承父进程的 stdin，而 scan_regression_index
     # 无 --file/--git 时会读它——继承一个不结束的管道会让子进程永久阻塞，
     # 表现为「自检卡死」而不是「用例失败」。
-    # cwd 可覆盖：跨盘用例必须显式指定，见第 11 组。
+    # cwd 可覆盖：跨盘用例必须显式指定，见第 10 组。
     proc = subprocess.run(
         [sys.executable, script, *args],
         capture_output=True,
@@ -109,11 +113,9 @@ for script, name in ((SCAN_DUP, "scan_duplicated_literals"),
                      (SCAN_DOM, "scan_dom_type_literals"),
                      (SCAN_PARITY, "scan_doc_parity"),
                      (SCAN_I18N, "scan_i18n_text_expansion"),
-                     (SCAN_A11Y, "scan_a11y_antipatterns"),
-                     (SCAN_CSS, "scan_css_token_contract")):
+                     (SCAN_A11Y, "scan_a11y_antipatterns")):
     flag = "--docs" if script == SCAN_PARITY else (
-        "--langs" if script == SCAN_I18N else (
-            "--styles" if script == SCAN_CSS else "--root"))
+        "--langs" if script == SCAN_I18N else "--root")
     code, out, err = run(script, flag, missing)
     check(code != 0, "%s 退出码非 0（实际 %d）" % (name, code))
     check("no such directory" in err,
@@ -377,65 +379,7 @@ else:
             print("  SKIP  %s 下无 app/src" % repo)
 
 print()
-print("[10] scan_css_token_contract 的三条件降噪")
-if repo:
-    app_src = os.path.join(repo, "app", "src")
-    scss = os.path.join(app_src, "assets", "scss")
-    appearance = os.path.join(repo, "app", "appearance")
-    if os.path.isdir(app_src) and os.path.isdir(scss):
-        args = ["--styles", scss]
-        if os.path.isdir(appearance):
-            args += ["--styles", appearance]
-        code, out, err = run(SCAN_CSS, *args)
-        # ① 不给 --source 时必须显式告警：否则使用者会把条件 ③ 未判定的结果当结论。
-        check(code == 0 and "不可用于立论" in out,
-              "缺 --source 时在结论里显式告警",
-              repr(err[:140]))
-        # ② 给了 --source 之后，条件 ③ 必须真的排除掉整类令牌。
-        code, out, err = run(SCAN_CSS, *(args + ["--source", app_src]))
-        m3 = re.search(r"无定义但源码里有写入（条件 ③ 排除）[：:]\s*(\d+) 个", out)
-        me = re.search(r"另有 (\d+) 个只在源码里被提及", out)
-        mc = re.search(r"三条件同时成立的候选[：:]\s*(\d+) 个", out)
-        m1 = re.search(r"无 fallback（(\d+) 个）", out)
-        # 断言无条件做：正则失配时不能静默跳过（曾因此让整条断言消失）。
-        check(code == 0 and m3 is not None and mc is not None and m1 is not None,
-              "四条计数行都能解析",
-              "条件③=%s 仅提及=%s 候选=%s 无fallback=%s"
-              % (m3.group(1) if m3 else "?", me.group(1) if me else "?",
-                 mc.group(1) if mc else "?", m1.group(1) if m1 else "?"))
-        # 承重断言 ①：**宽规则**（源码提及）必须也参与排除。
-        # 实测它单独负责 3 个令牌——其中 `--b3-font-family-editor` 是窄规则
-        # 漏掉过的那个。宽规则一旦失效，这 3 个会全部冒成候选。
-        # 断言必须指向宽规则本身：早先的版本断言的是「条件 ③ 排除 > 0」，
-        # 而那实际测的是**窄**规则（writes），把宽规则关掉后它照样通过。
-        check(me is not None and int(me.group(1)) > 0,
-              "宽规则（源码提及）确实参与排除（%s 个）"
-              % (me.group(1) if me else "?"),
-              "为 0 说明条件 ③ 退回窄的形态匹配，会漏掉注入 CSS 串里的后续变量名")
-        if m3 and mc and m1:
-            # 承重断言 ②：条件 ③ 必须排除掉可观数量。为 0 说明源码写入检测失效。
-            check(int(m3.group(1)) > 0,
-                  "窄规则（写入形态）确实排除了令牌（%s 个）" % m3.group(1),
-                  "为 0 说明运行时注入会被报成缺失")
-            # 承重断言 ③：降噪后候选必须是**很小的比例**。
-            # 用比例而非绝对数，是为了在仓库新增令牌时不假失败；
-            # 同时它足够紧：关掉宽规则时候选从 2 变成 23（阈值 19），仍然失败。
-            check(int(mc.group(1)) * 10 < int(m1.group(1)),
-                  "降噪后候选 < 无 fallback 的 1/10（%s*10 < %s）"
-                  % (mc.group(1), m1.group(1)),
-                  "关掉条件 ③ 时候选会逼近无 fallback 总数，即降噪失效")
-        # ③ 测试文件必须被排除：早先未排除时 9 个候选里 7 个来自 *.test.ts。
-        mfb = re.search(r"--b3-font-color14\s", out)
-        check(mfb is None,
-              "测试文件里的断言串未被当成产品引用",
-              "若出现 --b3-font-color14，说明 EXCLUDE_FILE_SUFFIXES 失效")
-    else:
-        print("  SKIP  %s 下无 app/src/assets/scss" % repo)
-else:
-    print("  SKIP  未提供目标仓库")
-
-print()
-print("[11] 扫描根与 cwd 不同盘时不得崩溃")
+print("[10] 扫描根与 cwd 不同盘时不得崩溃")
 # 回归：`os.path.relpath(path)` 不传第二个参数时以 **cwd** 为基准，
 # 当扫描根在另一个盘（Windows 上 `d:\...` 与 `c:\...`）时抛
 # `ValueError: path is on mount 'd:', start on mount 'C:'`，整个脚本崩溃。

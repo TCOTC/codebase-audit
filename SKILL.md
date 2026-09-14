@@ -411,7 +411,10 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
    判「某个令牌没人定义」必须三条件同时成立：① 引用侧无 fallback ② 所有样式根（**含主题目录**）
    无定义 ③ 源码里从未提及。实测只做 ①② 得到 34 条，**逐条回读后 17/17 全为假阳性**
    （都由 `setProperty` / `removeProperty` / 注入的 CSS 模板串写入）。
-   用 `scan_css_token_contract.py`；条件 ③ 用**源码提及的宽规则**——窄的形态匹配漏过一次。
+   条件 ③ 必须用**源码提及的宽规则**，不要把形态匹配当成排除依据——
+   窄规则漏过一次：`--b3-font-family-editor` 与 `--b3-font-size-editor` 写在**同一个注入的
+   CSS 模板串**里，带反引号锚点的规则抓不到同串里的第二个变量名。
+   **本项没有脚本**（准入标准见下方「参考资源」的脚本清单）。
 2. **SCSS 里状态样式主要写成嵌套的 `&:hover`**，其选择器文本**不含组件类名**。
    只 grep 选择器文本会系统性漏掉绝大多数状态定义（全仓嵌套 `&:hover` 154 处、
    `&:focus` 32 处、`:focus-visible` 22 处、`:active` 16 处、`:disabled` 7 处）。
@@ -494,7 +497,6 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
    | `scan_doc_parity.py` | 多语言文档的结构与标识符一致性 | A、D3 |
    | `scan_i18n_text_expansion.py` | 受约束容器中的翻译文本膨胀（I4 的候选） | I4 |
    | `scan_a11y_antipatterns.py` | 可机械检出的 a11y 行为反模式（K2 / K5 / A6） | I3 |
-   | `scan_css_token_contract.py` | 设计令牌的引用 / 定义 / 源码写入三条件合取 | A、I |
 
    多语言文档的一致性**不属于任何别的校验器**：实测 `apigen` 只生成
    `app/src/types/api/index.d.ts`、`schema.json` 与 petal 的 `index.d.ts`，
@@ -626,14 +628,21 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 | 写「既往记录」字段 | [实证数据](./references/evidence.md) | 历轮发现登记表（去重的第二来源）与量化结论 |
 | 修改本 skill | [维护规范](./references/contributing.md) · [更新记录](./references/changelog.md) | 追加与整理规范、版本管理、编辑坑；历次变更历史 |
 
-`scripts/` — **七个机械扫描脚本与两个自检**：
+`scripts/` — **六个机械扫描脚本与两个自检**：
 `scan_duplicated_literals.py`（判据 A）、`scan_unescaped_html.py`（判据 F）、
 `scan_dom_type_literals.py`（前端 DOM 契约闭合集合）、`scan_doc_parity.py`（多语言文档一致性）、
 `scan_i18n_text_expansion.py`（判据 I4 文本膨胀）、`scan_a11y_antipatterns.py`（判据 I3 无障碍行为）、
-`scan_css_token_contract.py`（设计令牌契约，**其价值在三条件降噪规则而非产出**：实测本仓库只剩 2 条候选，
-且回读后均为移植样式里的死规则）、
 `scan_regression_index.py`（历轮发现的回归索引，服务差分审查与修复验证）、
 `test_scan_scripts.py`（脚本行为与过滤规则）、`skill_self_check.py`（本文档库的 7 组结构检查）。
+
+> **脚本的准入标准：零产出或极低产出的不进来。**
+> 已按此标准移除过一个设计令牌契约扫描器（`scan_css_token_contract.py`，第二十二轮加、
+> 第二十三轮移除）：降至 2 条候选、回读后 0 条真缺陷。
+> 它的检查法已改写为上面的纯文字判据（见判据 I 的「CSS 侧取证的两条硬前提」、
+> [已知误报](./references/known-false-positives.md) 与 [层面地图](./references/stack-map.md) L11），
+> 效果一样而不占用脚本位、不需维护与自检。
+> **「值得知道」与「值得自动化」是两件事**；一个规则再有启发性，
+> 若在目标仓库只换来一两条还要人工回读的候选，它就是文档，不是脚本。
 
 ## 更新记录
 
