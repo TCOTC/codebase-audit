@@ -1531,6 +1531,95 @@ html += '<button class="x" data-action="copy"><svg>…</svg></button>';
    「有可见文本的按钮不被报出」指向了错误的行（那一行其实是图标按钮）。
    自检当场失败才暴露出来——**这正是保留「不该报出」类断言的价值。**
 
+## 第二十五轮（2026-09-14）：定位参照帧检查点（**无确认实例**）
+
+**起因**：上一轮结尾列出两个候选改进方向——补 I1 的实证、补 z-index/定位上下文。
+本轮先做量化侦察，选择了后者：`SKILL.md` 里 `z-index` 与「定位上下文」命中数为 **0**，
+而 `AGENTS.md` 第 7 条明文要求「改 `position` / `transform` / `contain` / `overflow` 时
+检查对后代定位参照帧、overlay 覆盖、裁剪的影响」——是**项目自己的规范**，属现成权威依据。
+
+### 一、属性表是实测的（纠正了三个常见误解）
+
+本地 HTML + `offsetParent !== null` 判定，19 个用例。**会让后代 fixed 改参照帧**：
+`transform` / `filter` / `backdrop-filter` / `perspective` / `contain: layout|paint|strict` /
+`will-change: transform|filter`。
+
+**不会**：`will-change: opacity` / `isolation: isolate` / `opacity: 0.99` /
+`position: relative|absolute` + `z-index` / `position: sticky` / `mix-blend-mode` / `mask-image`。
+
+**这张表最容易记错的地方**：`isolation` / `opacity` / `position + z-index`
+都会创建 **stacking context**，但**不创建包含块**。把两者等同会产出大量假阳性——
+判这件事只能看**包含块**。这也是我不凭记忆写表、而是搭一个本地 HTML 实测的原因。
+
+### 二、业务表现的实测（不是推断）
+
+同一段 CSS 的 fixed 元素（`top:0; left:0`）：
+
+| 祖先 | `offsetParent` | 实际 `getBoundingClientRect().top` |
+|---|---|---|
+| 无创建包含块的属性 | `null` | **0**（视口左上角） |
+| `transform: translateX(1px)` | 宿主容器 | **400**（容器位置） |
+
+**偏了 400px**。注意 `translateX(1px)` 这种「几乎等于没有」的 transform 同样生效——
+这正是它隐蔽的原因：**改动者看不出任何视觉变化，坏的是后代**。
+
+### 三、判定方法必须有对照组
+
+```js
+[...document.querySelectorAll("*")]
+  .filter(el => getComputedStyle(el).position === "fixed" && el.getClientRects().length)
+  .filter(el => el.offsetParent !== null)
+```
+
+第一次在运行中的实例上跑时得到 `totalFixed=4, trappedCount=0`。
+**这个「0」当时是不可信的**——同一次执行里我注入了「有 transform 祖先」与
+「无 transform 祖先」两个 fixed 元素作对照，确认前者 `trapped=true`、后者 `false`，
+才敢认定页面确实干净。**没有对照的「0 个」分不清「干净」与「方法失效」。**
+
+### 四、静态规模与本仓库的隐式假设
+
+| 项 | 数量 |
+|---|---|
+| 会创建包含块的声明 | `transform` 113、`filter` 21（含 `backdrop-filter` 12）、`will-change` 8、`contain` 6 |
+| `position: fixed` 选择器 | 51，另有 5 处内联 |
+| `position: sticky` | 16 |
+| `z-index` 取值 | 24 种；动态分配基数为 **10**（`app/src/index.ts:295`），硬编码最大 `1000000` |
+
+**隐式假设（判据 E 的形态）**：`.mobile-topbar` / `.mobile-bottom-bar` / `.side-panel` /
+`.b3-menu--sheet` / `#editor > .protyle-breadcrumb` 都是移动端**容器**且带
+`will-change: transform`。它们当前的后代里没有 fixed 元素，但这些属性使它们成为**禁地**——
+将来在其中插入 `position: fixed` 的元素会静默跑偏。
+
+**权威侧**：`.av__mask` 用 `document.body.insertAdjacentHTML("beforeend", ...)` 挂到 body 下
+（`app/src/protyle/render/av/cell.ts:648`），在任何容器里都不会被围住。同族互查以它为准。
+
+### 五、为什么诚实地不给它判据字母
+
+**本轮没有找到本仓库已存在的该缺陷**。按既有规范（「从一次已确认的缺陷出发」，
+与「资源与生命周期检查点」同一处理），它写在层面地图的**待实证检查点**里，
+不占判据字母、不建 P 条目。
+
+同时**不建脚本**：静态判定需要后代的 DOM 祖先链，而这在 SiYuan 由模板字符串拼装
+（`insertAdjacentHTML` / `innerHTML`），无法可靠还原嵌套。运行时判定已零假阳性、
+只需一次 `evaluate`——按 `SKILL.md` 的脚本准入标准（零产出或极低产出的不进来），
+它更适合放在**验证闭环**里当必查项。
+
+### 第二十五轮的方法论教训
+
+1. **「我查了但没找到」也是一个结果，前提是把它和「我没查」区分开**。
+   本轮的价值不在产出缺陷，而在：机制被实测、方法有对照组、规模被量化、
+   隐式假设被点名。**下一轮命中时不必从零开始。**
+2. **空白不必用判据去填**。`z-index` 在 `SKILL.md` 里 0 命中确实是个缺口，
+   但「有权威依据 + 有实测方法」不等于「有确认缺陷」。**按规范放进检查点，
+   比硬塞一个判据字母更诚实，也不会污染判据清单的「全部有实证」性质。**
+3. **属性表必须实测**。`isolation` / `opacity` / `position + z-index` 都会创建
+   stacking context——凭这个印象写表，会把三个高频属性全部误判为危险，
+   而它们恰好是布局里最常用的。**一次 19 用例的本地 HTML 就解决的事，
+   不要用记忆去赌。**
+4. **零假阳性的判据也需要对照组**。`offsetParent` 判据本身是规范的确定行为，
+   但「跑出 0 个」这个**观测结果**可能来自方法失效（选择器写错、时机不对）。
+   **对照组的成本很低，缺了它整次检测的结论不可用。**
+
 ## 如何更新本文
 
 每轮审计后追加：

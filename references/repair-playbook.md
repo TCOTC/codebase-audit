@@ -137,6 +137,17 @@
 5. 同时看 **console 报错与网络请求**：交互态残留常伴随一条被忽略的 console 错误
 6. 按 repo 改动的层面选语言：改 `menus` / `dialog` / `dock` / `protyle` 时必须切语言；
    改内核逻辑则不需要
+7. **改了 `position` / `transform` / `contain` / `overflow` 时，验证后代的定位参照帧**
+   （`AGENTS.md` 第 7 条的硬要求）。祖先上出现 `transform` / `filter` / `backdrop-filter` /
+   `perspective` / `contain: layout|paint|strict` / `will-change: transform|filter` 时，
+   后代的 `position: fixed` **不再相对视口**——实测偏差达 **400px**（同一段 CSS，
+   无该祖先时 `top` 为 0，有该祖先时为容器位置）。
+   判定：`el.offsetParent !== null` 即为被围住（规范：未被围住的 fixed 元素 `offsetParent` 为 `null`）。
+   **必须同时注入对照组**（有 / 无该属性的两个 fixed 元素），否则「0 个」分不清
+   「真的干净」与「方法失效」。属性表与代码片段见
+   [全栈层面地图](./stack-map.md) 的「定位参照帧检查点」。
+   **别把 `isolation` / `opacity` / `position + z-index` 也算进去**——它们只创建
+   stacking context，**不创建包含块**，误判会产出大量假阳性。
 
 > **不要用「我点了一下没问题」代替第 5 级**。这类缺陷的定义就是「正常操作下看起来没问题」，
 > 所以「点了一下正常」不构成验证——必须走报告里写的**触发条件**。

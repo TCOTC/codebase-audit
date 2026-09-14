@@ -365,6 +365,98 @@
 **取证**：前端在销毁前后采样监听器/定时器是否仍在活动；Go 侧优先构造最小复现，
 用 `go test -race` 或 `goleak`，不要通读全包。
 
+# 定位参照帧检查点（**待实证**）
+
+> 对应 `AGENTS.md` 第 7 条的硬要求：「改 `position` / `transform` / `contain` / `overflow` 时，
+> 检查对**后代定位参照帧**、overlay 覆盖、裁剪的影响」。
+> **本仓库尚无确认的缺陷实例**，因此按既有约定不占用判据字母、也没有 P 条目。
+> 但机制与判定方法**都已实测**，命中时可直接用。
+>
+> **为什么值得单列**：`SKILL.md` 里 `z-index` 与「定位上下文」命中数为 **0**，
+> 而它正是本项目明文写进规范的雷区之一——属于「没有既有校验器、也没有判据」的空白。
+
+## 机制：属性表是**实测的**，不是凭记忆
+
+CSS 规定：祖先上存在下列属性时，它成为后代 `position: fixed` 的**包含块**——
+fixed 元素不再相对视口，而是相对该祖先定位。
+
+本地 HTML 实测（`offsetParent !== null` 判定，19 个用例）：
+
+| 祖先属性 | 会让后代 fixed 改参照帧 |
+|---|---|
+| `transform`（非 none） | **是** |
+| `filter`（非 none） | **是** |
+| `backdrop-filter`（非 none） | **是** |
+| `perspective`（非 none） | **是** |
+| `contain: layout` / `paint` / `strict` | **是** |
+| `will-change: transform` / `filter` | **是** |
+| `will-change: opacity` | 否 |
+| `isolation: isolate` | **否** |
+| `opacity: 0.99` | **否** |
+| `position: relative` / `absolute` + `z-index` | **否** |
+| `position: sticky` / `absolute` | 否 |
+| `mix-blend-mode` / `mask-image` | 否 |
+
+> **这张表最容易记错的地方**：`isolation` / `opacity` / `position + z-index`
+> 都会创建 **stacking context**，但**不创建包含块**。
+> 把「创建 stacking context」等同于「会困住 fixed」会产出大量假阳性——
+> 判这件事只能看**包含块**。
+
+## 业务表现（实测，不是推断）
+
+同一段 CSS 的 fixed 元素（`top:0; left:0`）：
+
+| 祖先 | `offsetParent` | 元素实际 `getBoundingClientRect().top` |
+|---|---|---|
+| 无创建包含块的属性 | `null` | **0**（视口左上角，符合预期） |
+| `transform: translateX(1px)` | 宿主容器 | **400**（容器所在位置） |
+
+**偏了 400px**——元素从「固定在视口」变成「固定在容器里」。
+
+## 判定方法（零假阳性，但必须做对照组）
+
+```js
+[...document.querySelectorAll("*")]
+  .filter(el => getComputedStyle(el).position === "fixed" && el.getClientRects().length)
+  .filter(el => el.offsetParent !== null)   // 规范：未被围住的 fixed 元素 offsetParent 为 null
+  .map(el => [el.className,
+              getComputedStyle(el.offsetParent).transform,
+              getComputedStyle(el.offsetParent).filter,
+              getComputedStyle(el.offsetParent).contain,
+              getComputedStyle(el.offsetParent).willChange]);
+```
+
+**对照不可省**：同一次执行里注入「有 `transform` 祖先」与「无 `transform` 祖先」两个 fixed 元素，
+确认前者 `offsetParent !== null`、后者 `=== null`，再报真实数字。
+否则「0 个」无法区分「真的干净」与「方法失效」——实测必须一正一反才敢下结论。
+
+## 静态规模（本仓库当前，2026-09-14）
+
+| 项 | 数量 |
+|---|---|
+| 会创建包含块的声明 | `transform` 113 条、`filter` 21 条（含 `backdrop-filter` 12）、`will-change` 8 条、`contain` 6 条 |
+| `position: fixed` 选择器 | 51 条，另有 5 处内联 `position: fixed` |
+| `position: sticky` | 16 条 |
+| `z-index` 取值 | 24 种；动态分配基数是 **10**（`app/src/index.ts:295`），硬编码最大 `1000000`（`.tooltip`） |
+
+**注意 `will-change` 那一组是「禁地」**：`.mobile-topbar`、`.mobile-bottom-bar`、`.side-panel`、
+`.b3-menu--sheet`、`#editor > .protyle-breadcrumb` 都是移动端**容器**且带 `will-change: transform`。
+它们当前的后代里没有 fixed 元素，但将来在其中插入 `position: fixed` 的元素会**静默跑偏**。
+这是判据 E 的隐式假设形态：**容器的这个属性构成了后代必须遵守的隐含前提**。
+
+**权威侧（本仓库已有的正确做法）**：`.av__mask` 用
+`document.body.insertAdjacentHTML("beforeend", ...)` 挂到 body 下
+（`app/src/protyle/render/av/cell.ts:648`），因此在任何容器里都不会被围住。
+同族互查时以它为准。
+
+## 为什么不做脚本
+
+静态判定需要**后代的 DOM 祖先链**，而在 SiYuan 里这由模板字符串拼装
+（`insertAdjacentHTML` / `innerHTML` / `innerHTML =`），无法可靠还原嵌套关系。
+运行时判定已零假阳性、只需一次 `evaluate`——按 `SKILL.md` 的脚本准入标准
+（零产出或极低产出的不进来），它更适合放在**验证闭环**里当必查项，
+而不是占一个脚本位并承担维护成本。
+
 # 跨层连带检查表
 
 改一处之前，先按此表确认要不要连带改别处。本表是「爆炸半径」的可操作版本
