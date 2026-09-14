@@ -42,6 +42,9 @@
 | 「上游已经加了全局兜底，所以焦点可见性问题已全部解决」 | 由上面 326 → 2 得出「本仓焦点可见性已经干净」 | **兜底会被更高特异性的 `outline: none` 反杀**（#19499 第 2 点）：`.protyle-toolbar__item:focus` (0,2,0) 与 `.protyle-preview__action button:focus` (0,2,1) 都高于兜底的 (0,1,1)。判定必须比较特异性而非「有没有规则」 |
 | 把「文本在固定宽度容器里显示不全」直接判为「译文过长」 | 判据 I4 的长度候选（`ar` 的 `الخطوط العريضة (outline)` 7→26 字符、`de` 的 `synchronisieren (sync)` 4→22） | **必须先用真实渲染区分「容器太窄」与「译文太长」**：实测两处都是**容器侧**——移动端历史筛选下拉的可用内宽只有 62px（`fn__size96` 96px 减 `.b3-select` 的 `padding: 4px 26px 4px 8px`），**英文 `All operations`（90px）就已经溢出 28px**（#19502）；表情动态图标页签四个标签共用 89px，只有译文最长的那个溢出（#19503）。只按长度比排序会把修法指向「改译文」，而它既改不好英文那条、也不是另一条的原因 |
 | 量测溢出时用「文本宽 − 盒宽」当作症状 | 把 `label89` 的分数报成「超出 58px」 | **那是推导量，不是观测量**：能观察到的症状是文本绘制矩形与相邻控件的交叠（`Range.getBoundingClientRect().right − nextBox.left` = 54px）。且量测集合必须**完整覆盖选项**——本轮先把 `historyOutline` 漏在集合外，修正后 `ar` 的数值从 46px 变成 85px |
+| `aria-hidden="true"` 元素被判为「里面可能有可聚焦内容」（A2） | `rating.ts` 的星级与分布条、`export/index.ts` 的 pdf 图标、`fontControls.ts` 的图标（8 处） | **逐条回读后 8/8 全为假阳性**：都是装饰性 `svg` / `span`，没有 `tabindex`、没有原生可聚焦元素。把 `aria-hidden` 用在装饰图标上是**正确实践**（也正是「不把推测的辅助技术行为当作事实」的反面）。判 A2 要看元素**内部**有没有可聚焦内容，不能看到 `aria-hidden` 就报 |
+| `role="combobox"` 被判为「缺必需 aria-*」（A3） | `protyle/toolbar/fontFamilyMenu.ts:164` 的字体搜索框 | **实现是完整的**：同时有 `role` / `aria-expanded` / `aria-controls`（指向 `role="listbox"` 的列表）/ `aria-label`，选项有 `role="option"` + `aria-selected`，并有 `syncActiveDescendant()` 维护 `aria-activedescendant`、roving tabindex。判 A3 要**列出该 role 要求的属性再逐项核对**，不能按「出现了 role 就怀疑缺属性」 |
+| `mouseenter`/`mouseover` 处理器被判为「缺配对 focus」（K6） | 资源/文档预览、浮动停靠栏 hover 展开、`AgentChat` 导航栏展开、评分预览、菜单 `--current` 高亮（11 处） | **三条排除依据**：① 评分预览（`config/bazaar/rating.ts:647`）**已有完整键盘支持**（方向键/Home/End + `aria-checked` + roving tabindex），hover 只是额外的预览高亮；② 菜单的 `--current` 高亮正是键盘方向键导航设置的同一状态；③ 其余属**辅助信息或鼠标特性**（预览、hover 展开），键盘无等价物也不阻断功能。判 K6 要问「这个 hover 做的是**功能**还是**预览/装饰**」，只看「有没有 focus 配对」会把预览类全部误报 |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 

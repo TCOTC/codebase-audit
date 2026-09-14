@@ -1818,6 +1818,109 @@ vendored 的 `asset/pdf/**`（23 处）单列，不按自研标准要求。
    本轮是同一机制在 13 小时后被新提交再次打破。上报时必须引用前一 issue 与修复提交，
    否则会被当成重复上报。
 
+## 第二十九轮（2026-09-14）：把 a11y 提示位点与剩余候选处理完（#19505 / #19506 / #19507）
+
+上轮清理完 `.audit-*.md` 后，本节把剩下的三类候选（a11y 的 143 个提示位点、K5 的 18 条「确认」、
+i18n 的 1 条未上报）逐条判定完，产出 3 条 issue。
+
+### 一、tooltip 的键盘可达性（#19505，机制层）
+
+`component/_tooltips.scss` 的提示**只有一个显示入口，且是鼠标专用**：
+
+| 行 | 规则 | 作用 |
+|---|---|---|
+| `:70` | `.b3-tooltips::after { opacity: 0 }` | 基线不可见 |
+| `:74-77` | `&:hover, &:focus-within { overflow: initial }` | **`:focus-within` 只放开裁剪，不设 opacity** |
+| `:79-83` | `&:hover::after { opacity: 1; ... }` | 唯一的显示入口 |
+
+**对照实验**（真实产物 CSS `app/stage/build/app/base.*.css` + 真实 DOM 形态）：
+
+| 状态 | 伪类命中 | `::after` opacity |
+|---|---|---|
+| 基线 | — | 0 |
+| **键盘聚焦** | `:focus-within` **true** | **0（不可见）** |
+| **鼠标悬停** | `:hover` true | 轨迹 `0 → 0.004(301ms) → 0.686 → 0.935 → 1(451ms)` 起稳定 |
+| 对照组：无 `.b3-tooltips` 类 | — | `content: none`（排除「伪元素不存在」的干扰） |
+
+**规模**：`.b3-tooltips` 共 160 个标签（34 文件），**键盘可聚焦 46 个**（28 `button` + 15 `input` + 3 `a[href]`），
+其中 10 个属 vendored PDF.js → 自研 **36 个**。
+
+**业务表现最有说服力的一处**：闪卡复习界面 `card/openCard.ts:122/127/135/142/149/156/163` 的 7 个按钮，
+`aria-label` 承载的正是**快捷键提示**（`空格 / 回车`、`0 / x`、`1 / j / a`、`2 / k / s`、`4 / ; / f`）——
+鼠标悬停能看到，Tab 过去看不到；而这些提示的用途恰恰是告诉键盘用户有哪些快捷键。
+同类还有关系图配置的 15 个 `input[type=range]`（`layout/dock/Graph.ts`）与 `config/tabs/keymapRow.ts:8`。
+
+**依据**：WCAG 2.1 **1.4.13 Content on Hover or Focus** 要求由悬停或聚焦触发的附加内容
+**必须同时**可由两者触发。**修法**：显示入口补 `:focus-within`（另需补 `:126-127` 与 `:145-146`
+两个方向变体的 `transform`，否则四个方向在聚焦时停在 `scale(.8)`）。
+
+**取证陷阱（新）**：`.b3-tooltips::after` 有 `transition: opacity 150ms 300ms`，
+在 `mouseover` 事件里**立即**读 computed style 只能得到过渡中间态（实测得 `opacity=0`，会误判为「悬停也不显示」）。
+必须在过渡完成后采样（本轮用 `requestAnimationFrame` 逐帧记录轨迹，300ms 后才发现真实值为 1）。
+
+### 二、对话框关闭后不恢复焦点（#19506，架构层）
+
+`dialog/index.ts` 的 `Dialog` 类**没有任何焦点管理**：`:76` `document.body.append(this.element)` 不记录触发元素，
+`:96-104` 的 `destroy()` 只 `classList.remove` + `element.remove()`。
+`dialog/inputDialog.ts` 有打开时的初始焦点（`inputElement.focus()`），但关闭后同样不恢复。
+
+**同族不一致是本条的主要论据**：`Dialog` 有 **103 个调用点**，其中 **10 个**自己在 `destroyCallback` 里
+调 `focusByRange` 恢复（`editor/rename.ts:62`、`util/pathName.ts:291`、`protyle/wysiwyg/list.ts:115`、
+`business/openRecentDocs.ts:118`、`protyle/wysiwyg/callout.ts:90`、`search/spread.ts:155`、
+`protyle/render/av/cell.ts:596`、`menus/commonMenuItem.ts:85/289`、`config/bazaar/rating.ts:595`），
+其余 **93 个**没有 —— 不是「作者认为不需要」，而是「没在类里统一做，只有想起来的调用点做了」。
+
+**浏览器行为对照实验**（本地页面复现 `Dialog` 的行为）：
+```
+触发元素聚焦 → activeElement = trigger
+焦点移入对话框 → activeElement = inner
+element.remove() → activeElement = BODY   是否回到触发元素 ? false   触发元素 isConnected = true
+对照组（手动 focus 回触发元素）→ activeElement = trigger
+```
+第 3 行是规范行为，第 4 行证明恢复可行、只是没做；触发元素仍在文档里，不涉及元素消失。
+
+**去重**：#14399（focus return id）与 #12349 → #16073 → #16862（Windows 上原生 `alert`/`confirm` 后整窗失焦）
+是**原生弹窗**问题，与 `Dialog` 类的焦点恢复不是同一问题。
+
+### 三、微信提醒的 100px 标签（#19507，i18n 固定宽度的第二个实例）
+
+`menus/commonMenuItem.ts:74`（`openWechatNotify`）与 `:144`（`openFileWechatNotify`）各一处：
+`style="text-align: right;white-space: nowrap;width: 100px"`。用 `Range` 取文字绘制矩形，
+与右侧日期输入框左边界比对：
+
+| 语言 | 文案 | 文字宽 | 超出盒 | 压到输入框 |
+|---|---|---|---|---|
+| es | Tiempo de notificación | 171px | 71px | **63px** |
+| ru | Время уведомления | 158px | 58px | **50px** |
+| de | Benachrichtungszeit | 153px | 53px | **45px** |
+| tr / fr | 117 / 112px | | 17 / 12px | **9 / 4px** |
+| en / ar / ko / zh-CN / zh-TW | 86 / 79 / 68 / 64 / 64px | | — | 无 |
+
+`text-align: right` 是干扰项：它只影响对齐，文字比盒宽时**既不被裁掉也不换行**，照常绘制覆盖右侧。
+这与 **#19503**（89px 标签）、**#19502**（96px 下拉）构成同一形态的三个实例，区别是这一处用行内 `style`。
+
+### 四、本轮判为**非缺陷**的候选（勿重报）
+
+| 候选 | 数量 | 排除依据 |
+|---|---|---|
+| A2 `aria-hidden="true"` 内是否含可聚焦内容 | 8 处 | 逐条判定**全部排除**：都是装饰性 svg/span（`rating.ts` 的星级与分布条、`export/index.ts` 的 pdf 图标、`fontControls.ts` 的图标）。`aria-hidden` 用在装饰图标上是**正确实践** |
+| A3 带 `role="combobox"` 是否缺必需 aria-* | 1 处 | **实现完整**：`fontFamilyMenu.ts:164` 同时有 `role` + `aria-expanded` + `aria-controls`（指向 `role="listbox"` 的列表）+ `aria-label`，选项有 `role="option"` + `aria-selected`，且 `syncActiveDescendant()` 动态维护 `aria-activedescendant`。**比多数实现更完整** |
+| K6 `mouseenter`/`mouseover` 是否缺配对 focus | 11 处 | 逐条回读：① `config/bazaar/rating.ts:647` 的评分预览**有完整键盘支持**（方向键/Home/End + `aria-checked` + roving tabindex + 初始 focus）；② `AgentSessionPanel.ts:410` 的 `--current` 高亮是菜单键盘导航的同一状态；③ 其余（资源/文档预览、浮动停靠栏 hover 展开、`AgentChat` 导航栏展开）属**辅助信息或鼠标特性**，键盘无等价物也不阻断功能 |
+| K5 的 18 条「确认」 | 18 处 | 上轮已逐条回读：真正成立的只有 `.b3-switch`（已修）与 `.b3-menu__item`（被 #19493 的全局兜底覆盖）；其余是容器与 contenteditable 内容区 |
+
+### 五、仍未处置的候选（下轮入口）
+
+- **K3/K7 的 123 处「焦点陷阱」**：本轮只从「关闭后回焦」一个角度处理了（#19506）。
+  剩余的是「打开弹层时是否把焦点移入」与 `Esc` 键配对，需要在真实渲染环境逐个走；
+  其中大部分是 `.b3-menu__popover` / `dialog--open` 这类正常弹层，预期假阳性高。
+- **判据 I1「状态矩阵」仍是空白**（`空态`/`加载态`/`错误态`/`只读态` 在 `evidence.md` 出现 0 次）。
+  `AUDIT-HANDOFF.md` 的要求是**先人工对照拿到至少一个真案例**再考虑机械化。
+
+**环境事实（本轮）**：运行中的实例（3.8.4-alpha.9）的浏览器页面**反复加载超时**（30s，
+`http://127.0.0.1:6806` 与其 `/stage/build/desktop/index.html` 都失败），而同一内核的
+`POST /api/system/version` 正常响应 —— 所以本轮的真实渲染取证全部走
+「**真实产物 CSS + 真实 DOM 形态 + 对照组的本地 HTML**」，结论不依赖运行实例。
+
 ## 如何更新本文
 
 每轮审计后追加：
