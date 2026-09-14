@@ -1913,8 +1913,42 @@ element.remove() → activeElement = BODY   是否回到触发元素 ? false   �
 - **K3/K7 的 123 处「焦点陷阱」**：本轮只从「关闭后回焦」一个角度处理了（#19506）。
   剩余的是「打开弹层时是否把焦点移入」与 `Esc` 键配对，需要在真实渲染环境逐个走；
   其中大部分是 `.b3-menu__popover` / `dialog--open` 这类正常弹层，预期假阳性高。
-- **判据 I1「状态矩阵」仍是空白**（`空态`/`加载态`/`错误态`/`只读态` 在 `evidence.md` 出现 0 次）。
-  `AUDIT-HANDOFF.md` 的要求是**先人工对照拿到至少一个真案例**再考虑机械化。
+- **判据 I1「状态矩阵」已做人工对照，结论是「本仓库当前没有确认实例」**（详见下节）。
+
+### 六、判据 I1 人工对照：**未发现确认实例**（2026-09-14）
+
+`AUDIT-HANDOFF.md` 要求「先用人工对照拿到至少一个真案例，再决定要不要机械化」。
+本轮完成了对照，结论是**没有实例**，因此**不建脚本、不占判据字母**，
+结果写成层面地图的「状态矩阵检查点（待实证）」。
+
+**对照范围**：桌面/移动的 **6 对兄弟实现**（书签、标签、大纲、文件树、反链、收件箱）
++ **26 个菜单文件**的只读守卫分布。
+
+**先做的关键一步是「找到四种态的统一实现」**——不做这一步，按关键字统计会得到完全错误的矩阵：
+
+| 状态 | 统一实现 | 位置 |
+|---|---|---|
+| 空态 | `b3-list--empty` + `languages.emptyContent` | `util/Tree.ts:72`（用 `Tree` 的面板自动就有） |
+| 加载态 | **三种并存**：`loading-pure.svg`（44 处）/ 图标旋转 `fn__rotate` / `fn__loading` | 分布在各调用点 |
+| 错误态 | `processMessage` 在 `code < 0` 时 `showMessage` 并 `return false` → **回调不执行** | `util/processMessage.ts:77` + `util/fetch.ts:95` |
+| 只读态 | **两种表示并存**：`window.siyuan.config.readonly` 与 `protyle.disabled` | `protyle/util/onGet.ts:503` 的 `disabledProtyle()` |
+
+**逐项排除的六个「看起来像缺陷」**：移动端空态为 0（空态来自 `Tree`）、移动端加载态为 0
+（用的是 `loading-pure.svg`）、桌面无加载态而移动有（桌面用图标旋转，平台适配）、
+`menus/block.ts` 的 `transferBlockRef` 无 `readonly` 守卫（**调用点** `protyle/gutter/index.ts:2910`
+用 `!protyle.disabled` 守卫，且内核路由已带 `CheckReadonly`）、
+「回调里不检查 `code`」（`processMessage` 保证失败时回调不执行）、
+标签面板桌面/移动加载态实现不同（平台适配）。
+
+**本轮第二次踩到「按关键字统计」的坑**（第一次见第二十七轮的特异性）：
+
+1. 用 `fn__loading` 作加载态信号 → 报「6 个面板里 5 个没有加载态」；
+   改用 `loading-pure.svg` 与 `fn__rotate` 后绝大多数都有。
+2. 用 `readonly` 作只读守卫信号 → 报「`menus/block.ts` 完全没有只读守卫」；
+   实际守卫是 `protyle.disabled`，**语义正确**。
+
+**教训**：状态的「有没有」不能按类名或关键字统计，必须**先确定该状态的统一实现落在哪一层**
+（面板 → `Tree` → 全局工具 → 内核），再问「谁绕过了它」。**绕过统一实现才是信号。**
 
 **环境事实（本轮）**：运行中的实例（3.8.4-alpha.9）的浏览器页面**反复加载超时**（30s，
 `http://127.0.0.1:6806` 与其 `/stage/build/desktop/index.html` 都失败），而同一内核的
