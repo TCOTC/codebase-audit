@@ -1627,11 +1627,48 @@ html += '<button class="x" data-action="copy"><svg>…</svg></button>';
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D3 | 自动展开的块类型集合只含 `NodeListItem`/`NodeHeading`（`focusFold.ts:41`），而仓内两处权威集合都是 **5 类**：`blockFold.ts:287` 的 `isFoldable` 与 `gutter/index.ts:3542` 的 `foldRecursive` 菜单门控（`NodeHeading`/`NodeListItem`/`NodeBlockquote`/`NodeCallout`/`NodeSuperBlock`）；CSS `_wysiwyg.scss:889-895` 对 `.bq`/`.callout` 折叠确实隐藏后续子块。用户折叠引述/标注/超级块后聚焦，仍只显示一行 | 高（代码可证 + UI 路径可达） | 本轮已确认，低 |
+| D3 | 自动展开的块类型集合只含 `NodeListItem`/`NodeHeading`（`focusFold.ts:41`），而仓内两处权威集合都是 **5 类**：`blockFold.ts:287` 的 `isFoldable` 与 `gutter/index.ts:3542` 的 `foldRecursive` 菜单门控（`NodeHeading`/`NodeListItem`/`NodeBlockquote`/`NodeCallout`/`NodeSuperBlock`）；CSS `_wysiwyg.scss:889` 起对 `.bq`/`.callout` 折叠隐藏第 2 个起的子块、对其余类型 `line-clamp: 1` 压成一行。用户折叠引述/标注/超级块后聚焦，仍只显示一行 | 高（内核 DOM + 真实样式产物渲染双实测；见下方取证） | 已提 issue #19498（低） |
 
 - **业务表现**：光标放进引述块 → 块菜单「折叠/展开」→ 块折叠（只剩第一行）→ 块菜单「聚焦」→ 期望与列表项/标题一致地临时展开，实际仍是一行；全程无任何反馈。
 - **预期表现的权威依据**（不是审计者偏好）：`blockFold.ts:287` 与 `gutter/index.ts:3542` 两处独立给出同一个 5 类可折叠集合，而机制自身已为其中两类实现展开。
 - **修法量级同列表项**：`.bq`/`.callout`/`.sb` 折叠时子块**仍在 DOM**（内核只对标题做可见性裁剪，见 `kernel/model/render_fold_test.go` 的 `TestCleanRenderNodesKeepsFoldedContainerChildren`），因此去掉 `fold` 即可，不需要新请求、不涉及内核。
+
+
+### 第 26 轮取证明细（D3，issue #19498）
+
+三条独立证据，缺一不可（只读源码会漏掉「内核是否保留 fold」，只看 DOM 会漏掉「样式是否真的隐藏」）：
+
+1. **内核侧**：`POST /api/filetree/getDoc {"id":<块ID>,"mode":0,"size":1000000}`（即聚焦时前端发出的请求）
+   返回的根元素**仍带 `fold="1"`**，且子块全部在 DOM 里。三类块逐个实测均如此。
+   → 说明前端有责任主动摘 `fold`，不是内核已经处理过。
+2. **样式侧**：把上述 DOM 放进 `.protyle-wysiwyg` 容器、引入 `stage/build/desktop/base.*.css` 真实产物渲染，
+   量测对照（同一 DOM、只差一个 `fold` 属性）：
+
+   | 块类型 | 保留 `fold="1"` | 去掉 `fold` |
+   |---|---|---|
+   | `NodeCallout` | 高 72px，第 2、3 段 `display: none` | 三段全可见 |
+   | `NodeBlockquote` | 高 42px，第 2、3 段 `display: none` | 三段全可见 |
+   | `NodeSuperBlock` | 高 38px（`overflow:hidden`+`line-clamp:1` 裁掉 336px 内容） | 完整可见 |
+   | `NodeListItem`（对照组） | 子列表 `display: none` | 子项全可见 |
+
+   **超级块只有 `line-clamp` 裁切、没有 `display:none`**——只看 CSS 选择器文本容易误判它「不受影响」，
+   必须量高度（38px vs 内容 336px）才能确认。
+3. **前端侧**：`focusFold.ts:41` 的守卫；入口可达性由 `renderMenu`（`gutter/index.ts:1607` 起，
+   聚焦项在 `:2818-2827`）确认——条件只有 `!protyle.options.backlinkData`，**无块类型门控**。
+
+**定性要点（写 issue 时必须交代，否则会被维护者以「需求范围」驳回）**：原始需求
+（#6496 / #8956 / #19483）只提「标题和列表」，且折叠的标注块聚焦后仍折叠是**改动前就有的行为**，
+不是回归 → 只能写成「同族覆盖不全 / 一致性改进」，不能写成「破坏性缺陷」或「内容丢失」。
+
+**本轮取证的两条新教训**（已写入 stack-map L6）：
+
+- **产物新鲜度**：`pnpm dev` 只重建 Electron 的 `app` 产物，浏览器用的 `desktop`/`mobile` 不随之更新。
+  实测 `desktop/main.*.js` 里 `applyFocusFold` 命中 0 → 在浏览器验证新前端逻辑会得到假阴性。
+  判据：在 bundle 里 grep 新符号。**绕开办法**：把内核返回的真实 DOM + 真实 CSS 产物放进独立页面渲染，
+  这样验的是「样式与 DOM 的因果」而不是「尚未构建的 JS」，不受产物新鲜度影响。
+- **不要向运行中的应用发键盘输入**：`Ctrl+P` 未生效时后续键入落进文档标题输入框，把用户文档改名
+  （块引用文本被内核同步改名），需用 `/api/history` 快照比对定位并还原。UI 取证用 DOM 合成 click
+  或真实鼠标坐标点击（`page.hover` 在本机多次未触发块标，改用 `page.mouse.move` 两步移动成功）。
 
 **核过但未发现缺陷的环节（后续轮次勿重做）**：
 
