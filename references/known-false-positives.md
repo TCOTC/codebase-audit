@@ -38,6 +38,8 @@
 | contenteditable 内容区的 `outline: none` | `.protyle-wysiwyg`、`.agent-chat__composer-host .protyle-wysiwyg`、`.protyle-title` | **编辑器内容区的焦点指示就是光标本身**，移除轮廓是正确做法。同理 `.b3-typography` / `.table__cell-rich` 等渲染容器也是。判「可聚焦」时不能只看它含 `contenteditable` 就当成需要焦点环 |
 | K5 报告的「已确认落在可聚焦元素上」 | 实测 18 条「确认」里相当一部分是容器：`.av`（数据库根）、`.emojis`、`.b3-form`、`.protyle`、`.b3-menu[data-name=…]` | **脚本的「类名与可聚焦标签同行/邻近」启发式对容器同样会命中**（容器里总会有可聚焦后代，如 `config/assets.ts:219` 里的 `.av`）。逐条回读后，18 条里真正成立的只有 `.b3-switch`（全仓 0 条 `:focus` 规则）与 `.b3-menu__item`。**K5 的「确认」仍然是候选，不是结论** |
 | vendored 第三方样式/脚本里的可访问性缺失 | `src/asset/pdf/**`：`.secondaryToolbarButton`、`.overlayButton`、`.toolbarField`、`.scrollModeButtons` 等（实测占无焦点指示使用点的 39 条） | **不从上游跟随的移植代码，不要按自研标准要求**。PDF.js 的类名与结构属上游，改它们会增大后续同步成本。统计口径里应单列并扣除 |
+| 旧的 `.audit-focus-candidates.md` 里的焦点缺口清单 | 326 条「无焦点指示」（`.b3-menu__item`×63、`.keyboard__action`×38、`.b3-menu__separator`×35、`.keyboard__slash-item`×21、`.color__square`×11、`.b3-list-item`×7 等） | **清单已作废，不得沿用也不得据此上报**：`fa729c7c49`（#19493 的修复）加了一条以 `:is(` 开头的全局兜底，而第二十四轮的脚本**不认识 `:is()`、也不算特异性**，于是把已被兜底覆盖的控件全报成缺口。修好扫描器后同一仓库只剩 **2** 条（见 evidence 第二十七轮）。取证前先确认用的是修后的脚本，再重新生成清单 |
+| 「上游已经加了全局兜底，所以焦点可见性问题已全部解决」 | 由上面 326 → 2 得出「本仓焦点可见性已经干净」 | **兜底会被更高特异性的 `outline: none` 反杀**（#19499 第 2 点）：`.protyle-toolbar__item:focus` (0,2,0) 与 `.protyle-preview__action button:focus` (0,2,1) 都高于兜底的 (0,1,1)。判定必须比较特异性而非「有没有规则」 |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 

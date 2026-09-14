@@ -46,6 +46,11 @@
     **测试结果依赖 cwd 的通过是假通过**。
     本组必须同时断言「不抛异常」与「输出不含绝对路径」：
     后者是必需的，只靠 `try/except` 吞掉异常并退回绝对路径也能“不崩”而输出不可读。
+11. `scan_focus_coverage`：**四个原判定前提**（SCSS 嵌套 / 可见变化形态 /
+    完整类集合 / 兜底按标签），加上 **`:is()`/`:where()` 展开**、
+    **嵌套 `:not` 求值**、**特异性分属性比较**、**运行时赋类名回推**、
+    **不带 class 的标签收集** 五个新前提，以及一条把展开退化成恒等的负向用例。
+    任何一项退化都会让结论**双向**错：多报已修复的，或漏掉真缺口。
 
 仅依赖标准库，无需第三方包。退出码 0 表示全部通过。
 """
@@ -307,7 +312,7 @@ finally:
     os.rmdir(tmpd6)
 
 print()
-print("[11] scan_focus_coverage：四个判定前提都不得退化")
+print("[11] scan_focus_coverage：判定前提都不得退化")
 spec = importlib.util.spec_from_file_location("scan_focus", SCAN_FOCUS)
 focus = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(focus)
@@ -391,7 +396,142 @@ has5, _ = focus.verdict(frozenset(["somebutton"]), "button", by_class5, by_tag5)
 check(not has5,
       "带祖先的 button 焦点规则不算全局兜底",
       "若为 True，说明局部规则被提升成全局，真缺口会被判成已覆盖")
+# ⑥ `:is()` / `:where()` 必须展开：上游兜底以 `:is(` 开头，不展开就永远
+# 匹配不上，已被覆盖的控件会被报成缺口（多报方向）。
+FB = (":is(button, input, select, textarea)"
+      ":where(:not(.b3-button, .b3-switch)):focus-visible")
+expanded = focus.collapse_is_where(FB)
+check("button:not(.b3-button, .b3-switch):focus-visible" in expanded,
+      "`:is()` 展开且 `:where(:not(...))` 化为 `:not(...)`",
+      "得到 %s" % expanded)
+check(len(expanded) == 4,
+      "`:is()` 按参数个数展开成 4 条",
+      "得到 %d 条；为 1 说明退化成了恒等" % len(expanded))
+check(not any(focus.has_combinator(s) for s in expanded),
+      "展开后的兜底仍是无祖先规则（可进索引）")
+# 特异性：`:where()` 记 0、`:is()` 取参数**最大值** —— 总权重必须是 (0,1,1)。
+# 两个数必须不同，否则用例区分不了「`:where()` 计 0」与「参数相加」两种实现。
+check(focus.specificity(FB) == (0, 1, 1),
+      "兜底特异性为 (0,1,1)（`:where()` 贡献 0）",
+      "得到 %s；算错会让兜底反压组件自身样式" % (focus.specificity(FB),))
+check(focus.specificity(":is(button, input):focus") == (0, 1, 1),
+      "`:is()` 取参数最大值而非逐条相加",
+      "得到 %s" % (focus.specificity(":is(button, input):focus"),))
+# `:not()` **不得**展开：`:not(:is(a, b))` 是「既不是 a 也不是 b」，
+# 拆成两条是「不是 a 或不是 b」，语义相反。
+check(focus.collapse_is_where(":not(:is(a, b))") == [":not(:is(a, b))"],
+      "`:not()` 内部不展开（语义相反）",
+      "得到 %s" % focus.collapse_is_where(":not(:is(a, b))"))
 
+# ⑦ `:not()` 按元素真实类集合确定性求值（嵌套 `:not` 是承重的）
+by_class6, by_tag6 = focus.index_focus_rules([(FB, "outline: 2px solid red")])
+ok_plain, _ = focus.verdict(frozenset(["b3-menu__item"]), "button",
+                            by_class6, by_tag6)
+check(ok_plain, "无排除类的 `<button>` 被兜底覆盖",
+      "这正是 326 条假阳性里最主要的一类")
+ok_excl, _ = focus.verdict(frozenset(["b3-button"]), "button",
+                           by_class6, by_tag6)
+check(not ok_excl, "`:not()` 里的类真的被排除（`.b3-button` 不吃兜底）")
+NESTED = (":is(input):where(:not("
+          ".b3-text-field:not(.b3-text-field--text))):focus-visible")
+bc7, bt7 = focus.index_focus_rules([(NESTED, "outline: 2px solid red")])
+both, _ = focus.verdict(frozenset(["b3-text-field", "b3-text-field--text"]),
+                        "input", bc7, bt7)
+check(both, "嵌套 `:not` 按真实类集合求值（`--text` 变体吃兜底）",
+      "拍平外层 `:not` 会把该变体判成已排除，与设计意图相反")
+plain_field, _ = focus.verdict(frozenset(["b3-text-field"]), "input",
+                               bc7, bt7)
+check(not plain_field, "纯 `.b3-text-field` 仍被排除（自身有样式）",
+      "两个方向都要成立，否则用例不承重")
+
+# ⑧ 特异性：`outline: none` 只要更高就反杀兜底，但压不住 box-shadow
+ONLY_SUPPRESS = [(":is(button):focus-visible", "outline: 2px solid red"),
+                 (".foo:focus", "outline: none")]
+gap, _ = focus.verdict(frozenset(["foo"]), "button",
+                       *focus.index_focus_rules(ONLY_SUPPRESS))
+check(not gap,
+      "更高特异性的 `outline: none` 反杀兜底（#19499 的形态）",
+      "若为 True，说明没算特异性，真缺口会被报成已覆盖")
+WITH_BOX = ONLY_SUPPRESS + [(".foo:focus", "box-shadow: 0 0 0 1px red")]
+cov, _ = focus.verdict(frozenset(["foo"]), "button",
+                       *focus.index_focus_rules(WITH_BOX))
+check(cov, "非 outline 的可见变化不被 `outline: none` 压制（分属性）",
+      "把两类混在一起会把 `.b3-button` 报成缺口")
+same, _ = focus.verdict(frozenset(["x"]), "button", *focus.index_focus_rules(
+    [("button:focus", "outline: 2px solid red"),
+     ("button:focus", "outline: none")]))
+check(not same, "同特异性时抑制方胜（宁多报）")
+
+# ⑨ 运行时赋类名：`createElement` 能把标签回推出来，回推不出的不得丢弃
+TR = os.path.join(HERE, "___tmp_runtime___")
+os.makedirs(TR, exist_ok=True)
+try:
+    io.open(os.path.join(TR, "a.ts"), "w", encoding="utf-8").write(
+        'const b = document.createElement("button");\n'
+        'b.className = "protyle-toolbar__item b3-tooltips";\n'
+        'const d = document.createElement("div");\n'
+        'd.classList.add("b3-menu__item");\n'
+        'const raw = document.createElement("span");\n'
+        'raw.classList.toggle("unknown__thing");\n')
+    known, unknown = focus.collect_runtime_classes([TR])
+    check(len(known) == 1 and known[0][1] == "button"
+          and "protyle-toolbar__item" in known[0][0],
+          "`createElement` 回推标签（1 条 button，带两个类名）",
+          "得到 %s" % [(t, sorted(c)) for c, t, _r, _l, _f in known])
+    check("b3-menu__item" in unknown and "unknown__thing" in unknown,
+          "回推不出的类名进入「标签未知」而不是被静默丢弃",
+          "得到 %s" % sorted(unknown))
+finally:
+    for f in os.listdir(TR):
+        os.remove(os.path.join(TR, f))
+    os.rmdir(TR)
+
+# ⑩ 不带 class 的表单标签：旧版直接 `continue`，从不进入任何清单
+TC = os.path.join(HERE, "___tmp_classless___")
+os.makedirs(TC, exist_ok=True)
+try:
+    io.open(os.path.join(TC, "a.ts"), "w", encoding="utf-8").write(
+        'const a = \'<button type="button" data-type="tablet">x</button>\';\n'
+        'const b = \'<button class="b3-button">y</button>\';\n')
+    uses = focus.collect_usages([TC])
+    forms = [u[4] for u in uses]
+    check(forms.count("classless") == 1 and forms.count("html") == 1,
+          "不带 class 的表单标签被单独收集（不再静默丢弃）",
+          "得到 %s" % forms)
+    clsless = [u for u in uses if u[4] == "classless"]
+    check(clsless and clsless[0][0] == frozenset(),
+          "无 class 的项类集合为空（不可当缺口）")
+finally:
+    for f in os.listdir(TC):
+        os.remove(os.path.join(TC, f))
+    os.rmdir(TC)
+
+# ⑪ 负向验证：把 `collapse_is_where` 退化成恒等，本组的前向用例必须能抓住。
+# 三项要求：断言补丁真的生效、断言不只看退出码、用例能区分两种行为。
+focus_src = io.open(SCAN_FOCUS, encoding="utf-8").read()
+ANCHOR = "    if depth > 8:\n        return [sel]"
+patched = focus_src.replace(
+    ANCHOR, "    return [sel]  # NEGATIVE-TEST\n" + ANCHOR, 1)
+check(patched != focus_src, "负向用例的补丁真的生效了",
+      "替换串没匹配上时脚本原封不动，自检会全绿，被误读成「没拦住」")
+TN = os.path.join(HERE, "___tmp_neg_focus___")
+os.makedirs(TN, exist_ok=True)
+try:
+    p = os.path.join(TN, "scan_focus_patched.py")
+    io.open(p, "w", encoding="utf-8").write(patched)
+    spec_n = importlib.util.spec_from_file_location("scan_focus_patched", p)
+    mod_n = importlib.util.module_from_spec(spec_n)
+    spec_n.loader.exec_module(mod_n)
+    bc_n, bt_n = mod_n.index_focus_rules([(FB, "outline: 2px solid red")])
+    ok_n, _ = mod_n.verdict(frozenset(["b3-menu__item"]), "button",
+                            bc_n, bt_n)
+    check(not ok_n,
+          "负向：去掉 `:is()` 展开后兜底被漏掉（本组能抓住该退化）",
+          "若为 True，说明本组的前向用例不承重")
+finally:
+    for f in os.listdir(TN):
+        os.remove(os.path.join(TN, f))
+    os.rmdir(TN)
 
 print()
 print("[8] scan_regression_index：空输入与缺失证据库不得静默成功")

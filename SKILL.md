@@ -385,10 +385,13 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 
   **⑤ 在本仓库是一个系统性缺口，必须先理解机制再判定**：
   `app/src/assets/scss/util/_reset.scss` 对 `button, input, select, textarea`
-  **一律设了 `outline: none`**，因此焦点可见性**完全依赖每个组件自己定义 `:focus`**，
-  没定义的就是「看不见焦点」。全仓不存在任何全局兜底。
-  实测（判据 I 的量化）：**1103 个表单控件使用点中 641 个有焦点指示、462 个没有**
-  （其中 39 个属 vendored PDF.js，SiYuan 自研代码 423 个）。用 `scan_focus_coverage.py` 取候选。
+  **一律设了 `outline: none`**；`fa729c7c49`（#19493 的修复）之后又加了一条**全局兜底**
+  `:is(button, input, select, textarea):where(:not(...)):focus-visible`（特异性 (0,1,1)）。
+  兜底**会被更高特异性的 `outline: none` 反杀**，因此「有规则」不等于「看得见焦点」。
+  实测（第二十七轮，脚本修好后）：**1186 个表单控件使用点中 1184 个有焦点指示、2 个没有**，
+  两条都是 `.protyle-toolbar__item`（#19499 第 2 点）。用 `scan_focus_coverage.py` 取候选。
+  **第二十四轮的 641/462（与修复后的 780/326）全部作废**——当时脚本不认识 `:is()` 兜底、
+  也不算特异性，两个方向都错（多报已覆盖的 + 漏掉运行时赋类名的），差了两个数量级。
 
   **「无焦点指示」不等于缺陷**，报前必须逐条排除：控件是否真的在 Tab 顺序里
   （`tabindex="-1"` / 被 JS 移出）、是否被隐藏（`fn__none` / 视觉隐藏的文件输入）、
@@ -657,9 +660,10 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 `scan_duplicated_literals.py`（判据 A）、`scan_unescaped_html.py`（判据 F）、
 `scan_dom_type_literals.py`（前端 DOM 契约闭合集合）、`scan_doc_parity.py`（多语言文档一致性）、
 `scan_i18n_text_expansion.py`（判据 I4 文本膨胀）、`scan_a11y_antipatterns.py`（判据 I3 无障碍行为）、
-`scan_focus_coverage.py`（判据 I3 焦点可见性；**它的价值在四个判定前提**——
-SCSS 嵌套的后代语义、`transform` 也算焦点指示、按类集合而非单类判定、兜底按标签匹配，
-四个都实测写错过）、
+`scan_focus_coverage.py`（判据 I3 焦点可见性；**它的价值在六个判定前提**——
+SCSS 嵌套的后代语义、`transform` 也算焦点指示、按类集合而非单类判定、兜底按标签匹配、
+**`:is()`/`:where()` 必须展开且不算进 `:not()` 内部**、**特异性分属性比较**，
+六个都实测写错过；并补上了运行时赋类名与不带 class 的标签两类使用点）、
 `scan_regression_index.py`（历轮发现的回归索引，服务差分审查与修复验证）、
 `test_scan_scripts.py`（脚本行为与过滤规则）、`skill_self_check.py`（本文档库的 7 组结构检查）。
 
