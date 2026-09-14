@@ -112,6 +112,8 @@ NAME_SIGNALS = re.compile(
     r"""aria-label\s*=|aria-labelledby\s*=|title\s*=|data-tip\s*=""", re.I)
 ICON_ONLY = re.compile(r"""^\s*<(?:svg|use|img|i|span\s+class=["'][^"']*icon)\b""", re.I)
 VISIBLE_TEXT = re.compile(r""">\s*[^\s<][^<]*""")
+# 按钮自身的结束标签——必须先按它裁切，否则会把 JS 字符串的收尾当成按钮内文字。
+BUTTON_CLOSE = re.compile(r"</button>", re.I)
 
 # --- 提示位点（需人工判定，不计入结论）--------------------------------------
 HINT_SIGNALS = (
@@ -205,7 +207,20 @@ def scan_k2(roots):
 
 
 def scan_icon_buttons(roots):
-    """A6：`<button>` 内只有图标、且没有可访问名。"""
+    """A6：`<button>` 内只有图标、且没有可访问名。
+
+    **必须先把标签串裁到 `</button>` 为止**（下面那行 `BUTTON_CLOSE` 的处理）。
+    不做裁切时，JS 字符串在同一行收尾的写法会被系统性漏掉：
+
+        html += '<button class="x" data-action="copy"><svg>…</svg></button>';
+
+    `first_line` 取到的是整行（含末尾的 `';`），`VISIBLE_TEXT`（`>\\s*[^\\s<][^<]*`）
+    会命中 `>';`，于是按钮被误判为「有文本名」。
+    而对多行模板（以 `</button>` + 换行结尾）不命中，于是被正常报出——
+    **同一形态的按钮，因字符串是否在同一行收尾而时报时不报**。
+    实测该缺陷使 SiYuan 的 A6 由 37 条降到 31 条（漏掉 6 条，
+    其中 4 条集中在 `protyle/toolbar/index.ts` 的同一个模板里）。
+    """
     out = []
     for path in iter_files(roots, (".ts", ".tsx", ".js")):
         text = io.open(path, encoding="utf-8", errors="replace").read()
@@ -215,6 +230,9 @@ def scan_icon_buttons(roots):
                 continue
             rest = text[m.end():m.end() + 200]
             first_line = rest.split("\n", 1)[0]
+            close = BUTTON_CLOSE.search(first_line)
+            if close:
+                first_line = first_line[:close.start()]
             if not ICON_ONLY.match(first_line):
                 continue
             # 紧跟的文本若含可见字符，则按钮有文本名

@@ -284,6 +284,11 @@
   - `scan_a11y_antipatterns.py --root <src> --styles <scss>` 覆盖 I3 的三类可靠形态
     （K2 正整数 `tabindex` / K5 `outline:none` 无替代 / A6 纯图标按钮无可访问名），
     其余反模式只给提示位点
+  - `scan_focus_coverage.py --root <src> --styles <scss> --styles <appearance>`
+    覆盖**焦点可见性**（判据 I3 ⑤）。本仓库实测：1103 个表单控件使用点中
+    641 个有焦点指示、**462 个没有**（含 39 条 vendored PDF.js，自研 423 条）。
+    **四个判定前提都是实测写错过才对的**：SCSS 嵌套的后代语义、`transform` 也算指示、
+    按完整类集合而非单类判定、兜底按真实标签匹配。详见脚本 docstring 的陷阱表
   - I1 / I2 / I5 **无任何机械手段**，只能语义判断 + 真实渲染取证——这正是本层值得单列的原因
 
   **设计令牌契约（判据 A 在本层的应用）没有脚本**，用三条件合取人工判：
@@ -295,6 +300,25 @@
   - **读数不够**：状态残留与焦点问题常只在**特定操作顺序**下出现
     （先失败一次再成功、中途切走再回来），静态阅读看不到
   - **焦点问题必须用键盘走**（`Tab` / `Shift+Tab` / `Esc`）。鼠标操作会把焦点问题完全掩盖
+  - **本仓库的焦点可见性机制（判焦点缺口前必读）**：`util/_reset.scss` 对
+    `button, input, select, textarea` **一律 `outline: none`** → 焦点可见性完全依赖
+    各组件自己定义 `:focus`，没定义就是「看不见焦点」；且全仓**无任何全局兜底**。
+    所以「该组件没有 :focus 规则」在本仓库是一个真信号，而不是「浏览器默认会画轮廓」
+  - **判「有没有可见变化」不能只看 outline / box-shadow / border / background**：
+    `.b3-slider` 的焦点指示是 `::-webkit-slider-thumb { transform: scale(1.5) }`（滑块放大）。
+    `transform` / `filter` / `opacity` / `color` 同样能构成可见变化
+  - **判定单位是「元素上的完整类集合」，不是单个类**：元素常带多个类，
+    焦点样式可能来自兄弟类（`.block__icon.b3-tooltips` 的样式来自 `.b3-tooltips:focus-within`）。
+    **且夹具要能区分这两种逻辑**：若被覆盖的类恰好按字母序排在最前，
+    「按类集合」与「只按第一个类」会得出相同结果，用例就不承重
+  - **SCSS 解析必须实现真正的嵌套语义**：含 `&` 则替换，**不含 `&` 则作为后代拼接**。
+    只替换 `&` 会让不含 `&` 的子选择器丢掉祖先，把局部规则提升成全局兜底，
+    从而把真缺口判成「已覆盖」（实测：`.protyle-preview__action button:focus` 被读成全局 `button:focus`）
+  - **全局兜底必须按元素的真实标签匹配**：`.b3-switch` 是 `<input>`，
+    而全局规则是 `button:focus`，根本不匹配。把「存在某个原生标签的焦点规则」当作兜底
+    会把 `<input>` 的缺口全部抹掉
+  - **contenteditable 内容区的 `outline: none` 是正确的**：编辑器与渲染容器的
+    焦点指示是光标/选区，不是焦点环
   - **CSS 自定义属性是 JS→CSS 的运行时通道**：样式表里查不到定义 **不等于** 没有任何人定义它。
     实测本仓库的写入形态至少有五种：`setProperty` / `removeProperty`（含先收集名字数组再
     `forEach(n => style.removeProperty(n))` 的间接形式）、样式对象键 `["--x"]:`、

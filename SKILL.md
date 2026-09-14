@@ -383,6 +383,18 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
   ④ 纯图标按钮有没有可访问名；⑤ 焦点指示器是否被 `outline: none` 移除而未给替代。
   **这类缺陷在鼠标操作下完全不可见**，不会有测试报错，也不会有用户报 bug（只会觉得「这工具难用」）。
 
+  **⑤ 在本仓库是一个系统性缺口，必须先理解机制再判定**：
+  `app/src/assets/scss/util/_reset.scss` 对 `button, input, select, textarea`
+  **一律设了 `outline: none`**，因此焦点可见性**完全依赖每个组件自己定义 `:focus`**，
+  没定义的就是「看不见焦点」。全仓不存在任何全局兜底。
+  实测（判据 I 的量化）：**1103 个表单控件使用点中 641 个有焦点指示、462 个没有**
+  （其中 39 个属 vendored PDF.js，SiYuan 自研代码 423 个）。用 `scan_focus_coverage.py` 取候选。
+
+  **「无焦点指示」不等于缺陷**，报前必须逐条排除：控件是否真的在 Tab 顺序里
+  （`tabindex="-1"` / 被 JS 移出）、是否被隐藏（`fn__none` / 视觉隐藏的文件输入）、
+  键盘导航是否本就靠方向键 + `--current` 修饰类（菜单就是这种，`:focus` 不是必需的）、
+  是否属 vendored 第三方代码。
+
   **可机械检出的部分用 `scan_a11y_antipatterns.py`**（来源见 [全栈层面地图](./references/stack-map.md) 的「来源与许可」）：
   它只覆盖三类可靠形态——**K2** 正整数 `tabindex`（破坏 DOM 顺序，无任何正当场景）、
   **K5** `outline:none` 且同选择器无 `:focus` 替代、**A6** 纯图标按钮无可访问名；
@@ -421,11 +433,16 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
    实测 `.b3-button` 按选择器文本判为「缺 hover / active / focus」，按大括号配对后
    实际拥有 `:active,:disabled,:focus,:hover`。**判组件状态覆盖必须做括号配对并合并两种形态。**
 
-**「组件化」在本仓库不构成可检缺陷类**（已量化，不要再建扫描器）：本仓库用 CSS 类作组件、
-模板字符串手写 HTML，实测重复 HTML 片段 264 种（≥4 次）中靠前的全是自带工具类
-（`fn__space` 526 次、`fn__hr` 179 次、`fn__flex` 116 次），已在误报表内；
-组件调用点的属性差异也几乎全为调用点自有 `data-*` 标识。详见
-[已知误报](./references/known-false-positives.md) 的两条相应条目。
+**「组件化」要分两件事看——一件不可检，一件可检且已产出缺陷**：
+
+- **「组件抽取」不构成可检缺陷类**：本仓库用 CSS 类作组件、模板字符串手写 HTML，
+  实测重复 HTML 片段 264 种（≥4 次）中靠前的全是自带工具类（`fn__space` 526 次、
+  `fn__hr` 179 次、`fn__flex` 116 次），已在误报表内；组件调用点的属性差异也几乎
+  全为调用点自有 `data-*` 标识。**不要把这一条当成「整个组件化维度都不用查」。**
+- **「组件状态覆盖」是可检的，且已产出真缺陷**：用 `scan_focus_coverage.py`。
+  第二十二轮曾因**方法用错**而把这一项整个丢弃（用选择器文本判状态，
+  而 SCSS 的状态主要写成嵌套 `&:伪类`，选择器文本不含类名）——
+  **发现方法学陷阱后应该改正重测，而不是记下陷阱就收工。**
 
 **取证：UI 行为必须在真实渲染环境里验，不能只读代码。**
 
@@ -497,6 +514,7 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
    | `scan_doc_parity.py` | 多语言文档的结构与标识符一致性 | A、D3 |
    | `scan_i18n_text_expansion.py` | 受约束容器中的翻译文本膨胀（I4 的候选） | I4 |
    | `scan_a11y_antipatterns.py` | 可机械检出的 a11y 行为反模式（K2 / K5 / A6） | I3 |
+   | `scan_focus_coverage.py` | 表单控件有焦点但看不到焦点位置 | I3 |
 
    多语言文档的一致性**不属于任何别的校验器**：实测 `apigen` 只生成
    `app/src/types/api/index.d.ts`、`schema.json` 与 petal 的 `index.d.ts`，
@@ -628,10 +646,13 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 | 写「既往记录」字段 | [实证数据](./references/evidence.md) | 历轮发现登记表（去重的第二来源）与量化结论 |
 | 修改本 skill | [维护规范](./references/contributing.md) · [更新记录](./references/changelog.md) | 追加与整理规范、版本管理、编辑坑；历次变更历史 |
 
-`scripts/` — **六个机械扫描脚本与两个自检**：
+`scripts/` — **七个机械扫描脚本与两个自检**：
 `scan_duplicated_literals.py`（判据 A）、`scan_unescaped_html.py`（判据 F）、
 `scan_dom_type_literals.py`（前端 DOM 契约闭合集合）、`scan_doc_parity.py`（多语言文档一致性）、
 `scan_i18n_text_expansion.py`（判据 I4 文本膨胀）、`scan_a11y_antipatterns.py`（判据 I3 无障碍行为）、
+`scan_focus_coverage.py`（判据 I3 焦点可见性；**它的价值在四个判定前提**——
+SCSS 嵌套的后代语义、`transform` 也算焦点指示、按类集合而非单类判定、兜底按标签匹配，
+四个都实测写错过）、
 `scan_regression_index.py`（历轮发现的回归索引，服务差分审查与修复验证）、
 `test_scan_scripts.py`（脚本行为与过滤规则）、`skill_self_check.py`（本文档库的 7 组结构检查）。
 

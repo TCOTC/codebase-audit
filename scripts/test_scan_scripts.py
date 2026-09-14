@@ -68,6 +68,7 @@ SCAN_IDX = os.path.join(HERE, "scan_regression_index.py")
 SCAN_PARITY = os.path.join(HERE, "scan_doc_parity.py")
 SCAN_I18N = os.path.join(HERE, "scan_i18n_text_expansion.py")
 SCAN_A11Y = os.path.join(HERE, "scan_a11y_antipatterns.py")
+SCAN_FOCUS = os.path.join(HERE, "scan_focus_coverage.py")
 EVIDENCE = os.path.join(SKILL_DIR, "references", "evidence.md")
 
 FAILURES = []
@@ -113,10 +114,17 @@ for script, name in ((SCAN_DUP, "scan_duplicated_literals"),
                      (SCAN_DOM, "scan_dom_type_literals"),
                      (SCAN_PARITY, "scan_doc_parity"),
                      (SCAN_I18N, "scan_i18n_text_expansion"),
-                     (SCAN_A11Y, "scan_a11y_antipatterns")):
+                     (SCAN_A11Y, "scan_a11y_antipatterns"),
+                     (SCAN_FOCUS, "scan_focus_coverage")):
     flag = "--docs" if script == SCAN_PARITY else (
-        "--langs" if script == SCAN_I18N else "--root")
-    code, out, err = run(script, flag, missing)
+        "--langs" if script == SCAN_I18N else (
+            "--styles" if script == SCAN_FOCUS else "--root"))
+    argv = [flag, missing]
+    if script == SCAN_FOCUS:
+        # 该扫描器 `--root` 与 `--styles` 都是必填；只给一个会先触发 argparse
+        # 的「参数缺失」错误，断言「stderr 说明原因」就会失败。
+        argv += ["--root", missing]
+    code, out, err = run(script, *argv)
     check(code != 0, "%s 退出码非 0（实际 %d）" % (name, code))
     check("no such directory" in err,
           "%s 在 stderr 说明原因" % name, repr(err[:120]))
@@ -258,6 +266,133 @@ blocks = list(a11y.iter_scss_blocks(".a {\n  outline: none;\n}\n"))
 check(len(blocks) == 1 and ".a" in blocks[0][0],
       "SCSS 选择器分块可用", "得到 %s" % (blocks[:1],))
 
+# A6 的裁切：JS 字符串在同一行收尾时，末尾的 `';` 不得被当成按钮内文字。
+# 实测未裁切时 SiYuan 的 A6 由 37 条降到 31 条（漏掉 6 条，其中 4 条集中在
+# `protyle/toolbar/index.ts` 的同一个模板里）——同一形态的按钮因字符串
+# 是否同行收尾而时报时不报。
+tmpd6 = os.path.join(HERE, "___tmp_a6___")
+os.makedirs(tmpd6, exist_ok=True)
+try:
+    io.open(os.path.join(tmpd6, "a.ts"), "w", encoding="utf-8").write(
+        # ① 单行字符串收尾（末尾有 `';`）—— 必须被报出
+        "const a = '<button class=\"x\" data-action=\"copy\">"
+        "<svg><use xlink:href=\"#iconCopy\"></use></svg></button>';\n"
+        # ② 多行模板收尾 —— 必须被报出
+        "const b = `<button class=\"x\" data-action=\"cut\">"
+        "<svg><use xlink:href=\"#iconCut\"></use></svg></button>\n"
+        "<button class=\"x\" data-action=\"del\">"
+        "<svg><use xlink:href=\"#iconDel\"></use></svg></button>`;\n"
+        # ③ 有可见文本 —— 不得被报出
+        "const c = '<button class=\"x\"><span>Copy</span></button>';\n"
+        # ④ 有 aria-label —— 不得被报出
+        "const d = '<button class=\"x\" aria-label=\"Copy\">"
+        "<svg><use xlink:href=\"#iconCopy\"></use></svg></button>';\n")
+    found6 = [no for _p, no, _t in a11y.scan_icon_buttons([tmpd6])]
+    # 夹具的行号：1 = 单行收尾的图标按钮；2、3 = 多行模板里的两个图标按钮；
+    # 4 = 有可见文本；5 = 有 aria-label。前三条必须报出，后两条不得报出。
+    check(len(found6) == 3,
+          "A6 同时报出单行与多行模板的图标按钮（%d 条，期望 3）" % len(found6),
+          "得到行号 %s；为 2 说明单行收尾的按钮被误判为有文字名" % found6)
+    check(1 in found6,
+          "单行字符串收尾的按钮被报出（末尾 `';` 不被当成文字）",
+          "若缺第 1 行，说明 BUTTON_CLOSE 裁切失效")
+    check(2 in found6 and 3 in found6,
+          "多行模板里的段落按钮也被报出", "得到行号 %s" % found6)
+    check(4 not in found6, "有可见文本的按钮不被报出",
+          "第 4 行按钮内含 <span>Copy</span>")
+    check(5 not in found6, "有 aria-label 的按钮不被报出")
+finally:
+    for f in os.listdir(tmpd6):
+        os.remove(os.path.join(tmpd6, f))
+    os.rmdir(tmpd6)
+
+print()
+print("[11] scan_focus_coverage：四个判定前提都不得退化")
+spec = importlib.util.spec_from_file_location("scan_focus", SCAN_FOCUS)
+focus = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(focus)
+
+# ① SCSS 嵌套语义：不含 `&` 的子选择器是**后代**，祖先不得丢。
+# 实测退化形态（只替换 `&`）会把 `.a button:focus` 降成裸 `button:focus`，
+# 从而把一条局部规则当成全局兜底，把真缺口判成「已覆盖」。
+resolved = focus.resolve([".a"], "button")
+check(resolved == [".a button"],
+      "不含 `&` 的子选择器按后代拼接（祖先不丢）", "得到 %s" % resolved)
+resolved2 = focus.resolve([".a"], "&__b")
+check(resolved2 == [".a__b"], "含 `&` 的子选择器按替换处理",
+      "得到 %s" % resolved2)
+# 组合用例：解析后必须保留祖先，否则会被当成全局规则
+tmpd = os.path.join(HERE, "___tmp_focus___")
+os.makedirs(tmpd, exist_ok=True)
+try:
+    io.open(os.path.join(tmpd, "a.scss"), "w", encoding="utf-8").write(
+        ".protyle-preview__action {\n  button {\n    &:focus {\n      outline: none;\n"
+        "    }\n  }\n}\ninput:focus {\n  box-shadow: 0 0 0 1px red;\n}\n")
+    got = focus.parse_style_rules([tmpd])
+    sels = [s for s, _d in got]
+    check(".protyle-preview__action button:focus" in sels,
+          "解析结果保留祖先（后代关系）", "得到 %s" % sels)
+    check("protyle-preview" not in str(
+        [s for s in sels if s.strip().startswith("button")]),
+        "局部 button 规则未被提升成全局", "得到 %s" % sels)
+finally:
+    for f in os.listdir(tmpd):
+        os.remove(os.path.join(tmpd, f))
+    os.rmdir(tmpd)
+
+# ② transform 必须算作「可见变化」：`.b3-slider` 的焦点指示是滑块放大
+check(bool(focus.VISIBLE_RX.search("transform: scale(1.5)")),
+      "`transform` 被算作可见焦点变化",
+      "退化会把 .b3-slider 误报成缺口")
+check(not focus.VISIBLE_RX.search("transform: none"),
+      "`transform: none` 不算可见变化")
+check(bool(focus.VISIBLE_RX.search("box-shadow: 0 0 0 1px red")),
+      "盒阴影被算作可见变化")
+check(bool(focus.VISIBLE_RX.search("outline: 2px solid red")),
+      "真实的 outline 被算作可见变化")
+check(not focus.VISIBLE_RX.search("outline: none"),
+      "`outline: none` 不算可见变化")
+
+# ③ 判定单位必须是**完整类集合**：焦点样式可能来自兄弟类。
+# 实测 `.block__icon.block__icon--show.b3-tooltips.b3-tooltips__n`
+# 的焦点样式来自 `.b3-tooltips:focus-within`，按单类查会误报。
+# 注意：这里必须调用**扫描器自己的** verdict（模块级函数），
+# 不能另写一份副本——测副本等于没测。
+#
+# 夹具要用**能区分两种行为**的类名：若让被覆盖的类恰好排在最前，
+# 「按类集合」与「只按第一个类」会得出相同结果，用例就不承重。
+# `zzz__covered` 排序在 `aaa__naked` 之后，因此只有类集合逻辑才能通过。
+by_class, by_tag = focus.index_focus_rules(
+    [(".zzz__covered:focus-within", "background: red")])
+has, why = focus.verdict(frozenset(["aaa__naked", "zzz__covered"]), "button",
+                         by_class, by_tag)
+check(has and "zzz__covered" in why,
+      "按完整类集合判定：兄弟类的焦点规则被采纳", "得到 %s / %s" % (has, why))
+# 反面：类集合里没有任何成员有焦点规则时不得判为已覆盖
+has_no, _ = focus.verdict(frozenset(["aaa__naked"]), "button",
+                          by_class, by_tag)
+check(not has_no, "类集合里无成员命中则不判为已覆盖")
+
+# ④ 全局兜底必须**按标签**匹配：`button:focus` 不得覆盖 `<input>`
+by_class4, by_tag4 = focus.index_focus_rules(
+    [("button:focus", "box-shadow: 0 0 0 1px red")])
+has_in, why_in = focus.verdict(frozenset(["b3-switch"]), "input",
+                               by_class4, by_tag4)
+check(not has_in,
+      "`button:focus` 不覆盖 `<input>`（兜底按标签匹配）",
+      "若为 True，说明标签匹配失效，.b3-switch 会被判成已覆盖")
+has_btn, why_btn = focus.verdict(frozenset(["x"]), "button",
+                                 by_class4, by_tag4)
+check(has_btn, "`button:focus` 覆盖 `<button>`", "得到 %s" % why_btn)
+# ⑤ 无祖先的全局规则才算兜底；带祖先的不得算
+by_class5, by_tag5 = focus.index_focus_rules(
+    [(".protyle-preview__action button:focus", "box-shadow: 0 0 0 1px red")])
+has5, _ = focus.verdict(frozenset(["somebutton"]), "button", by_class5, by_tag5)
+check(not has5,
+      "带祖先的 button 焦点规则不算全局兜底",
+      "若为 True，说明局部规则被提升成全局，真缺口会被判成已覆盖")
+
+
 print()
 print("[8] scan_regression_index：空输入与缺失证据库不得静默成功")
 code, out, err = run(SCAN_IDX, "--evidence", missing)
@@ -375,8 +510,29 @@ else:
                           "若容器数为 0，说明源码核对失效，容器会被当成缺陷上报")
             else:
                 print("  SKIP  %s 下无 app/src/assets/scss，K5 未测" % repo)
+        # scan_focus_coverage 冒烟：必须给出计数，且必须显式声明「不等于缺陷」
+        if os.path.isdir(app_src) and os.path.isdir(scss):
+            code, out, err = run(SCAN_FOCUS, "--root", app_src,
+                                 "--styles", scss, "--styles",
+                                 os.path.join(repo, "app", "appearance"))
+            mn = re.search(r"无焦点指示\s*:\s*(\d+)", out)
+            mu = re.search(r"表单控件使用点\s*:\s*(\d+)", out)
+            check(code == 0 and mn is not None and mu is not None,
+                  "scan_focus_coverage 给出使用点与缺口计数（%s / %s）"
+                  % (mu.group(1) if mu else "?", mn.group(1) if mn else "?"),
+                  repr(err[:140]))
+            # 承重断言：必须写出「不等于缺陷」的限界，否则使用者会把
+            # 462 条计数当成 462 个缺陷直接上报。
+            check("必须回读使用点" in out,
+                  "限界声明未被删掉（无焦点指示不等于缺陷）",
+                  "缺失则计数会被当成结论")
+            if mn and mu:
+                check(0 < int(mn.group(1)) < int(mu.group(1)),
+                      "缺口数介于 0 与总数之间（%s < %s）"
+                      % (mn.group(1), mu.group(1)),
+                      "为 0 说明降噪过度，等于总数说明没在判定")
         else:
-            print("  SKIP  %s 下无 app/src" % repo)
+            print("  SKIP  %s 下无 app/src 或 scss，焦点覆盖未测" % repo)
 
 print()
 print("[10] 扫描根与 cwd 不同盘时不得崩溃")
