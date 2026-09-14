@@ -405,6 +405,25 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
   某些有确认或可撤销、另一些没有。权威源是**同族中已有确认的那一处**，不是审计者的偏好。
   定性时不写「缺少确认框」，要写「哪一个入口与哪几个不一致」
 
+**CSS 侧取证的两条硬前提（不做则系统性误判）**：
+
+1. **CSS 自定义属性在本仓库是 JS→CSS 的运行时通道**，不是纯静态的样式表变量。
+   判「某个令牌没人定义」必须三条件同时成立：① 引用侧无 fallback ② 所有样式根（**含主题目录**）
+   无定义 ③ 源码里从未提及。实测只做 ①② 得到 34 条，**逐条回读后 17/17 全为假阳性**
+   （都由 `setProperty` / `removeProperty` / 注入的 CSS 模板串写入）。
+   用 `scan_css_token_contract.py`；条件 ③ 用**源码提及的宽规则**——窄的形态匹配漏过一次。
+2. **SCSS 里状态样式主要写成嵌套的 `&:hover`**，其选择器文本**不含组件类名**。
+   只 grep 选择器文本会系统性漏掉绝大多数状态定义（全仓嵌套 `&:hover` 154 处、
+   `&:focus` 32 处、`:focus-visible` 22 处、`:active` 16 处、`:disabled` 7 处）。
+   实测 `.b3-button` 按选择器文本判为「缺 hover / active / focus」，按大括号配对后
+   实际拥有 `:active,:disabled,:focus,:hover`。**判组件状态覆盖必须做括号配对并合并两种形态。**
+
+**「组件化」在本仓库不构成可检缺陷类**（已量化，不要再建扫描器）：本仓库用 CSS 类作组件、
+模板字符串手写 HTML，实测重复 HTML 片段 264 种（≥4 次）中靠前的全是自带工具类
+（`fn__space` 526 次、`fn__hr` 179 次、`fn__flex` 116 次），已在误报表内；
+组件调用点的属性差异也几乎全为调用点自有 `data-*` 标识。详见
+[已知误报](./references/known-false-positives.md) 的两条相应条目。
+
 **取证：UI 行为必须在真实渲染环境里验，不能只读代码。**
 
 1. **读数不够**：状态残留与焦点问题常只在**特定操作顺序**下出现（先失败一次再成功、
@@ -475,6 +494,7 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
    | `scan_doc_parity.py` | 多语言文档的结构与标识符一致性 | A、D3 |
    | `scan_i18n_text_expansion.py` | 受约束容器中的翻译文本膨胀（I4 的候选） | I4 |
    | `scan_a11y_antipatterns.py` | 可机械检出的 a11y 行为反模式（K2 / K5 / A6） | I3 |
+   | `scan_css_token_contract.py` | 设计令牌的引用 / 定义 / 源码写入三条件合取 | A、I |
 
    多语言文档的一致性**不属于任何别的校验器**：实测 `apigen` 只生成
    `app/src/types/api/index.d.ts`、`schema.json` 与 petal 的 `index.d.ts`，
@@ -606,10 +626,12 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 | 写「既往记录」字段 | [实证数据](./references/evidence.md) | 历轮发现登记表（去重的第二来源）与量化结论 |
 | 修改本 skill | [维护规范](./references/contributing.md) · [更新记录](./references/changelog.md) | 追加与整理规范、版本管理、编辑坑；历次变更历史 |
 
-`scripts/` — **六个机械扫描脚本与两个自检**：
+`scripts/` — **七个机械扫描脚本与两个自检**：
 `scan_duplicated_literals.py`（判据 A）、`scan_unescaped_html.py`（判据 F）、
 `scan_dom_type_literals.py`（前端 DOM 契约闭合集合）、`scan_doc_parity.py`（多语言文档一致性）、
 `scan_i18n_text_expansion.py`（判据 I4 文本膨胀）、`scan_a11y_antipatterns.py`（判据 I3 无障碍行为）、
+`scan_css_token_contract.py`（设计令牌契约，**其价值在三条件降噪规则而非产出**：实测本仓库只剩 2 条候选，
+且回读后均为移植样式里的死规则）、
 `scan_regression_index.py`（历轮发现的回归索引，服务差分审查与修复验证）、
 `test_scan_scripts.py`（脚本行为与过滤规则）、`skill_self_check.py`（本文档库的 7 组结构检查）。
 

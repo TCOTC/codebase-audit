@@ -66,6 +66,27 @@ FOCUSABLE_TAGS = ("<button", "<a ", "<input", "<select", "<textarea",
 CLASS_TOKEN = re.compile(r"\.([A-Za-z_][\w-]*)")
 
 
+def rel_path(path, roots):
+    """输出以扫描根为基准的相对路径。
+
+    **必须传 `start`**：`os.path.relpath(path)` 不传第二个参数时以 **cwd** 为基准，
+    而 `--root` 可以是任意路径；两者不同盘时（Windows：`d:\\...` 与 `c:\\...`）
+    直接抛 `ValueError: path is on mount 'd:', start on mount 'C:'`，
+    **整个脚本崩溃、一条结论都输不出**。
+
+    实测这个缺陷长期存在而未被发现：自检只在「cwd 与仓库同盘」时跑过，
+    一旦在 skill 目录（C:）下扫描 D: 上的仓库就全崩。
+    教训：**测试结果依赖 cwd 的通过是假通过**——工具的输出路径应以扫描根为基准，
+    而不是以「碰巧在哪运行」为基准。
+    """
+    for root in roots or ():
+        try:
+            return os.path.relpath(path, root).replace("\\", "/")
+        except ValueError:
+            continue
+    return path.replace("\\", "/")
+
+
 def class_lands_on_focusable(roots, class_name):
     """返回一个命中说明，或 None。检测窗口是含该类名的那一行及其后 2 行。"""
     needle = class_name
@@ -82,7 +103,7 @@ def class_lands_on_focusable(roots, class_name):
                 # 仅当类名与可聚焦标签在同一窗口内，才认为它作用于可聚焦元素
                 if ("." + class_name) in window or ("\"" + class_name) in window \
                         or ("'" + class_name) in window or (" " + class_name) in window:
-                    return "%s:%d" % (os.path.relpath(path).replace("\\", "/"), no)
+                    return "%s:%d" % (rel_path(path, roots), no)
     return None
 
 # --- A6：纯图标按钮无可访问名 -------------------------------------------------
@@ -259,7 +280,7 @@ def main():
     if not k2:
         out.append("  （无）—— 这是干净的信号，正整数 tabindex 没有任何正当场景")
     for path, no, line in k2[:args.max_list]:
-        out.append("  %s:%d" % (os.path.relpath(path).replace("\\", "/"), no))
+        out.append("  %s:%d" % (rel_path(path, roots), no))
         out.append("     %s" % line)
     out.append("")
 
@@ -271,7 +292,7 @@ def main():
     if not a6:
         out.append("  （无）")
     for path, no, line in a6[:args.max_list]:
-        out.append("  %s:%d" % (os.path.relpath(path).replace("\\", "/"), no))
+        out.append("  %s:%d" % (rel_path(path, roots), no))
         out.append("     %s" % line)
     if len(a6) > args.max_list:
         out.append("  ...另有 %d 个" % (len(a6) - args.max_list))
@@ -304,7 +325,7 @@ def main():
         if not confirmed:
             out.append("  （无）")
         for path, no, sel, focus_anywhere, hit in confirmed[:args.max_list]:
-            out.append("  %s:%d" % (os.path.relpath(path).replace("\\", "/"), no))
+            out.append("  %s:%d" % (rel_path(path, roots), no))
             out.append("     选择器: %s" % sel[:88])
             out.append("     类名命中可聚焦元素: %s" % hit)
             out.append("     （本文件其它位置%s `:focus` 规则）"
@@ -331,7 +352,7 @@ def main():
         out.append("  %s —— %d 处" % (why, len(items)))
         for path, no, line in items[:4]:
             out.append("     %s:%d  %s"
-                       % (os.path.relpath(path).replace("\\", "/"), no, line[:80]))
+                       % (rel_path(path, roots), no, line[:80]))
         if len(items) > 4:
             out.append("     ...另有 %d 处" % (len(items) - 4))
     out.append("")

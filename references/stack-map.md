@@ -284,17 +284,41 @@
   - `scan_a11y_antipatterns.py --root <src> --styles <scss>` 覆盖 I3 的三类可靠形态
     （K2 正整数 `tabindex` / K5 `outline:none` 无替代 / A6 纯图标按钮无可访问名），
     其余反模式只给提示位点
+  - `scan_css_token_contract.py --styles <scss> --styles <appearance> --source <src>`
+    覆盖**设计令牌契约**（判据 A 在本层的应用）。本仓库实测：192 个无 fallback 的引用
+    → 条件 ② 排除 167、条件 ③ 排除 20+3、另 5 个另有 fallback 引用 → 只剩 **2 条候选**，
+    且回读后均为移植样式里的死规则。**产出极低，价值在三条件降噪规则本身**——
+    只做「引用 + 无定义」两条件时 17/17 全是假阳性
   - I1 / I2 / I5 **无任何机械手段**，只能语义判断 + 真实渲染取证——这正是本层值得单列的原因
 - **取证陷阱**：
   - **读数不够**：状态残留与焦点问题常只在**特定操作顺序**下出现
     （先失败一次再成功、中途切走再回来），静态阅读看不到
   - **焦点问题必须用键盘走**（`Tab` / `Shift+Tab` / `Esc`）。鼠标操作会把焦点问题完全掩盖
+  - **CSS 自定义属性是 JS→CSS 的运行时通道**：样式表里查不到定义 **不等于** 没有任何人定义它。
+    实测本仓库的写入形态至少有五种：`setProperty` / `removeProperty`（含先收集名字数组再
+    `forEach(n => style.removeProperty(n))` 的间接形式）、样式对象键 `["--x"]:`、
+    模板串里的内联 `style="--x:..."`、注入的完整 CSS 规则块、`cssText`。
+    逐条回读前，**不要把「无定义」当成结论**
+  - **SCSS 的状态样式主要写成嵌套的 `&:伪类`**，选择器文本里**不含组件类名**。
+    只搜选择器文本时会得出「该组件没有 hover / focus」的错误结论——
+    实测 `.b3-button` 按选择器文本判为缺 `:hover/:active/:focus`，按大括号配对后
+    实际拥有 `:active,:disabled,:focus,:hover`。全仓嵌套 `&:hover` 154 处、
+    `&:focus` 32 处、`:focus-visible` 22 处、`:active` 16 处、`:disabled` 7 处，
+    **嵌套是主流写法**。判状态覆盖必须做括号配对并合并「选择器文本」与「块体内嵌套」两种形态
+  - **组件调用点的属性差异几乎都是合法差异**：先用覆盖率把「契约属性」与「调用点自有
+    `data-*` 标识」分离（~100% 才是契约）。实测 `.b3-switch` 的 `type` 覆盖 114/114、
+    `.b3-tooltips` 的 `aria-label` 覆盖 159/159，而多数组件**根本没有契约属性**
   - `<option>` **不换行**：`<select>` 的下拉项是天然的受约束容器。实测历史面板的操作筛选
     `<select>`（`app/src/history/doc.ts:183-187`、`app/src/history/history.ts:534-540`）
     有 7 个 `<option>` 取自 `history*` 一族键，而 `de` / `ar` 的译文含 `(sync)` 之类的
     附加文本、长度约为英文的 2–4 倍（`en="sync"` → `de="synchronisieren (sync)"`）
   - **文本膨胀只在部分语言显形**：实测 `ja` / `zh-CN` 各仅 1–2 个受约束候选，
     而 `de` / `es` / `fr` / `ru` 各 80+、`ar` 76。**只在自己惯用的语言下看会完全漏掉本层缺陷**
+  - **移植样式里的令牌缺口先看引用方是否还在**：`app/src/assets/scss/pdf/_pdf.scss`
+    是从 Mozilla PDF.js 移植的（文件头 Apache-2.0），其 `--loading-icon` / `--main-color`
+    在 PDF.js `viewer.css` 的 `:root` 里定义、移植时未带上；但唯一使用点
+    `.toolbarField.pageNumber.visiblePageIsLoading` 的类名在全仓出现 **0 次**、
+    `#errorWrapper` 无 JS 取消 `hidden`。**无消费方即无业务表现**，属观察项
   - 虚拟滚动、`/// #if MOBILE` 编译期剔除、跨端模板差异见 L6
 
 ---
@@ -364,11 +388,32 @@
 
 - `anti-ui-slop`（MIT）：核心价值是「用真实界面参考做产品化的视觉设计」，
   且需要付费的 UIZZE MCP。**属外观设计，不在本 skill 范围**。
-- `premium-frontend-ui` / `penpot-uiux-design` / `gsap-framer-scroll-animation`：
-  动效与视觉设计实现指南，属外观。
+- `premium-frontend-ui` / `gsap-framer-scroll-animation` / `anti-ui-slop` 的视觉与动效部分：
+  属外观设计实现指南，不在本 skill 范围。
+- `penpot-uiux-design`（MIT）的 **Penpot MCP 部分**：它从设计文件里读取颜色集、文本样式与组件，
+  本仓库没有设计文件也没有该 MCP。**但其 Design Tokens 与 Component Checklist 的概念已被
+  部分采纳**（见下行），因此它与上面两个不再同类。
+- `oo-component-documentation`（MIT，面向对象组件文档模板，含 Create/Update 两模式）、
+  `salesforce-component-standards`（组件质量标准与组件通信规则）、
+  `fluentui-blazor` / `mvvm-toolkit*` / `react19-*` / `react-container-presentation-component`
+  （React、Vue、LWC、Blazor、.NET 平台专用）：**本仓库是原生 TypeScript +
+  模板字符串 + SCSS，无组件目录、无组件注册表（`components.json` / `COMPONENTS.md` 均无命中），
+  这些 skill 的载体在目标仓库里不存在**。其中唯一可迁移的原理——「渲染函数归 `ui`、
+  含状态/副作用/异步者归 `features`」——在本仓库的对应物是 `protyle/render/`（纯渲染，
+  不得读 DOM / 发请求）与 `protyle/util/`（有副作用）的分工，已作为判据 D 的检查点记录。
 - `a11y.instructions.md` 里的 **V（视觉与颜色）与 D（媒体）两类反模式**：
   对比度、只用颜色传达信息、固定字号、动效降级、字幕 —— 这些需要颜色计算与视觉基线，
   取证手段与本 skill 完全不同（axe / Lighthouse / 设计审查），**有意不纳入**。
+
+**部分采纳的 UI/UX 来源**（机制已按本仓库改写，记录以免重复评估）：
+
+| 来源 | 许可 | 采纳的部分 | 改写方式 |
+|---|---|---|---|
+| `penpot-uiux-design` | MIT | Design Tokens（spacing / typography / color scale）作为设计系统第一层；组件检查清单里的**状态覆盖**（default / hover / active / disabled / loading） | 它靠 Penpot MCP **读取**设计文件中的令牌；本仓库无设计文件，故改写为**源码层可判定**的「引用 / 定义 / 源码写入」三条件合取，落到 `scan_css_token_contract.py` 与判据 I 的 CSS 侧取证前提 |
+
+> 未采纳的部分也要记录理由：该 skill 的 Default Spacing Scale（8px 基）、Typography Scale、
+> Color Usage、Common Layouts（375×812 / 1440×900）、以及全部「视觉层级、留白、限制颜色/
+> 字体数量」类条目，均属**外观**，按 `description` 的声明不在本 skill 范围内。
 
 `trailofbits/skills` 的**内容**许可为 CC-BY-SA-4.0，与本仓库及目标仓库（AGPL-3.0）不兼容：
 **只可参考其方法论，不得把正文整段复制进任一仓库。**

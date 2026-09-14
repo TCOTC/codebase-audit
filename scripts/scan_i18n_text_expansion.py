@@ -142,6 +142,26 @@ def scan_usage(roots, constrained_classes=None):
     return usage
 
 
+def rel_path(path, roots):
+    """输出以扫描根为基准的相对路径。
+
+    **必须传 `start`**：`os.path.relpath(path)` 不传第二个参数时以 **cwd** 为基准，
+    而 `--source` / `--root` 可以是任意路径；两者不同盘时（Windows：`d:\\...` 与
+    `c:\\...`）直接抛 `ValueError: path is on mount 'd:', start on mount 'C:'`，
+    **整个脚本崩溃、一条结论都输不出**。
+
+    实测这个缺陷长期存在而未被发现：自检只在「cwd 与仓库同盘」时跑过，
+    一旦在 skill 目录（C:）下扫描 D: 上的仓库就全崩。
+    教训：**测试结果依赖 cwd 的通过是假通过**。
+    """
+    for root in roots or ():
+        try:
+            return os.path.relpath(path, root).replace("\\", "/")
+        except ValueError:
+            continue
+    return path.replace("\\", "/")
+
+
 def flatten(obj, prefix=""):
     out = {}
     if isinstance(obj, dict):
@@ -314,7 +334,7 @@ def main():
             out.append("        %-4s: %s" % (stem[:4], ovalue.replace("\n", " ")[:70]))
             if len(row) > 6:
                 for p, n, r, s in row[6][:2]:
-                    rel = os.path.relpath(p).replace("\\", "/")
+                    rel = rel_path(p, args.source)
                     out.append("        使用点 %s:%d（%s）" % (rel, n, r))
                     out.append("            %s" % s)
         if len(constrained_main) > args.max_list:

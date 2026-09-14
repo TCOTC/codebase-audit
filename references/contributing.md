@@ -66,6 +66,16 @@
     判定「拦住」也要放宽到「该组任一相关断言失败」，不要锚定单一标签——
     同一处退化常被同组的另一条断言先捕获。
 
+14. **脚本的输出路径必须以扫描根为基准，不得依赖 cwd**。“测试结果依赖 cwd 的通过是假通过”。
+    `os.path.relpath(p)` 不传第二个参数时以 **cwd** 为基准；当扫描根在另一个盘
+    （Windows 上 `d:\...` 与 `c:\...`）时直接抛 `ValueError: path is on mount 'd:', start on mount 'C:'`，
+    **整个脚本崩溃、一条结论都输不出**。实测该缺陷在 `scan_a11y_antipatterns.py`（5 处）与
+    `scan_i18n_text_expansion.py`（1 处）里长期存在而未被发现，因为自检恰好在与仓库同盘的 cwd 下跑过。
+    两个要求：① 统一用 `rel_path(path, roots)` 这类**以扫描根为 start** 的辅助函数；
+    ② 自检里加一条**异盘 cwd** 用例（`subprocess.run(..., cwd=<与仓库不同盘的目录>)`），
+    并且要同时断言「不抛异常」与「输出里不含绝对路径」——
+    后者是必需的：只靠 `try/except` 吞掉异常并退回绝对路径也能“不崩”，但输出不可读。
+
 ## 本 Skill 的版本管理（强制）
 
 本 skill 目录是一个独立 Git 仓库，远程为 `origin`（`TCOTC/codebase-audit`）。
@@ -99,3 +109,12 @@ git push
 - PowerShell 的 `cd` 有时会被工具简化掉；`[IO.File]::ReadAllBytes("相对路径")` 走的是 .NET 进程工作目录
   （不等于 PowerShell 的 `$PWD`）→ 一律用**绝对路径**
 - `gh api --jq .body` 的中文在默认控制台会乱码，回读比对要走 Python `subprocess` 取字节后按 UTF-8 解码
+- **负向验证的补丁要按函数体打，不要按整串打**：想把 `rel_path(path, roots)` 退化成
+  `os.path.relpath(path)` 而做整串替换时，**函数定义行 `def rel_path(path, roots):` 也含这个子串**，
+  会被一起改成 `def os.path.relpath(path):` → `SyntaxError`，脚本在 import 阶段就挂，
+  后续组根本没跑到。用例“失败”了，但**失败的原因不是你以为的那个**。
+  打补丁后除了比对内容变化，还要 `ast.parse(patched)` 做语法自检，并断言
+  `def <name>(` 仍在（证明没误伤定义）
+- **负向验证的补丁必须真的复现原缺陷形态**：另一个实测陷阱是我给 `rel_path` 加了
+  `try/except ValueError` 作为宽裕处理，于是“退回不传 start”的补丁**被 try 吞掉了异常**，
+  退化成「返回绝对路径」→ 脚本不崩 → 用例看起来“漏过”。**补丁没复现原缺陷，用例就不承重**。
