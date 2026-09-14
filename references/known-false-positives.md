@@ -40,6 +40,8 @@
 | vendored 第三方样式/脚本里的可访问性缺失 | `src/asset/pdf/**`：`.secondaryToolbarButton`、`.overlayButton`、`.toolbarField`、`.scrollModeButtons` 等（实测占无焦点指示使用点的 39 条） | **不从上游跟随的移植代码，不要按自研标准要求**。PDF.js 的类名与结构属上游，改它们会增大后续同步成本。统计口径里应单列并扣除 |
 | 旧的 `.audit-focus-candidates.md` 里的焦点缺口清单 | 326 条「无焦点指示」（`.b3-menu__item`×63、`.keyboard__action`×38、`.b3-menu__separator`×35、`.keyboard__slash-item`×21、`.color__square`×11、`.b3-list-item`×7 等） | **清单已作废，不得沿用也不得据此上报**：`fa729c7c49`（#19493 的修复）加了一条以 `:is(` 开头的全局兜底，而第二十四轮的脚本**不认识 `:is()`、也不算特异性**，于是把已被兜底覆盖的控件全报成缺口。修好扫描器后同一仓库只剩 **2** 条（见 evidence 第二十七轮）。取证前先确认用的是修后的脚本，再重新生成清单 |
 | 「上游已经加了全局兜底，所以焦点可见性问题已全部解决」 | 由上面 326 → 2 得出「本仓焦点可见性已经干净」 | **兜底会被更高特异性的 `outline: none` 反杀**（#19499 第 2 点）：`.protyle-toolbar__item:focus` (0,2,0) 与 `.protyle-preview__action button:focus` (0,2,1) 都高于兜底的 (0,1,1)。判定必须比较特异性而非「有没有规则」 |
+| 把「文本在固定宽度容器里显示不全」直接判为「译文过长」 | 判据 I4 的长度候选（`ar` 的 `الخطوط العريضة (outline)` 7→26 字符、`de` 的 `synchronisieren (sync)` 4→22） | **必须先用真实渲染区分「容器太窄」与「译文太长」**：实测两处都是**容器侧**——移动端历史筛选下拉的可用内宽只有 62px（`fn__size96` 96px 减 `.b3-select` 的 `padding: 4px 26px 4px 8px`），**英文 `All operations`（90px）就已经溢出 28px**（#19502）；表情动态图标页签四个标签共用 89px，只有译文最长的那个溢出（#19503）。只按长度比排序会把修法指向「改译文」，而它既改不好英文那条、也不是另一条的原因 |
+| 量测溢出时用「文本宽 − 盒宽」当作症状 | 把 `label89` 的分数报成「超出 58px」 | **那是推导量，不是观测量**：能观察到的症状是文本绘制矩形与相邻控件的交叠（`Range.getBoundingClientRect().right − nextBox.left` = 54px）。且量测集合必须**完整覆盖选项**——本轮先把 `historyOutline` 漏在集合外，修正后 `ar` 的数值从 46px 变成 85px |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 
