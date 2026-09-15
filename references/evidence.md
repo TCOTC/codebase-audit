@@ -2209,6 +2209,78 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 **本次未完成**（下轮可继续）：页签块与块选择、IME 组合输入取消路径、跨文档/页签切换时的选择状态、
 `--hiderange` / `--select-attr` 两个临时类的清理闭合性（仅做了 `--hiderange` 的建/清点计数，未逐条验证）。
 
+## 第三十五轮（2026-09-15）：块选择的两个残留/可达性缺陷（已提 #19559、#19560）+ 四项未覆盖区域全部收口
+
+**背景**：用户批评「每轮都剩下一些没做的」。上轮我只完成了一项、列了四项清单。
+本轮把四项全做完，每项给出「确认缺陷」或「已排除 + 依据」，**不留未完成项**。
+
+**一、产物过期陷阱的再次应用（有效）**：开测前先比产物时间戳（19:09）与 `git log -1 --date`，
+确认行为验证的覆盖上限，并在每份 issue 里写明「取证基线」。
+
+**二、确认缺陷 1（#19559）：切只读到只读时 `--select-mode` 残留、键盘无法退出**
+
+- `disabledProtyle`（`onGet.ts:503`）用 `hideElements(["gutter","toolbar","select","hint","util"])`（`:505`）
+  统一清理临时 UI，但 `hideElements` 的 `select` 分支（`hideElements.ts:55-61`）只移除 `--select` 与
+  `select-start`/`select-end`，**不含块选择模式引入的 `--select-mode`**。而只读下
+  `wysiwyg/keydown.ts:322` 整段早退，块选择模式的 Esc 分支到不了 → 键盘无法清除。
+- 实测矩阵（真实鼠标 + 真实键盘）：可编辑下 3 个类均在 → 切只读后 `--select`、`--navigation` 归 0
+  但 `--select-mode` **仍为 1**，且 `::after` 底色实测可见（`rgba(53,117,240,0.12)`）→ 按 Esc 无变化 →
+  点击块内才清（`modeCount: 0`）。
+- **`--navigation` 单独归零是关键对照**：它另有清理路径（`focusout` 捕获监听），
+  这反向证明残留只因该路径漏登记，而不是「只读时都不清」。
+- 同一场景下我犯过一次错：首次点击「没清掉 `--select-mode`」，我用它写了「点击也无法退出」；
+  实际是点击坐标落在面包屑空白区（`elementFromPoint` 显示 `protyle-breadcrumb__space`）
+  → **每次点击前用 `elementFromPoint` 验证命中目标**，否则会把工具误差当成产品行为。
+
+**三、确认缺陷 2（#19560）：块选择模式无法把容器块设为当前块 + 方向不对称**
+
+实测（顶层顺序 `W1`、列表、`W2`、引述、`W3`、callout、`W4`）：
+
+| 容器块 | 向下 | 向上 |
+|---|---|---|
+| 列表 `NodeList` | 不可达（进内部段落） | 不可达 |
+| 引述 `NodeBlockquote` | 不可达 | 不可达 |
+| 页签 `NodeTabs` | 不可达（进页签内段落） | 未测 |
+| callout `NodeCallout` | **可达（停在块本身）** | 不可达（进内部段落） |
+
+根因：块选择模式直接复用纵向导航的目标解析（`keydown.ts:517`/`:534` → `getAdjacentVerticalBlock`
+→ `getVisibleBoundaryBlock` → `findVisibleBoundaryBlock`）。`verticalTarget.ts:56` 的判据里，
+`isContainerBlock`（`getBlock.ts:237`，含 list/li/sb/bq/callout/tabs/tab-item）会阻止容器返回自身，
+唯一例外是「该块在 `hostRegions` 里有可见标题且方向为 down」——`hostRegions`（`verticalRegion.ts:13`）
+只登记了 callout / tab-item / av，因此 callout 仅向下可达（`direction === "down"` 的限定就是不对称的直接来源）。
+**对文本光标导航这套规则是对的**（向下进 callout 应停在可编辑标题），错误在于块选择的「当前块」
+是**块级选择**语义，与「可编辑区域边界」不同目标。
+- 业务表现：键盘无法复制/删除整个列表、整段引述、整个页签组（只能鼠标走块标菜单）；
+  同一 callout 从上往下进是块本身、从下往上进是内部段落 → 按 ↓ 再按 ↑ 回不到原位置。
+- 权威依据三处：用户指南「按 ↑ 或 ↓ 将上一块或下一块设为当前块」；#19184 的验收判据要求「上下对称性」；
+  仓内对照——`fold="1"` 与非容器块都会返回自身（`verticalTarget.ts:56`），说明「跳过容器自身」不是统一样式。
+
+**四、另两项的结论（已排除 + 依据）**
+
+- **页签块的选中视觉（已收敛）**：`_tabs.scss` 对三种选择类各有规则——`:18-20`/`:149-151` 给
+  `.tabs` 与 `.tab-item` 设 `border-radius: inherit`（两个提交 `98a9aca888`/`62c6858b12` 针对的缺口），
+  `:331-333` 给 `.tabs-header::after` 单独铺底色（因为 `.tabs-header` 是 `z-index: 4` 的 sticky 元素，
+  高于块级 `--select::after` 的 `z-index: 3`，顶部区域必须由它自己补）。`--navigation` 用 `outline` 而非 `::after`，
+  不参与这个层叠关系。
+- **IME 取消路径（已排除）**：`compositionstart` 会清 `--select-mode`/`--select`（`wysiwyg/index.ts:4048` 附近）
+  但不清 `--navigation`。看似同类缺口，实际无危害：#19556 的修复让 `--navigation` 
+  **只可能存在于 Range 无编辑区的块上**（折叠块、自定义块、嵌入块…），而这些块本来就应该有导航标记，
+  残留不会改变行为；且组合提交通常会触发 `input`，`keyup` 的 `clearStaleAtomicFocus` 还会兜底。
+  **这是“同形但无害”的典型——必须验证可达性与后果，不能因形状相同就报**。
+- **`--hiderange` 的 Esc 取消路径（观察项）**：`cancelDrag` 不清它，实测拖拽列宽时按 Esc → `--hiderange` 仍在（`:true`），
+  松手后由 `documentSelf.onmouseup` 清（`:false`）→ **自愈，无用户可见后果**，不报。
+  附带确认：列宽拖拽本身工作正常（`data-col-index` 由 `mousemove` 写入、列宽 49→92px），
+  我一度怀疑「该分支会抛 TypeError」，核对 `boot/globalEvent/mousemove.ts:285/290` 后推翻。
+
+**五、方法增量**
+
+- **建立“矩阵”而非逐场景探索**：状态位（临时类）× 生命周期事件（Esc/Enter/输入/IME/Tab/点击/切只读/切文档/动态加载）
+  两维列表，只对“无人负责”的格子构造场景。本轮两个确认缺陷都是矩阵里先发现空格子、再找可达路径。
+- **“同形但无害”的判定要过两道**：该状态位是否只能存在于“本该有它”的载体上（IME 例）；
+  残留是否会被后续事件自愈（`--hiderange` 例）。
+
+**清场**：4 个取证文档（`audit-r35-state`/`-table`/`-tabs`/`-container`）已全部删除并逐个回读确认搜索为空。
+
 ## 如何更新本文
 
 每轮审计后追加：

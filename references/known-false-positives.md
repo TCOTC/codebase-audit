@@ -53,6 +53,9 @@
 | 「同族移动函数不移动标记 ⇒ 缺陷」（静态推演） | 由 `syncBlockSelectionModeToSelectionEnd`（只 `focusBlock`）、PageUp/PageDown 分支、Tab 分支都只移动「当前块」不移动导航标记，就推定它们会残留 | **必须逐个实测，不能按代码推演**。实测三条都不残留，但原因各不相同：① `⇧↓` 路径——光标真移了，捕获阶段的 `clearStaleAtomicFocus` 自愈；② Tab 路径——它把段落变成列表项，**DOM 被替换，标记随节点消失**；③ 鼠标退出——`pointerdown` 捕获监听。反面是 Esc/Enter：光标没移，keyup 判定成立而保留。**规律是「光标是否真的移动」，不是「代码里有没有调移动函数」**；而 `preventKeyup` 也拦不住它（清理监听注册在捕获阶段，早于 `preventKeyup` 的冒泡处理） |
 | 「修完还不行 ⇒ 修复不完整」 | 实测发现「退出块选择模式后按 ↓ 仍然跳块」，而该缺陷已由 `f861bfe304` 修复，于是准备报「修复不完整」 | **先比时间，再下结论**：浏览器产物时间戳（19:09）早于修复提交（21:11），测的是**修复前的代码**。本仓库的 `stage/build/desktop`、`mobile` 产物**不随 `pnpm dev` 更新**，此陷阱会周期性重现。判据是「产物时间戳 vs `git log -1 --date`」；能更新产物时再复测，不能时改用代码审查并在报告中**标注取证基线** |
 | 在 `document` 的冒泡监听器上读 `event.defaultPrevented` 来判「按键是否被处理」 | 据此得出「没有任何处理器处理 Escape」，进而把推断写成事实 | **插桩层必须与处理器同层或更晚**：`window` 上的处理器晚于 `document` 的冒泡监听器执行，在 document 层读到的一定是「还未处理」。判按键是否被处理要么在 window 层采样、要么看副作用（DOM 变更/滚动/焦点） |
+| 「同一临时态在另一路径未被清理 ⇒ 同类缺陷」 | IME `compositionstart` 清 `--select-mode`/`--select` 却不清 `--navigation`，形状上与已确认的 `--select-mode` 残留完全一致 | **要看该状态位能落在哪些载体上**：修复后 `--navigation` 只存在于 Range 无编辑区的块（折叠块、自定义块、嵌入块），而这些块本来就该有它，残留不改变行为；且组合提交的 `input` 与 keyup 的兜底会清除。**先验可达性与后果，再判是否同类** |
+| 「取消操作时未清临时态 ⇒ 缺陷」 | 拖拽列宽途中按 Esc，`cancelDrag` 不清 `protyle-wysiwyg--hiderange`，实测确实残留 | **残畘后要查是否自愈**：实测松手后 `documentSelf.onmouseup` 会清（`:true` → `:false`），且 `--hiderange` 的每次 mousedown 入口也无条件清 → 无用户可见后果，降为观察项 |
+| 「点击过该区域」当作交互已达成的证据 | 我用一次 `page.mouse.click` 断言「只读下点击也无法清除块选择高亮」 | **必须用 `elementFromPoint` 验证命中目标**：该次点击落在面包屑空白区（`protyle-breadcrumb__space`）而非块内。工具层的坐标误差会被当成产品行为，且这类假结论看上去很合理 |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 
