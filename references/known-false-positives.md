@@ -50,6 +50,7 @@
 | 「Esc 没在组件内部处理就是缺配对」（K7） | 组件文件里搜不到 `Escape` | **先查全局处理器**：`boot/globalEvent/keydown.ts` 的 Escape 分支按 9 级优先级统一处理（`formatPainter` → `cancelDrag` → 图片预览 → 菜单 → `av__panel` → 对话框 → 块浮层 → 光标在文档树时回编辑器 → `focusByRange` 兜底），组件内不写 Esc 是正常的。**这是一处做得相当完整的地方，不要按「有没有 Esc」一律怀疑** |
 | 「前端临时类名随事务载荷发往内核 ⇒ 数据污染」 | 见 `updateBatchTransaction` / `turnsIntoTransaction` 序列化 `element.outerHTML` 时未调用 `cleanBlockSelectionModeHTML`，据此断言临时类会落盘 | **必须实测落盘**：挂钩前端 `fetch` 确证载荷里含 `class="p protyle-wysiwyg--navigation"`，但内核丢弃 block DOM 中的 `class`——读回该文档的 `.sy` 不含该字符串。前端清理集合缺项最多构成「防御纵深不足」的观察项。**在断言「某属性会持久化」之前，先取一份真实文件读回**；前端序列化 ≠ 落盘 |
 | 「临时标记类的清理载体缺项即缺陷」 | 由「`--navigation` 不在任何清理集合里」直接得出缺陷，或由「某退出路径会残留」直接得出缺陷 | **清理载体缺项是候选，必须有可观测行为才算缺陷**（对照实验：手工移除该类后行为改变）。同时**不能只验一条退出路径**：同功能的其他路径可能由 `input` / `pointerdown` 的捕获监听自愈（本仓库 Esc/Enter 残留、鼠标点击不残留）；**兜底判定本身也要核**——keyup 的 `clearStaleAtomicFocus` 用 `owner.contains(range.startContainer)` 判定，正是它保留了残留。见模式 P42 |
+| 「同族移动函数不移动标记 ⇒ 缺陷」（静态推演） | 由 `syncBlockSelectionModeToSelectionEnd`（只 `focusBlock`）、PageUp/PageDown 分支、Tab 分支都只移动「当前块」不移动导航标记，就推定它们会残留 | **必须逐个实测，不能按代码推演**。实测三条都不残留，但原因各不相同：① `⇧↓` 路径——光标真移了，捕获阶段的 `clearStaleAtomicFocus` 自愈；② Tab 路径——它把段落变成列表项，**DOM 被替换，标记随节点消失**；③ 鼠标退出——`pointerdown` 捕获监听。反面是 Esc/Enter：光标没移，keyup 判定成立而保留。**规律是「光标是否真的移动」，不是「代码里有没有调移动函数」**；而 `preventKeyup` 也拦不住它（清理监听注册在捕获阶段，早于 `preventKeyup` 的冒泡处理） |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 
