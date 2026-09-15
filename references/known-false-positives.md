@@ -48,6 +48,8 @@
 | 「菜单没有把 DOM 焦点移入」被判为缺焦点管理（K3） | `.b3-menu__item--current`（38 处 `classList.add/remove`）、`menus/Menu.ts` 无 `focus()` | **菜单用方向键 + `--current` 修饰类导航，不移动 DOM 焦点，是有意设计**：维护者在 #19493 的评论里明确写了菜单项由兜底提供焦点环、且菜单主要靠方向键。判 K3 前先确认该组件的键盘导航模型（DOM 焦点 / roving tabindex / 纯修饰类），三种都合法。**同理 `block__popover` 是 hover 触发，无需移入焦点** |
 | 「有弹层开合类名就一定缺焦点陷阱」（K3/K7 的 123 处） | `classList.(add\|remove)` 命中 `dialog\|modal\|popover\|menu` 的 123 处 | **信号极松**：实际构成是 38 处 `b3-menu__item--current`（键盘导航高亮）、15 处 `b3-menu__item--show`（图标显隐）、其余多为菜单外观类；**真正涉及弹层开合的只有 7 处**。判前必须先按类名归并，把「高亮/显隐/外观」与「弹层本体出现与消失」分开 |
 | 「Esc 没在组件内部处理就是缺配对」（K7） | 组件文件里搜不到 `Escape` | **先查全局处理器**：`boot/globalEvent/keydown.ts` 的 Escape 分支按 9 级优先级统一处理（`formatPainter` → `cancelDrag` → 图片预览 → 菜单 → `av__panel` → 对话框 → 块浮层 → 光标在文档树时回编辑器 → `focusByRange` 兜底），组件内不写 Esc 是正常的。**这是一处做得相当完整的地方，不要按「有没有 Esc」一律怀疑** |
+| 「前端临时类名随事务载荷发往内核 ⇒ 数据污染」 | 见 `updateBatchTransaction` / `turnsIntoTransaction` 序列化 `element.outerHTML` 时未调用 `cleanBlockSelectionModeHTML`，据此断言临时类会落盘 | **必须实测落盘**：挂钩前端 `fetch` 确证载荷里含 `class="p protyle-wysiwyg--navigation"`，但内核丢弃 block DOM 中的 `class`——读回该文档的 `.sy` 不含该字符串。前端清理集合缺项最多构成「防御纵深不足」的观察项。**在断言「某属性会持久化」之前，先取一份真实文件读回**；前端序列化 ≠ 落盘 |
+| 「临时标记类的清理载体缺项即缺陷」 | 由「`--navigation` 不在任何清理集合里」直接得出缺陷，或由「某退出路径会残留」直接得出缺陷 | **清理载体缺项是候选，必须有可观测行为才算缺陷**（对照实验：手工移除该类后行为改变）。同时**不能只验一条退出路径**：同功能的其他路径可能由 `input` / `pointerdown` 的捕获监听自愈（本仓库 Esc/Enter 残留、鼠标点击不残留）；**兜底判定本身也要核**——keyup 的 `clearStaleAtomicFocus` 用 `owner.contains(range.startContainer)` 判定，正是它保留了残留。见模式 P42 |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 

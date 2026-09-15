@@ -2074,6 +2074,53 @@ cd <tmp> && mkdir devsrc && cd devsrc && tar -xf ../dev.tar
 第二行印证了维护规范第 13 条的判定方式：**「拦住」要放宽到「该组任一相关断言失败」**，
 锚定单一标签会得出「没抓住」的错误结论。
 
+## 第三十二轮（2026-09-15）：块选择模式借用原子标记导致残留与方向键跳块（已提 #19556）
+
+**用户问题**：按 `Esc` 选中块之后按方向键是什么逻辑；为什么 `protyle-wysiwyg--navigation` 很难理解。
+
+**范围**：`app/src/protyle/wysiwyg/` 里纵向导航与块选择两个子系统的交叉（`verticalNavigation.ts`、
+`verticalNavigationState.ts`、`blockSelection.ts`、`keydown.ts`），外加 `util/clear.ts`、`ai/editor.ts`、
+`transaction.ts` 的清理载体。
+
+**唯一实质发现（已提 #19556）**：`focusAtomicRegion`（`verticalNavigation.ts:94-113`）三条分支
+**最后都会**加 `protyle-wysiwyg--navigation`，包括「`focusBlock` 成功」的普通可编辑块分支；
+块选择模式每次 ↑/↓ 都调用它的导出包装（`keydown.ts:531`、`:566`），于是普通段落被打上原子标记。
+退出模式只清 `--select-mode` / `--select`（`blockSelection.ts:49`），全仓无一处清理 `--navigation`。
+后果两条：退出后残留 2px 轮廓；**下一次同向方向键走原子分支（`keydown.ts:1008-1020`），
+跳过当前多行块的其余行**。
+
+**取证（真实渲染 + 真实键盘，3.8.4-beta.2）**：
+
+| 步骤 | caret | `--navigation` | `--select-mode` |
+|---|---|---|---|
+| 起始 | A | 无 | 无 |
+| Esc | A | 无 | A |
+| ↓ | B（首行） | B | B |
+| Esc | B | **残留** | 已清除 |
+| ↓ | **C** | 已清除 | 无 |
+
+对照（手工移除该类、光标复位到 B 首行）：真实 ↓ 连续 4 次，光标顶部 244 → 270 → 296 → 322，
+每次正好一个行高 26px，即**块内逐行移动**；B 高 164px（6 行），所以单行块看不出跳块。
+逐退出路径验证：**Esc 与 Enter 残留、鼠标点击不残留**（`pointerdown` 的捕获监听兜底）。
+
+**判为非缺陷（勿重报）**：临时类确实随事务载荷发往内核（挂钩 `fetch` 捕获到
+`class="p protyle-wysiwyg--navigation"`），但内核丢弃 block DOM 的 `class`，读回 `.sy` 不含该字符串
+→ 无数据污染，前端清理缺项只是观察项。
+
+**关键证据获取路径（可复用）**：本机 `?id=` 打开时被服务端判为 Electron UA（`kernel/server/serve.go:757`
+命中 `Electron` → `/stage/build/app/`），该产物的 `4157(i){i.exports=require("electron")}` 在无 nodeIntegration
+的页面里抛 `require is not defined`，表现为「点击刷新」错误页；**直接加载 `/stage/build/desktop/`
+（非 Electron 的桌面浏览器目标）即可正常渲染**。产物新鲜度判据：在 bundle 里 grep 新符号
+（本轮 `protyle-wysiwyg--navigation` 命中，且 `app/stage/build/app` 与 `app/build/win-unpacked` 副本同名同大小）。
+删除文档用 `/api/filetree/removeDocByID`：`/api/filetree/deleteDoc` 返回 **200 + 空 body 且不生效**
+（易误判为成功）。
+
+**清场**：取证用临时文档 `20260915205142-jsl9usn` 已删除并三项回读确认（SQL 无块、`.sy` 404、
+workspace 下无 `.trash`），目标仓库 `git status` 干净。
+
+**新判据/模式**：新增 **D3e**（临时 UI 标记类的清理载体构成闭合集合）与模式 **P42**
+（借用型临时标记类无人释放）；已知误报 **+2 条**（临时类进入载荷 ≠ 落盘；清理载体缺项 ≠ 缺陷）。
+
 ## 如何更新本文
 
 每轮审计后追加：
