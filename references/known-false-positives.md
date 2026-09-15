@@ -51,6 +51,8 @@
 | 「前端临时类名随事务载荷发往内核 ⇒ 数据污染」 | 见 `updateBatchTransaction` / `turnsIntoTransaction` 序列化 `element.outerHTML` 时未调用 `cleanBlockSelectionModeHTML`，据此断言临时类会落盘 | **必须实测落盘**：挂钩前端 `fetch` 确证载荷里含 `class="p protyle-wysiwyg--navigation"`，但内核丢弃 block DOM 中的 `class`——读回该文档的 `.sy` 不含该字符串。前端清理集合缺项最多构成「防御纵深不足」的观察项。**在断言「某属性会持久化」之前，先取一份真实文件读回**；前端序列化 ≠ 落盘 |
 | 「临时标记类的清理载体缺项即缺陷」 | 由「`--navigation` 不在任何清理集合里」直接得出缺陷，或由「某退出路径会残留」直接得出缺陷 | **清理载体缺项是候选，必须有可观测行为才算缺陷**（对照实验：手工移除该类后行为改变）。同时**不能只验一条退出路径**：同功能的其他路径可能由 `input` / `pointerdown` 的捕获监听自愈（本仓库 Esc/Enter 残留、鼠标点击不残留）；**兜底判定本身也要核**——keyup 的 `clearStaleAtomicFocus` 用 `owner.contains(range.startContainer)` 判定，正是它保留了残留。见模式 P42 |
 | 「同族移动函数不移动标记 ⇒ 缺陷」（静态推演） | 由 `syncBlockSelectionModeToSelectionEnd`（只 `focusBlock`）、PageUp/PageDown 分支、Tab 分支都只移动「当前块」不移动导航标记，就推定它们会残留 | **必须逐个实测，不能按代码推演**。实测三条都不残留，但原因各不相同：① `⇧↓` 路径——光标真移了，捕获阶段的 `clearStaleAtomicFocus` 自愈；② Tab 路径——它把段落变成列表项，**DOM 被替换，标记随节点消失**；③ 鼠标退出——`pointerdown` 捕获监听。反面是 Esc/Enter：光标没移，keyup 判定成立而保留。**规律是「光标是否真的移动」，不是「代码里有没有调移动函数」**；而 `preventKeyup` 也拦不住它（清理监听注册在捕获阶段，早于 `preventKeyup` 的冒泡处理） |
+| 「修完还不行 ⇒ 修复不完整」 | 实测发现「退出块选择模式后按 ↓ 仍然跳块」，而该缺陷已由 `f861bfe304` 修复，于是准备报「修复不完整」 | **先比时间，再下结论**：浏览器产物时间戳（19:09）早于修复提交（21:11），测的是**修复前的代码**。本仓库的 `stage/build/desktop`、`mobile` 产物**不随 `pnpm dev` 更新**，此陷阱会周期性重现。判据是「产物时间戳 vs `git log -1 --date`」；能更新产物时再复测，不能时改用代码审查并在报告中**标注取证基线** |
+| 在 `document` 的冒泡监听器上读 `event.defaultPrevented` 来判「按键是否被处理」 | 据此得出「没有任何处理器处理 Escape」，进而把推断写成事实 | **插桩层必须与处理器同层或更晚**：`window` 上的处理器晚于 `document` 的冒泡监听器执行，在 document 层读到的一定是「还未处理」。判按键是否被处理要么在 window 层采样、要么看副作用（DOM 变更/滚动/焦点） |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 

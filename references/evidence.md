@@ -2158,6 +2158,57 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 
 **清场**：取证文档 `20260915210339-rtaynz0` 已删并三项回读确认（SQL 无块、`.sy` 404、无 `.trash`）。
 
+## 第三十四轮（2026-09-15）：只读模式下块选择转换不可达（已提 #19558）+ 两个已提 issue 的修复
+
+**用户要求**：继续审计该功能（上轮列了 5 处未覆盖区域）。
+
+**一、产物过期这个前提差点毁掉整轮结论（最重要的教训）**
+
+实测中我发现「退出块选择模式后按 ↓ 仍然跳块」，与 #19556 已被修复的预期不符，一度准备写成「修复不完整」。
+核对后确认：**本机浏览器产物时间戳 19:09 早于修复提交 21:11**，我测的是修复前的代码。
+同期工作树已从 `9a91fc35d6` 推进到 `c8dc2e50f0`（**我上轮报的两个 issue 都已被修复**）。
+教训：**开测前先比产物时间戳与 `git log -1 --date` 的时间**，而不是先怀疑修复不完整；
+在本仓库浏览器产品（`stage/build/desktop`）不随 `pnpm dev` 更新，这个陷阱会周期性重现。
+后续改用「代码审查 + 需求提交时间核对」代替浏览器复验，并在报告中**如实标注取证基线**。
+
+**二、唯一实质发现（已提 #19558）**：只读模式下跨块划选 + Esc 不转换为块选择。
+
+- 需求侧权威：#19116《只读模式跨块选择文本，按 ESC 支持选中块》，实现于 `14bb963279`（09-03），
+  含专为此写的 `selectReadonlyBlocksByRange`（`boot/globalEvent/keydown.ts:95`），调用点 `:1677`；
+  用户指南亦写明「只读模式下同样适用」；`readonlyKeydown.test.ts` 断言只读下 Escape 不得被 wysiwyg 层吞掉。
+- **差分对照（决定性）**：同一文档、同一跨块选区、同一按键，仅只读状态不同——
+  只读（`contenteditable=false`）→ 无标记、无当前块、选区保持 101 字符；
+  编辑（解锁后）→ 建立 R1/R2/R3 标记、选区折叠为 0。
+- **取证手段（可复用）**：用文档级只读属性 `custom-sy-readonly` 建立只读态，**不改任何全局配置**；
+  并用面包屑锁定按钮走一遍真实用户路径，确认两者得到完全一致的状态
+  （`data-subtype="lock"` / `contenteditable="false"` / 属性为 true）。
+- **排除清单（本次的主要工作量，也是 issue 中最有价值的部分）**：跨块、两侧 `hasClosestBlock` 可识别、
+  `protyle.disabled` 为真（`data-subtype="lock"`）、起点在 `.protyle-content` 内、编辑器唯一且含起止块、
+  无抢返回的分支（菜单/对话框/浮层/formatPainter）、`Protyle` 类确有 `protyle` 字段所以不存在属性访问异常。
+- **两条一致证据**：MutationObserver 监听 `class` 变更 → Esc 后记录数为 **0**（`selectBlocksByRange` 未执行）；
+  选区长度保持 101 未变（而该函数末尾的 `range.collapse(false)` 会折叠选区）。
+- 根因**未定位到行**，已诚实标注；给出的线索是只读下 `event.target === document.body`
+  而 `windowKeyDown` 对 body 焦点有特殊分派（`:1316`）。
+
+**三、方法教训：插桩位置错误会造出假证据**
+
+我最初在 `document` 的冒泡监听器上读 `event.defaultPrevented`，得到 `false` 并据此推断
+「没有任何处理器处理 Escape」。这是错的：`windowKeyDown` 挂在 **window** 上，
+**window 的冒泡监听器晚于 document 的**，所以那个读数看不到它。
+判「某按键是否被处理」必须在**与处理器同一层或更晚的层**采样（或看副作用）。
+
+**四、顺手完成的两个修复核验**（代码审查层面，产品侧因产物过期无法复验）：
+
+| issue | 修复提交 | 内容 | 判定 |
+|---|---|---|---|
+| #19556 | `f861bfe304` | `focusAtomicRegion` 改为 `atomic = !getContenteditableElement(element)?.contains(range.startContainer)`，仅有 Range 不在可编辑区时才加类 | 与我建议的方案一致，逻辑成立 |
+| #19557 | `c8dc2e50f0` | `selectBlocksByRange` 内新增 `setBlockSelectionModeElement(protyle.wysiwyg.element, currentElement)`（取选区末端所属块） | 与我建议的方案一致，逻辑成立 |
+
+**清场**：取证文档 `20260915211635-7phhixu` 已删并三项回读确认；仓库内零残留。
+
+**本次未完成**（下轮可继续）：页签块与块选择、IME 组合输入取消路径、跨文档/页签切换时的选择状态、
+`--hiderange` / `--select-attr` 两个临时类的清理闭合性（仅做了 `--hiderange` 的建/清点计数，未逐条验证）。
+
 ## 如何更新本文
 
 每轮审计后追加：
