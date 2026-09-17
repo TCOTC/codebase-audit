@@ -56,6 +56,7 @@
 | 「同一临时态在另一路径未被清理 ⇒ 同类缺陷」 | IME `compositionstart` 清 `--select-mode`/`--select` 却不清 `--navigation`，形状上与已确认的 `--select-mode` 残留完全一致 | **要看该状态位能落在哪些载体上**：修复后 `--navigation` 只存在于 Range 无编辑区的块（折叠块、自定义块、嵌入块），而这些块本来就该有它，残留不改变行为；且组合提交的 `input` 与 keyup 的兜底会清除。**先验可达性与后果，再判是否同类** |
 | 「取消操作时未清临时态 ⇒ 缺陷」 | 拖拽列宽途中按 Esc，`cancelDrag` 不清 `protyle-wysiwyg--hiderange`，实测确实残留 | **残畘后要查是否自愈**：实测松手后 `documentSelf.onmouseup` 会清（`:true` → `:false`），且 `--hiderange` 的每次 mousedown 入口也无条件清 → 无用户可见后果，降为观察项 |
 | 「点击过该区域」当作交互已达成的证据 | 我用一次 `page.mouse.click` 断言「只读下点击也无法清除块选择高亮」 | **必须用 `elementFromPoint` 验证命中目标**：该次点击落在面包屑空白区（`protyle-breadcrumb__space`）而非块内。工具层的坐标误差会被当成产品行为，且这类假结论看上去很合理 |
+| 以「某平台的实现是空函数」为由报告跨平台功能缺口 | `flushdns_other.go` 的 `flushDNS()` 为空实现，据此断言「Linux / macOS / Docker 缺少 DNS 缓存刷新、重试失效、重试预算被未发生的刷新占用」 | **先查该功能的平台范围声明再判缺口**：`flushdns_windows.go` 的 build tag、`app/changelogs/v3.7.0` 的「Windows 上…自动刷新本地 DNS 缓存并重试」、issue #17936 的标题均明确限定 Windows；且 Go 的解析器自身不做 DNS 缓存、alpine 容器内无系统级解析缓存，补齐收益有限。**同一处真正的残留只有日志措辞**（共享路径用了已完成/进行时的说法），属日志正确性，且我原有两条推论均被推翻——「5 分钟节流会跳过重试」错（首次 DNS 错误在非 Windows 上同样会重试，Windows 在同一窗口内也跳过）、「重试预算被未发生的刷新占用」错（门控依据是上次重试的时间戳，与是否刷新无关） |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 

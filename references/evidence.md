@@ -2281,6 +2281,49 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 
 **清场**：4 个取证文档（`audit-r35-state`/`-table`/`-tabs`/`-container`）已全部删除并逐个回读确认搜索为空。
 
+## 第三十六轮（2026-09-17）：同步错误提示的两处文案缺陷（已提 #19600、#19601）+ 一条被推翻的候选
+
+**触发**：用户提供 Docker 内核的同步失败 system log（DNS 解析失败 + 云端空间不足），要求「确认代码层面的问题，存在就提 issue」。
+
+**去重命中（先读登记表）**：#14193「备份失败：cloud storage limit size exceeded (Provider: SiYuan) v3.1.22」——
+同一路径、同一用户可见文案。但它是 `state_reason = completed` 而 `git log --grep=14193` **空手而归**（无任何关联提交），
+维护者的处理只是解释「配额确实已满」；该 issue **已锁定**，无法追加评论 → 只能以新 issue 携带新证据，并把「同一处已有报告」如实写进正文。
+
+**发现一（#19600）：快照上传路径漏映射配额 sentinel**
+
+- `UploadCloudSnapshot`（`kernel/model/repository.go:1512`）只映射 `ErrCloudBackupCountExceeded`（1544，Lang 154），
+  配额 sentinel 落到 `formatRepoErrorMsg`（`kernel/model/sync.go:870`，无该分支）→ 用户看到
+  `备份失败：cloud storage limit size exceeded (Provider: SiYuan)`，中英混排且无处理建议。
+- 该 sentinel 由 dejavu 的 `UploadTagIndex` 在剩余空间不足时返回（`backup.go` 的 `uploadTagIndex`，两处 `availableSize` 判断）。
+- 同族 4 条同步路径各有一份映射（`repository.go:1947`/`2030`/`2141`/`2287`）→ 新增判据 **P43**。
+- 权威依据：同一函数相邻分支已为 `ErrCloudBackupCountExceeded` 本地化，同族 4 处也为该 sentinel 本地化
+  → 「数据仓库与同步类错误要本地化」是该子系统在维护的不变量。
+
+**发现二（#19601）：provider 错位的配额文案**
+
+- dejavu `cloud/local.go` 的 `GetAvailableSize()` 返回 `util.GetFreeDiskSpace(endpoint)`（磁盘可用字节数），
+  `BaseCloud` 其余 provider 返回 `Conf.AvailableSize`（`buildCloudConf` 只对官方云填账号配额，其余 2 TiB 默认值）。
+  因此该 sentinel 实际只可能由**官方云（真实配额）**与**本地文件系统（磁盘可用空间）**触发。
+- 4 处映射一律替换为 Lang 43 / Lang 68（云端配额 + 订阅引导），数值取 `userSiYuanRepoSize`，
+  且整体替换把「同步失败：」前缀与 ` (Provider: Local File System)` 后缀一起丢掉 →
+  本地磁盘将满被报成云端空间不足，trial 账号还会被引导去订阅（订阅不改变本地磁盘）。
+- 「遗漏而非取舍」的依据：同文件 1483/1529/1575 的 provider 分支、3383 起的云端配额展示只对官方云生效。
+
+**被挑战门降级、未提 issue 的一条**：`flushdns_other.go` 空实现 + 共享层日志声称已刷新。
+第一轮推翻了我的三条功能论断（首次 DNS 错误在 Linux 上**会**重试、节流与 Windows 等价、Go 解析器自身不缓存 DNS），
+功能范围是刻意的（#17936 标题与 v3.7.0 三语 changelog 均写 Windows）→ 残留只是日志措辞，写入误报表。
+
+**方法论增量**：
+
+1. **降级理由与发现理由都要验技术断言**。本轮第一轮挑战门直接推翻了我写错的功能论断（「节流会跳过重试」），
+   而它当时看起来完全合理——这正是「断言必须再验」的另一个方向。
+2. **挑战门第二轮阻止了一个有害修法**：把 4 处映射下沉进 `formatRepoErrorMsg` 会让 Local 的磁盘不足
+   被改写成云端文案 + 订阅引导。修法审查与发现审查同等必要，尤其当建议形如「统一到共享函数」。
+3. **既往 issue 要看 `state_reason` 与关联提交，不要看 `state`**。`completed` 在本例中不等于修复。
+4. **本机取证陷阱（Windows）**：`gh api` 的 UTF-8 stdout 经 PowerShell 管道会按 GBK 解码，
+   POST 回执看起来像「正文已损坏」，实际远端数据正确。回读要 `cmd /c "gh ... > file"` 让重定向捕获原始字节，
+   再用读取工具核对；不要在 `ConvertFrom-Json` 的管道下游下结论。
+
 ## 如何更新本文
 
 每轮审计后追加：
