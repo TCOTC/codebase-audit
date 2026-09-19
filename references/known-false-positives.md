@@ -57,6 +57,8 @@
 | 「取消操作时未清临时态 ⇒ 缺陷」 | 拖拽列宽途中按 Esc，`cancelDrag` 不清 `protyle-wysiwyg--hiderange`，实测确实残留 | **残畘后要查是否自愈**：实测松手后 `documentSelf.onmouseup` 会清（`:true` → `:false`），且 `--hiderange` 的每次 mousedown 入口也无条件清 → 无用户可见后果，降为观察项 |
 | 「点击过该区域」当作交互已达成的证据 | 我用一次 `page.mouse.click` 断言「只读下点击也无法清除块选择高亮」 | **必须用 `elementFromPoint` 验证命中目标**：该次点击落在面包屑空白区（`protyle-breadcrumb__space`）而非块内。工具层的坐标误差会被当成产品行为，且这类假结论看上去很合理 |
 | 以「某平台的实现是空函数」为由报告跨平台功能缺口 | `flushdns_other.go` 的 `flushDNS()` 为空实现，据此断言「Linux / macOS / Docker 缺少 DNS 缓存刷新、重试失效、重试预算被未发生的刷新占用」 | **先查该功能的平台范围声明再判缺口**：`flushdns_windows.go` 的 build tag、`app/changelogs/v3.7.0` 的「Windows 上…自动刷新本地 DNS 缓存并重试」、issue #17936 的标题均明确限定 Windows；且 Go 的解析器自身不做 DNS 缓存、alpine 容器内无系统级解析缓存，补齐收益有限。**同一处真正的残留只有日志措辞**（共享路径用了已完成/进行时的说法），属日志正确性，且我原有两条推论均被推翻——「5 分钟节流会跳过重试」错（首次 DNS 错误在非 Windows 上同样会重试，Windows 在同一窗口内也跳过）、「重试预算被未发生的刷新占用」错（门控依据是上次重试的时间戳，与是否刷新无关） |
+| 「插件菜单里同一插件出现两次、标签还像包名 ⇒ 代码缺陷」 | 3.8.4 起插件菜单用分隔线分成「顶栏按钮」与「插件设置」两组，同一插件若既有按钮又有设置就会出现两次；设置项标签取 `plugin.displayName`，内核在无本地化显示名时回退到 `plugin.json` 的 `name`，于是标签看起来像包名（`ref_meun_def_fill`） | **这是需求 #19396 的定义行为**：诉求原文即「上方显示顶栏按钮，下方显示插件设置」「每个插件的设置入口仅显示一次」，维护者在 issue 下确认并给出提交 `5470398569`，`app/src/plugin/topBar.test.ts` 的首个用例把该顺序固定为契约。标签来源（displayName，回退包名）与集市「已安装」列表同源，不是插件菜单引入的。**要报只能报 product 决策**（例如标签带上包名以消除歧义），需先取得权威依据 |
+| 「析构时未清空的注册数组」 | `app/src/plugin/uninstall.ts:88` 对 `plugin.statusBarIcons` 逐个 `remove()` 但不清空数组（同函数 `:74` 对 `topBarIcons` 有 `length = 0`） | **无消费方即无业务表现**：实例随后被 `markPluginDisposed` 并从 `app.plugins` 摘除，全仓没有读取已析构实例 `statusBarIcons` 的代码（`mountPlugin`/`openTopBarMenu` 只读 `topBarIcons`），与「声明了但永不填充的模型集合」同类，属代码卫生问题 |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 

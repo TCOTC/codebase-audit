@@ -2324,6 +2324,66 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
    POST 回执看起来像「正文已损坏」，实际远端数据正确。回读要 `cmd /c "gh ... > file"` 让重定向捕获原始字节，
    再用读取工具核对；不要在 `ConvertFrom-Json` 的管道下游下结论。
 
+## 第三十七轮（2026-09-19）：插件菜单两处候选的定向审计（1 条确认 + 1 条被权威依据驳回）
+
+**触发**：用户给出「顶栏插件菜单里多了几个没见过的插件设置选项」的截图与插件目录，要求审计上一轮报告里
+列为「代码层面两处值得修的地方」的两条候选。范围＝`app/src/plugin/openTopBarMenu.ts` 与其挂载/注册链路。
+
+**基线**：`git fetch` 后 `HEAD == origin/dev`（`004efcd8a9`，0 落后）；`app/stage/build/desktop` 与 `mobile`
+产物时间戳 2026-09-19 00:24，均**晚于**被审代码的最后改动（`openTopBarMenu.ts` = 2026-09-13 `5470398569`），
+故允许做行为断言；产物早于 `80e825888f`（11:35，只改 `loader.ts` 的插件停靠栏图标刷新），与本轮结论无关。
+
+**发现（CONFIRMED，新判据 D1o + 模式 P44）：打开插件菜单会永久注销「未挂载」的插件顶栏按钮，
+使移动端「取消固定」在重启后不可逆**
+
+- `app/src/plugin/openTopBarMenu.ts:30-33`：`if (!document.contains(item)) { plugin.topBarIcons.splice(i, 1); ... }`，
+  而 `:36-57` 的 pin/unpin 子菜单在**剪枝之后**才构造 → 被剪掉的项永远拿不到「固定」入口。
+- 让元素合法离开 DOM 的两个状态位：① 移动端「取消固定」（`index.ts:326-331` 与 `loader.ts:223-227` 都按
+  `LOCAL_PLUGINTOPUNPIN` 跳过挂载，`setStorageVal`→`/api/storage/setLocalStorageVal` 持久化，`getLocalStorage` 复原）；
+  ② `isWindow()` 宿主（`app/window.tpl` 无 `#toolbar`，但该宿主没有插件菜单入口，不可达）。
+- 该 `splice` 由 `19c5a9952e`（2025-08-21，issue #15455）引入，原代码是 `forEach` + `return`（只跳过）；
+  #15455 的诉求是「插件应能在任意时机添加顶栏按钮」，即**清理永不再挂载的图标**是有理由的——
+  这正是本条容易漏判的原因（单看完全合理）。
+- **两路取证**：① 用仓库自身的 VM 手法执行**真实** `openTopBarMenu.ts`：`document.contains=false` 时
+  `topBarIcons.length` 1→0、菜单无该项、`是否出现 pin 子菜单 = false`，对照组（`contains=true`）保留且子菜单为
+  `["unpin","play"]`；② 真实渲染（`/stage/build/desktop/`，内核 3.8.5-alpha.4）：把 `plugin_Whisper-Plus_0`
+  `el.remove()` 后点击 `#barPlugins` → `Whisper-Plus` 的 `topBarIcons` 1→0，菜单 itemIds 只剩其余 4 个图标，
+  设置组只有 `snippets`/`top-bar-text`（Whisper-Plus 无设置 → 该插件在菜单里**完全消失**）；刷新后恢复。
+- 权威依据：维护者在 #19305 下写明「顶栏插件图标的隐藏入口统一为右键……**移动端行为不变**」，
+  且 `openTopBarMenu` 自己提供 `pin` 分支 → 取消固定被设计为**可逆**；`statusBarIcons` 同族只把
+  `document.contains` 当「已挂载则跳过」守卫、从不剪枝。
+- 触发条件：移动端取消固定某插件的顶栏按钮 → 重启应用 → 打开插件菜单（`mobile/menu/mainMenu.ts:229`）。
+  普通桌面操作看不到（桌面走 `data-entry-hidden`，元素始终在 DOM 中）。
+- 严重度低：可用「禁用再启用插件」恢复；但菜单内无恢复路径，且完全静默。
+
+**被驳回（不报）：插件菜单里同一插件出现两次、且标签像包名**
+
+- 3.8.4 的 `5470398569`（#19396）把设置项从按钮子菜单提出来、用分隔线分成两组；`#19396` 的诉求原文即
+  「上方显示顶栏按钮，下方显示插件设置」「每个插件的设置入口仅显示一次」，维护者在该 issue 下确认并给出该提交
+  → **定义行为**，`app/src/plugin/topBar.test.ts` 的首个用例把它固定为契约。
+- 标签取 `plugin.displayName`（内核 `GetPreferredLocaleString(DisplayName, Name)`，无本地化显示名时回退包名），
+  与集市「已安装」列表同源，不是插件菜单引入的；实测本工作空间 `loadPetals` 的 6 个插件显示名均为中文。
+- 结论：属 product 决策（可在标签里带包名以消除歧义），无可引用权威依据 → 按挑战门驳回，写入误报表。
+
+**附录观察项（不报）**
+
+- 用户截图里的 4 个名字（`HZ-recycling-center`、`HZ-optimized-table-insert-style`、`ref_meun_def_fill`、
+  `jump_to_ref_location`）**不在本工作空间已加载的插件中**（本机 desktop 只加载 6 个：snippets、install-package、
+  top-bar-text、scroll-zoom、Whisper-Plus、image-squeeze）→ 该截图来自另一前端实例/设备，
+  与其 `data/plugins` 内容相关，不构成内核或前端缺陷。
+- `app/src/plugin/uninstall.ts:88` 清 `statusBarIcons` 的元素但不清空数组（`topBarIcons` 在 `:74` 有
+  `length = 0`）——已析构实例无消费方，属代码卫生，按既有先例不报。
+- 打开插件菜单会写插件实例状态（`splice`）是**渲染期副作用**：菜单只是展示入口，却改变了注册表，
+  这本身是 P44 的成因；`statusBarIcons` 的对照说明该做法不是全仓惯例。
+
+**方法论增量**
+
+1. **「有理由的代码」不等于无缺陷**：该 `splice` 是为修 #15455 而写的正常清理逻辑，单看每处都成立；
+   只有把「另一个状态位」与「恢复入口的相对位置」一起看才成立——**顺序即可达性**。
+2. **注册类数组要问「它到底是台账还是渲染缓存」**：同族（`statusBarIcons`）不对该谓词剪枝，是最省力的反证。
+3. 候选里「菜单不区分来源 / 标签只有显示名」这类**看不到权威依据**的条目，按挑战门必须驳回并写入误报表，
+   否则会把 product 决策当缺陷长期占用报告篇幅。
+
 ## 如何更新本文
 
 每轮审计后追加：
