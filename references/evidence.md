@@ -2384,6 +2384,54 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 3. 候选里「菜单不区分来源 / 标签只有显示名」这类**看不到权威依据**的条目，按挑战门必须驳回并写入误报表，
    否则会把 product 决策当缺陷长期占用报告篇幅。
 
+## 第三十八轮（2026-09-19）：块 ID 重映射的跨入口漂移（判据 B / D1，已提 #19659）
+
+**触发**：上一轮回答末尾列出「页签标题的重映射存在两套同语义实现（`kernel/model/tabs.go` 的
+`remapTabTitleBlockIDs` 与 `duplicate_doc_tree.go` 的内联实现）」，用户要求判断是否值得改进、值得则提 issue。
+范围＝「块 ID 重生成后的正文重映射」。
+
+**基线**：`git fetch origin dev` 后 `HEAD == origin/dev`（0 落后 0 领先），工作树干净。
+
+**发现（CONFIRMED）**：会重建块 ID 的操作（`DuplicateDoc`、历史回滚重建已删除的文档、`recreateTree`、
+冲突文档恢复）只重映射块引用，不重映射正文里的块超链接 `[x](siyuan://blocks/<id>)`。
+
+- `kernel/model/tree.go:45` 的 `resetTree` 里唯一写 `TextMarkAHref` 的是 `kernel/model/tabs.go:15` 的
+  `remapTabTitleBlockIDs`（`kernel/model/tree.go:103` 调用），守卫为 `ParentIs(ast.NodeTabItem)`。
+  **`ParentIs` 在 lute 里是「祖先链匹配」**（`ast/node.go:930`，遍历 `Parent` 链、深至 128 层），不是「直接父节点」，
+  因此该函数的作用域是**整个页签项**（含正文），而**页签项外的链接完全无人处理**——
+  与它自己的注释「改写页签标题内的块引用和块链接」也不一致。
+- 临时同包测试（`kernel/model/zz_audit_tmp_remap_test.go`，用后已删）调用真实实现实测：
+  `resetTree` 后 `block-ref = 新 ID (remapped=true)`、`[x](siyuan://blocks/id) = 旧 ID (remapped=false)`、
+  `[x](siyuan://blocks/id?focus=1) = 旧 ID (remapped=false)`；`remapTabTitleBlockIDs` 对页签项内的
+  `?...` 链接同样不命中（`TrimPrefix` 后整体查表）；`remapDuplicateDocTreeReferences` 三项全部改写并保留后缀。
+- **同一操作的两个菜单入口因此行为不一致**：文档树 - 复制 - 创建副本（`duplicateDoc`，走 `resetTree`）不重映射块链接；
+  复制 - 带子文档创建副本（`duplicateDocTree`）按 `docs/API-CONTRACTS.md` 的契约重映射
+  （Internal block references, block links, and explicit block IDs in query embeds are remapped across the copied tree）。
+- 第二条权威依据：`kernel/model/import.go:680` 的 issue #9083 修复注释（导入 .sy.zip 时块超链接必须跟着新块 ID 走）。
+- 业务表现：副本里的块引用指向副本、同一段落的块超链接仍指向源文档；`recreateTree` 与历史回滚场景下旧块 ID
+  已不存在，链接成为死链。
+- 同族共 **6 处**实现（`tabs.go:15`、`import.go:666`、`template.go:1071`、`template_doc_tree_render.go:327`、
+  `duplicate_doc_tree.go:213`、前端 `app/src/protyle/util/tabsCopy.ts:31`），只有 `duplicate_doc_tree.go`
+  支持 `?`/`#` 后缀（先剥离再查表、保留后缀）。
+- 已提 issue **#19659**（state=open；title 73/73、body 2444/2444 逐字符回读一致）。
+
+**去重**：`evidence.md` 第十二轮曾把 `template_doc_tree_render.go:295`「重生成块 ID 后未调
+`RemapTabsActiveIDs`/`WalkWithTabTitles`」登记为观察项（未上报）——那是同族的**另一处**（页签选中态与引用未被处理），
+本轮的位置（`resetTree` 的链接重映射）与结论（跨入口不一致）不同，属增量。
+`gh api search/issues` 以 5 组英文 + 5 组中文关键词覆盖 open + closed 检索，无同类报告。
+
+**方法论增量**
+
+1. **`ParentIs` 是祖先匹配，不是「父节点是」**。按名字读会把「作用域＝整个页签项」误判为「作用域＝标题所在段落」，
+   进而把「页签项外的链接无人处理」误判成「所有链接都已处理」。**判作用域前先读谓词实现**——
+   这是 D1b 恒假守卫的镜像：那里看调用者，这里看谓词本身的语义。
+2. **「两套同语义实现」要按入口做差集，而不是按函数做 diff**。本轮把 `remap*` 家族全部列出后，
+   真正的业务表现落在「同一菜单操作的两个入口行为不同」；只比较两个函数的写法会被判为代码卫生，而不是缺陷。
+3. **临时同包测试是这类漂移最省力的取证**：直接调用两处真实函数、打印改写前后的字符串，一次
+   `go -C kernel test -tags "fts5 sqlcipher" ./model -run <临时用例> -count=1 -v` 就给出「谁改了、谁没改」的对照，
+   无需构造端到端夹具。附带坑：`treenode.NewParagraph(id)` 要求块 ID 形态（内部取 `id[:14]`），
+   传内容字符串会 panic，传 `""` 才会自动生成。
+
 ## 如何更新本文
 
 每轮审计后追加：
