@@ -2519,6 +2519,54 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 4. **指南文本在本轮是「需求侧权威」**：判据是「文档可用于证明承诺了某能力，
    不可用于证明某行为是有意设计」。这两件事此前被我混用，本轮首次分开。
 
+## 第四十轮（2026-10-07）：内核 util / server / filesys / cache 定向审计（6 条，未提 issue）
+
+**范围选择**：用户从候选范围中选定「内核 util / server / filesys / cache」（103 个非测试文件 ≈ 23.8k 行）。
+基线 `git fetch origin dev` 后 `HEAD == origin/dev`（`089a83e5be`，0/0），工作树干净。**取证基线**：本轮全部发现
+都只需「读代码 + 读厂商文档/上游源码」即可定性，**不依赖前端产物**（第三十四轮的 ⑦ 号陷阱不适用）。
+
+**机械扫描（增量 = 0，但仍是「真实的 0」）**：`scan_duplicated_literals.py --min-files 4` 对四个目录只出 **7 条**，
+逐条回读后全为噪声：`assets/`（5 处路径前缀）、`image/{jpeg,png,webp,gif}`（多模态白名单）、`127.0.0.1`、`conf.json`。
+**「少到可以逐条读完」不等于「没扫到」**——脚本在扫描根不存在时以退出码 2 报错，本轮用相对路径时确实触发过一次退出码 2。
+
+### 一、发现（6 条，**均已提 issue**）
+
+| 判据 | 发现 | 置信度 |
+|---|---|---|
+| D1b / D1d | `kernel/server/serve.go:1935-1937` 的三条**裸类型断言** `request["cmd"].(string)` / `["reqId"].(float64)` / `["param"].(map[string]any)`，唯一守卫是 `s.Get("app")`（只证明**会话**有 app，不约束消息体）→ 任何人发 `{}` 即 panic；panic 发生在 melody 的 read 协程内，**melody 无 recover**（`melody@v1.4.0/session.go:118-153` 直接调 `messageHandler`），`cmd.Exec` 的 `logging.Recover()` 也包不住（在 `NewCommand` 内、`Exec` 之前）→ **整个内核进程被终止** | 高 |
+| D4 变体 | `kernel/util/session.go:133` `lockSec := authThrottleLockBaseSec << (throttle.FailCount - authThrottleMaxFail)`：锁定期间每次请求仍 `FailCount++`（调用点 `api/filetree.go:1444`、`model/session.go:332/403`、`server/proxy/publish.go:217`，注释明写「锁定期间持续记录失败」）→ `FailCount ≥ 64` 时移 64 位得 0、`59..63` 位时最高位落到 bit63 得**负数**，`if authThrottleLockMaxSec < lockSec` 钳位失效，`LockUntil` 落在过去 → `AuthThrottleCheck` 删记录并返回 0 → **限流被清零**（本机 `int` 64 位；GOARCH=386 上更早触发） | 高 |
+| D3 | `kernel/util/anthropic.go:500-516` 的 `anthropicFinishReason` 只认 5 个 `stop_reason`，厂商枚举共 7 个：漏 `pause_turn`（长 turn 暂停）与 **`model_context_window_exceeded`**（超上下文，长对话里必然出现）→ `default` 返回 error，`message_stop`（`anthropic_stream.go:218`）处把**已经流出来的内容整体丢弃**。对照侧 `openai_completion.go:527-538` 的 `responseFinishReason` 对未知值一律回退 `Stop` | 高 |
+| B / D1i | `kernel/util/websearch.go:99-103` 不检查 `resp.StatusCode`，`mcpResponse` 结构体**没有 `Error` 字段** → 401/429/500 与 JSON-RPC error 全部落成 `text == ""` → 返回 `("No search results found. Please try a different query.", nil)`。同族 `webfetch.go:62-64` 对 `>=400` 返回 error、`httprequest.go` 把状态码交调用方判断 | 高 |
+| D3 | `kernel/util/misc.go:159-160` 的 `HasUnclosedHtmlTag` 空元素白名单只有 6 个（`br/img/hr/input/meta/link`），HTML 规范的 void elements 是 **14** 个（缺 `area/base/col/embed/param/source/track/wbr`）→ 模板输出只要含这些标签就被判「有未闭合标签」，唯一调用点 `kernel/sql/av.go:497` 把**整段输出 `EscapeHTML`**（本应渲染为 HTML 的模板单元格变成源码文本） | 中 |
+| 资源与生命周期 | 包级 map 在**写侧不加锁**且只增不清，读侧在别的 goroutine：`kernel/util/rune.go:88` 的 `NativeEmojiChars`（写侧 `InitEmojiChars` 由 `model.InitAppearance()`/HTTP handler 触发，读侧 `model/assets.go:2523-2526` 的 `emojisInTree`）与 `kernel/util/rhy.go:58`（`cachedRhyResult` 的**快路径在锁外**读 `rhyResultCacheTime` + `len()`，写侧 `getRhyResult0` 持锁并让 `SetSuccessResult(&cachedRhyResult)` **就地**反序列化写入）。Go 的并发 map 读写是 **unrecoverable fatal**，直接终止内核 | 中（机制已证，未跑 `-race`） |
+
+**已提 issue（2026-10-07，逐字段回读一致，title / body 长度均相等）**：
+#20193 WS 消息裸断言致内核终止 · #20194 认证限流左移溢出清零 · #20195 Anthropic `stop_reason` 漏 2 个成员 ·
+#20196 网页搜索吞掉 HTTP / JSON-RPC 错误 · #20197 数据库模板空元素白名单 6/14 → 误转义 · #20198 两处并发 map 读写。
+
+建前用 `gh api -X GET search/issues` 对 open + closed 检索 15 组关键词：`auth throttle`、`认证 限流 锁定`、`anthropic stop_reason`、
+`model_context_window_exceeded`、`pause_turn`、`No search results found`、`websearch exa`、`HasUnclosedHtmlTag`、
+`模板 转义 未闭合`、`concurrent map read`、`NativeEmojiChars`、`ws "type assertion" panic` 等全部 `total_count=0`；
+仅 `"fatal error"` 命中 **#19346**（create 操作里 AST 树泄漏引起的另一处 map race，位置不同），
+已在 #20198 正文中显式区分。未随创建载荷提交 labels（无 push 权限时会被静默丢弃，按 `AGENTS.md` 不做补标签请求）。
+
+### 二、被挑战门拦下/降级的候选（勿重报，除非有新证据）
+
+- **`working.go:171-181` 的 `if ContainerStd != Container { ServerPort = FixedPort }` 是恒假守卫**：`RunInContainer` 只在 `initEnvVars()` 里赋值，而 `initEnvVars` 只被 `InitWorkspace`（`:95`）调用，该守卫却在 `:181` 之前的 `:175` 执行（引入者 `13602b8aed`/PR #9720）。但**当前无可观测后果**：容器内 `ServerPort` 保持 `0` 后由 `proxy/fixedport.go` 的反代兜住 6806，唯一差异是 `UserAgent` 记成 `std`、`Conf.ServerAddrs` 是随机端口 → 降为观察项，不占报告主条目
+- **`util/tooloutput.go:46` 的 `filepath.Join("data", …)`**（写盘用绝对 `DataDir`、回给智能体的是相对路径）→ **是既定形式**：`DataDir` 恒为 `<ws>/data`，相对路径正是给智能体 file 工具的输入 → 误报
+- **`filesys/tree.go:441/447/461` 的 `filelock.Lock` + 两处 `Unlock`** → 逐分支核对为**配对**（错误分支 `Unlock` 后 return，成功分支 `Close` + `Unlock`），不是重复解锁
+- `util/ocr.go:377-405` 的 `TesseractLangs` 守卫查的是**过滤前**的 `langs`，过滤后可能为空数组而 `TesseractEnabled` 仍为 true → `ocr.go:286` 拼出 `-l ""`（需把 `SIYUAN_TESSERACT_LANGS` 设成与已装语言无交集的集合）；机制成立但触发条件苛刻，观察项
+- `util/file.go:506` 的 `DataSize()`（`strings.Contains(rel,"assets")`）与 `workspace_storage.go:149` 的 `workspaceStorageAsset` 是同一「资源大小」的两套口径（前者把 `plugins/*/assets`、`myassets` 也算进去）→ 属 B 类漂移但老口径已无 UI 消费点（只在 `Conf.Stat`/日志），观察项
+- 另排除：`appearance_ignore_migration.go` 严格匹配 7 行隔离块（有测试、fail-safe）、`path_guard.go` 未发现第二份黑名单实现、`etag.go` 与 qetag 官方实现逐行等价且无远端比对调用点、`ocr_relink_batch.go` 的三重并发守卫完整、`cmux.go`/`operation_watchdog.go`/`kdf.go`/`encrypted_index.go` 逐文件读完无缺陷
+
+### 三、方法论增量
+
+1. **厂商文档是闭合集合的权威源，且能一次核两组**：本轮用一次 fetch 同时确认了 Anthropic 的 `stop_reason` **7 个成员**与 `Base64ImageSource.media_type` **4 个成员**——后者正是 `openai.go:792`/`anthropic.go:335` 那一对白名单的权威依据，从而把它从「疑似漂移」定为「同一策略的两份字面量」（低危，不报）。
+2. **「守卫通过」不等于「值合法」**：`s.Get("app")` 只证明**会话**有 app（`AddPushChan` 在 `:139` 先 `Set("app")` 才检查 id/type），完全不约束**消息体**的键；把存在性守卫当成结构校验是 D1b 的另一种形态。
+3. **越界把「有界惩罚」反转为「无惩罚」**（D4 的新变体）：`base << n` 在 `n ≥ 位宽` 时为 0、在最高位落到符号位时为负，于是紧随其后的 `if 上限 < 值` 钳位**恒不成立**。凡「指数退避 + 上限钳位」都要检查 `n` 是否有界；本仓 `session_test.go` 只测到 11 次失败，够不到溢出点——**测试盲区与溢出点之间的距离就是这类缺陷能长期存活的原因**。
+4. **子代理产出必须逐条回主上下文核对**：3 组子代理共 18 条候选，回读后 **6 条进入报告**；被丢掉的主要是三类——「用途不同的各自白名单」（MIME 三处）、「无消费方」、「可达性未证」（`tooloutput` 相对路径）。
+5. **机械扫描为 0 或个位数时，先自证「不是没扫到」再收工**（与第三十九轮同源，本轮再次用到）。
+
 ## 如何更新本文
 
 每轮审计后追加：
