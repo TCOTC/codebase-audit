@@ -2567,6 +2567,62 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 4. **子代理产出必须逐条回主上下文核对**：3 组子代理共 18 条候选，回读后 **6 条进入报告**；被丢掉的主要是三类——「用途不同的各自白名单」（MIME 三处）、「无消费方」、「可达性未证」（`tooloutput` 相对路径）。
 5. **机械扫描为 0 或个位数时，先自证「不是没扫到」再收工**（与第三十九轮同源，本轮再次用到）。
 
+## 第四十一轮（2026-10-07）：内核 bazaar / job / task / conf / search / plugin 定向审计
+
+**范围选择**：用户从候选范围中选定「内核 bazaar / job / task / conf / search / plugin」（112 个非测试 .go 文件 ≈ 24.5k 行）。
+这是本 skill 首次定向覆盖该组合：`kernel/plugin/` 此前只有第 15 轮顺手碰过 `api_agent.go`（判为误报）与 `box_lease.go`；
+`kernel/bazaar/`、`kernel/job/`、`kernel/task/`、`kernel/conf/`、`kernel/search/` 此前从未系统扫过。
+**基线**：`git fetch origin dev` 后 `HEAD == origin/dev`（`089a83e5be`，0 领先 0 落后），工作树干净。
+取证全部基于源码阅读与上游源码核对，不依赖前端产物（第三十四轮 ⑦ 号陷阱不适用）。
+
+**机械扫描（真实的零，非「没扫到」）**：
+
+| 扫描 | 结果 |
+|---|---|
+| `scan_duplicated_literals.py --min-files 4`（六个根，112 文件） | **0 条** |
+| 同上 `--min-files 2` | 9 条，逐条回读全为噪声（`/package/` 模板、`icon.png`、`kernel.js`、`JSON`、`X25519`、`Symbol.asyncIterator`） |
+| 全仓 `--min-files 4`（kernel + app/src，1822 文件）中涉及本范围的条目 | 仅 MIME 类型（`text/event-stream`、`application/octet-stream`）、配置文件名（`plugin.json`、`template.json`、`widget.json`）、`127.0.0.1` |
+
+两个脚本均以绝对路径运行且退出码 0（先用相对路径确认触发过退出码 2），符合判据 A 的「先自证不是没扫到」。
+
+### 一、发现（2 条进主报告；用户本轮的授权是只读审计，未提 issue）
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1 / D4 | `kernel/task/queue.go:85-101` `containTask` 遍历任务时，**遇到第一条同 action 的任务只要参数不匹配就直接 `return false`**，不再扫描其余同 action 项 → `uniqueActions` 的「同一 (action, args) 至多一条」去重失效。两处 `return false` 在 `:89`（参数个数不同）与 `:94`（参数不相等），均在 `if t.Action == task.Action` 块内。权威依据是同文件 `:234` 的注释「uniqueActions 描述了唯一的任务，即队列中只能存在一个在执行的任务」+ 参数比较逻辑本身的存在。受影响的是带实体参数的动作：`RepoCheckout(id)`、`ReloadProtyle(id)`、`ReloadAttributeView(avID)`、`SetDefRefCount(defID)`、`UpdateIDs(blockIDs)`。`git log -L 85,101:kernel/task/queue.go` 显示该结构自 `9560277d0c`（#12393）引入后未变，仅 `63ae805106`/`30bf687d1b` 改过比较器 → **长期潜伏，非新引入** | 高（6 行函数，代码可证；`gulu.Str.Contains` 已核为精确匹配 `v == str`，排除子串误判） | 未提 issue |
+| D1 / 资源与生命周期 | `kernel/plugin/plugin.go:1452` 的 `events.In <- e` 是裸通道写；`events` 为 `chanx.NewUnboundedChan[sse.Event](ctx, 16)`（`:1396`），消费方是 `:1525-1543` 的 `for/select`（`ctx.Done()` 与 `c.Request.Context().Done()` 两条 return）。`ctx` 取消后 chanx 的 `process()` 直接 return（`chanx@v1.2.0/unbounded_chan.go` 外层 select 首支），此后 `In`（容量 16）无人读 → 设 pump 退出时 `In` 内已有 k 项，则再成功入队 16−k 次（这些同样不会被送达）后第 16−k+1 次**永久阻塞**。`port_send` 是 goja 原生函数、在 VM 线程上同步执行 → 整个插件 JS 冻结（`p.worker.Run` 串行化把 `onclose` 也堵住），随后停用/重载/卸载卡在 `invokeHook`，内核正常退出（`force:false` → `model.Close` → `OnKernelPluginsStop` → `PluginManager.Stop` 的 `wg.Wait()`）挂起。同一文件 `done <-`（`:1513`/`:1520`）与 `server.go:346-350` 的 `chunks` 都用了带 `ctx.Done()` 的 select，裸写是唯一异类 | 高（机制逐环 + chanx/goja 源码核对；未做端到端实测） | 未提 issue |
+| A（观察项） | `.siyuan-package-install-` 前缀在生产者 `kernel/bazaar/install.go:202` 与消费方 `kernel/model/bazaar.go:305`、`kernel/model/boot_appearance.go:146` 三处裸写；其中 `bazaar.go:305` 在 `ParsePackageJSON` **之前**拦截，失效会生成 `invalid-manifest` 记录（承重点与另两处不同），因此不能靠「包名首字符 `.` 一律拒」省掉 | 中 | 附录观察项 |
+| 资源与生命周期（观察项） | `kernel/plugin/abort/signal.go:145-149` `AddAbortHook` 只 append、仅在 `triggerAbort` 清空；`api_client.go:155` 每次 `fetch(...,{signal})` 登记一个 hook，`streams/pipe.go` 的 `pipeTo({signal})` 同 → 插件复用长命 `AbortController` 时 `goHooks`/`listeners` 随调用次数单调增长（abort 时多出 O(n) 空转） | 中 | 附录观察项 |
+| 资源与生命周期（观察项） | `kernel/bazaar/plugin.go:94-104` `cachedBackend` 包级变量无同步（同包 `installSizeCache`/`bazaarInfoCache` 都带锁）；并发只在「全新进程首次调用」的窗口，判错仅影响该轮插件兼容性标记、下次刷新自愈 | 低 | 附录观察项 |
+
+### 二、被挑战门拦下/降级的候选（勿重报，除非有新证据）
+
+- **`Blob.prototype.stream()` 缺失 → DOWNGRADED 至 LOW（文档级）**：`kernel/plugin/formdata/blob.go:264` 与 `formdata.go:59-60` 都写「沙箱没有 ReadableStream，因此不提供 stream()」，而 `streams/module.go` 的 `Enable` 会把 `ReadableStream` 挂上 globalThis（`sandbox.go:111-112` 依次调用两个 Enable）—— 该理由**从未成立**（不是「后来失效」，两个包由同一提交 `2d0a77e738`/#20118 引入）。但：① 该 shape 被测试锁死（`formdata/blob_test.go` 的 `TestBlobInterfaceShape` 断言 `typeof Blob.prototype.stream === "undefined"` 并锁定成员列表），改它必须同步改测试；② 真正的硬约束是**规范要求 `stream()` 返回 type "bytes" 的字节流，而 `streams` 包明确不实现字节流**（无 `ReadableByteStreamController`/BYOB reader）；③ 备选修法「调用时惰性解析全局 `ReadableStream`」**有害**（违反 `formdata.Host` 注册时捕获内建对象的防篡改设计）。→ 只值得一条「修正注释理由、写明真实约束」的文档修正，不作为缺陷上报。
+- **`invokeHook` 无界等待 → DOWNGRADED 至 LOW，且建议修法在全部调用点不可达**：`plugin.go:931` 是裸 `result := <-done`，而同族 `invokeAgentCapability`（`:454`）与 `callRpcMethod`（`:728-732`）都 select ctx。但：① petal `kernel.d.ts` 的 `IRequestInit.timeout` remarks **已明文承认**「`onunload` 中不设超时的 await 会让插件停止与内核退出无限期阻塞」，本条增量仅「`onload`/`onrunning` 同样适用 + 任意不落定 Promise 亦可」；② **按同族加 `case <-p.context.Done()` 在三个调用点全是死代码**——三个调用点（`onload`/`onrunning` ← `start()` ← `StartPlugin`；`onunload` ← `stop()` ← `stopLocked`）都运行在持有 per-plugin mutex 的 goroutine 上，唯一能取消 `p.context` 的 `stop()` 需要先拿同一把锁、`error()` 又必然发生在 `invokeHook` 返回之后 → 等待期间 `p.context.Done()` 永不关闭。真正需要的是**引入取消源或有界等待**（仓库内前端已有同类机制：`app/src/plugin/lifecycle.ts` 的 `teardownTimeout`），属产品取舍而非一行 select。
+- `NormalizeEntryVisibility`（`kernel/conf/appearance.go`）末尾两段**逐字重复的 if 块**（仅赋值不同）：第二段只在 `fallback` 本身非法时生效，属「二次回落」防御，非缺陷；不报。
+- `kernel/bazaar` 在线安装（`install.go:156` 的 `gulu.Zip.Unzip`）与本地安装（`local.go:139-141` 显式拒符号链接）对归档内容的处理不对称：机制成立，但集市官方打包在 Linux runner 上产出（正斜杠、无符号链接），自有仓库才可能命中 → 降为低，未上报。
+
+### 三、方法论增量
+
+1. **「最新一次改动碰过同一文件」不等于「它是本次缺陷的引入者」**：我（与第一轮子代理）都以为 `events.In <- e` 出自 `2d0a77e738`（该提交确实在 `server.go` 加了同一守卫），`git show 2d0a77e738 -- kernel/plugin/plugin.go` 核出它只动了 25 行且全是 `formdata`/`readableStream` 相关；实际引入者是 `e564ce7b1f`（#17487）/`c4ae1d44e5`（#17670）。**归因前必须看该提交实际改了哪些行**，而不是看提交标题与文件是否重合（与第十七轮「编号→提交不能只看提交信息」同源，方向相反）。
+2. **「同一文件/同族的另一处已有守卫」比「兄弟实现更完整」更稳**：`server.go` 的 `chunks` 是**背压**通道、`events` 是**即发即忘**队列，语义并不相同——若按「照抄兄弟实现」立论，会被「两者语义不同」驳回。正确立论是**危害类别相同**（生产者都在事件循环线程上同步执行、消费者都可能提前退出），因此守卫可移植。修法审查还要排除「用 `default:` 做非阻塞版」——那会在 pump 只是暂时积压时丢掉合法事件，比原问题更坏。
+3. **「注释声明的已知差异」要分两件事查：理由是否真实、约束是否真实**。`Blob.stream` 一例中理由（无 ReadableStream）是假的，但约束（规范要求字节流、本仓 streams 不实现）是真的，且 shape 被测试锁死 → 三者合起来把「缺陷」降为「文档修正」。**只查「理由是否真实」会得出「应当补实现」的错误结论。**
+4. **降级理由本身是技术断言时，要把可达性算到调用点**：`invokeHook` 那条的「对齐同族」建议看似无可指摘，但把取消者（`stop()` 需要 `pluginMu`）与等待者（`invokeHook` 持 `pluginMu`）并列一画，守卫立刻变成死代码。**「与同族写法一致」不构成建议成立的证明**，要额外回答「该守卫在这条调用路径上会不会被触发」。
+5. **`gulu.Str.Contains` 是精确匹配**（`string.go` 的 `func (*GuluStr) Contains` 即 `v == str`），不是子串匹配——本轮的子串误判猜测已被源码排除，后续可直接引用此事实。
+6. **子代理产出必须逐条回主上下文核验**：本轮 2 个子代理共给 10 条候选，回读后 2 条进主报告、2 条被挑战门降到文档级/观察项、3 条推翻（`parseRequest` 的单次 Read 截断、`writeStreamResponse` 的头序、`fetch` body 只认 ArrayBuffer 的「静默丢弃」），其余列入排除清单。
+
+### 四、本轮排除清单（后续轮次省去重复投入）
+
+- `kernel/search/hanconv_table.go`（2959 条）与 go-sqlite3 fork `sqlite3-binding.c` 的 `aSiYuanHanPages` 逐码点比对：only-in-Go 0、only-in-C 0、值不同 0；C 侧只对 3 字节 UTF-8 查表且 Go 表范围全在其中；`sql/database.go` 的 `han_insensitive` 与 `!hanSensitive` 方向一致 → 无漂移。
+- `kernel/job/cron.go` 注册的每个 job 与 `kernel/**` 中全部 `*Job()` 定义逐一对照，无「有定义未注册」；`AutoFixIndex` 的 1 分钟调度与内部 `idleFixThreshold`/`fixCooldown` 不冲突；`RefreshHPathsJob` 先 `sort` 再取 `keys[0]`，map 遍历顺序不影响结果。
+- `kernel/task/queue.go` 的锁序（`queueLock` → `currentTaskLock`）在全部路径一致；`StatusJob` 持 `queueLock` 至 `PushBackgroundTask` 不构成跨 I/O 持锁（melody v1.4.0 的 `Write` 是 `select { case output <- msg: default: }` 非阻塞）。
+- `kernel/plugin/sandbox.go` 的 `pluginSourceLoader`（`filepath.Separator` 前缀 + `os.OpenRoot`）在 Windows/Linux 均成立；`crypto/` 的 `usageTable`/`formatTable`、AES-CTR 回绕分段、PKCS#7 常时间比较、HKDF/PBKDF2 长度校验、`pipeTo` 的 `prevent*` 分支、`AbortSignal` 的 `addEventListener` 去重/`removeEventListener`/`any` 传播逐条对照 WHATWG/RFC 未见漂移。
+- `kernel/bazaar/`：`downloadBazaarFile` 的 `LastIndex("@")`、`isSupportedPackageImageName` 白名单、`installed.go` 的 `installSizeVersion` + singleflight 版本守卫、`local.go` 的五条错误分支均调用 `cleanup()`、`index.go`/`rating.go` 在初始化期捕获 `util.BazaarStatServer`（全仓仅一处常量赋值，捕获安全）。
+- `kernel/conf/appearance.go` 的入口可见性路径（`gutter.single.listBlock` + `taskStatusTodo/InProgress/Done/Canceled/customTaskStatus` + `separator_taskStatus`、`gutter.single.height`、`gutter.single.chart.*`）与 `app/src/config/entryVisibility/catalog.ts` 逐项核对一致；`migrateTaskStatusMenu`/`migrateChartHeightMenu` 的迁移目标在当前目录中都存在。
+- `kernel/plugin/streams/`、`formdata/`、`encoding/`、`abort/` 为 #20118 新增的 Web API 移植层，除上文两条候选外未发现漂移。
+
+---
+
 ## 如何更新本文
 
 每轮审计后追加：
