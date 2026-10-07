@@ -2432,6 +2432,93 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
    无需构造端到端夹具。附带坑：`treenode.NewParagraph(id)` 要求块 ID 形态（内部取 `id[:14]`），
    传内容字符串会 panic，传 `""` 才会自动生成。
 
+## 第三十九轮（2026-10-07）：内核 AI / agent / MCP 子系统定向审计（5 条已提 #20186–#20190）
+
+**范围选择**：用户从六个候选范围中选定「内核 AI / agent / MCP 子系统」（`kernel/agent/`、
+`kernel/mcp/`（含 `client/`、`tools/`）、`app/src/ai/`）。这是本 skill **首次**定向覆盖该子系统——
+此前只有第 15 轮顺手碰到过 `box_lease.go`（#19455）与 `plugin/api_agent.go`（判为误报）。
+
+**基线**：`git fetch origin dev` 后 `HEAD == origin/dev`（`3426cee7cc`，0 领先 0 落后），工作树干净。
+
+**机械扫描（增量极小，是本轮最值得记的负面结果）**：
+
+| 扫描 | 结果 |
+|---|---|
+| 重复字面量（`--min-files 4`） | **0 条** |
+| 重复字面量（`--min-files 2`） | 23 条，逐一回读后无真缺陷（见下） |
+| 未转义插值（`app/src/ai`） | 1 条（`editor.ts:593` 的 `icon`）→ 调用点只传 `"iconCopy"`/`"iconRefresh"` 常量，**受控误报** |
+| **工具注册表三方交叉比对**（自写脚本） | 34 个工具的 `action` 枚举 × `ActionEffects` 键 × handler 分派 `case` **零漏项** |
+
+「`--min-files 4` 得 0 条」是**真实的零**而不是「没扫到」：脚本在扫描根不存在时以退出码 2 报错（第 22 轮的自审修复），
+本轮先用相对路径触发过一次退出码 2、改用绝对路径后才得到 0。
+
+23 条 `--min-files 2` 候选的构成与判定：
+
+- **工具名字面量在 `agent.go` 与 `mcp/tools/*.go` 各出现一次**（`get_children`、`tree_stat`、`web_search`…共 15 组）——
+  它们是**同一份声明在两侧的镜像**（工具表 vs 死循环签名的关键参数表），已单列成 `safeActions`/`toolSignatureKeys`
+  这类显式表，属**有意的手工副本**而非单一真源缺失；两处不同步只会让死循环检测退化，不会误判功能
+- `_sessionID`/`_toolCallID`（`agent/tools.go` 注入 + `mcp/tools/image.go`、`todo.go` 读取）——
+  跨包协议字段，且注释已说明「原生工具专用」；判定见误报表新增条目
+- `session.json`（10 处 / 3 文件）——`sessions/<id>/session.json` 的路径拼接，同目录已无同义常量可复用，
+  且 `runtime.go`/`session.go` 的语义完全一致
+- `authorization_required`/`oauth_retrying`（`mcp/client/mcp.go` 与 `oauth.go` 各一份）——
+  **是真实的单一真源缺失**（写入 6 处 + 消费 4 处 + 前端 colorMap/switch 各一份），但**两个集合当前完全一致、漂移无可观测后果**，
+  按「无可观测后果不报」的既有标准列为观察项；唯一实质缺口是 `MCPStatusItem` 的注释未列 `oauth_retrying`
+
+### 一、发现（5 条，均已提 issue）
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1 / B（新 P45） | MCP 工具的**路由按服务名**（`mcp.go:318` 闭包捕获 `server.Name`、`:864-871` 取首个同名连接），而**注册与运行时状态按 ID**；重名时第二个服务的工具打到第一个服务的会话上，且它的 401 会把**第一个**服务的连接摘掉、凭据标记为 rejected。内核零名字唯一性校验，唯一拦截是对话框（`aiMcpServerNameDuplicate` 在 `kernel/**/*.go` 出现 0 次） | 高（机制逐环可证）/ 可达性中（正常 UI 路径被拦） | 已提 #20186 |
+| C / D1 | `agent.go:526-528` 的 `Variables.Resolve` 结果在主路径被丢弃：`currentUserExists` 为真时（前端先落盘再发请求，`AgentChat.ts:2511-2535` → `:2541`，故恒真）走 `:603-609` 只回填 References/EditorContext、不更新 Content → 模型看到 `{{vars.NAME}}` 原文。同一次调用里 `sessionEntries`（`:617-623`）却被改写成解析后的值 **←同一轮里模型所见与会话历史不一致** | 高（代码 + 前端顺序 + 指南文本三重） | 已提 #20187 |
+| D1 / B | `app/src/ai/actions.ts:115-118` 的 `filterAI` 大小写敏感（两侧都无 `toLowerCase`），而条目文案是首字母大写的英文（`Continue writing`/`Extract summary`/`Fix grammar, spelling and typos`），且同仓 5 处同类过滤（`menus/layouts.ts:301,319`、`util/fileTree.ts:21,30`、`menus/commonMenuItem.ts:414`、`protyle/toolbar/fontFamilyMenu.ts:188,194`、`protyle/util/index.ts:2034-2040`）一律双向折叠 | 高 | 已提 #20188 |
+| D1 / I2 | `app/src/ai/editor.ts:556-567` 的 `fetchAIEditorSSE(...).catch(...)` 不调 `finishTaskReasoning`，而另外三处（`:461`/`:478`/`:505`）都调 → reasoning 阶段传输失败后「思考中 Ns」继续每秒 +1 直到关闭面板。可达性由 `editorSSE.ts:92-95`（非 SSE 响应）与 `:126-130`（无终止事件）保证 | 高 | 已提 #20189 |
+| D1 / B | `app/src/ai/skills/manager.ts:379-386` 的前端名称校验（规则在 `util/fileTree.ts:7-12`，仅空/`.`/`..`/`\ : /`）窄于内核（`kernel/util/skill_manage.go:57-75` 另拒结尾点号、`<>"\|?*~`、控制字符、首尾空白、Windows 保留名），且 `:385-386` **先销毁对话框再调 API** → 未本地化的英文错误 + 输入丢失 | 高 | 已提 #20190 |
+
+### 二、第 2 条的权威依据是「用户指南与本轮发现方向相反」的一次例外
+
+按既有方法论「不要用文档证明实现行为」（第 18 轮迁移把新行为追认进文档），本轮**反过来用指南确立预期**：
+`app/guide/20210808180117-6v0mkxr/20200923234011-ieuun1p/20210808180303-xaduj2o/20260804185002-secvr03.sy:11`
+写明 *Skill bodies and chat messages can use variables. Secret placeholders are not expanded in AI conversations…*
+——指南明确承诺「聊天消息可用变量」，而实现丢了这条路径。
+**判据：文档可用于证明「承诺了某能力」，不可用于证明「某行为是有意设计」**；前者是需求侧，后者是迁移会追认的。
+
+### 三、被挑战门拦下/降级的候选（勿重报，除非有新证据）
+
+- **`headerRoundTripper` 跨主机重定向转发明文令牌**（`mcp.go:196-204`）：每个出站请求都 `Header.Set` 一遍配置头，
+  而 Go 的 `http.Client` 在跨主机重定向时**先**剥离 `Authorization` → 这里在剥离之后又加回去；
+  注释声称的「防止密钥被转发到其他主机」只对 `{{secrets.*}}` 占位符成立（`ResolveSecretsVarsForHost` 在 host 未命中时保留原文）。
+  机制成立且**明文静态令牌不受 host 约束**，但这属**安全审计范畴**（本 skill 的 `description` 明确排除安全审计）→ 不作为本 skill 的发现，只在报告附录记录建议由安全视角单独评估
+- **`sql.go:35-40` 的 `ActionEffects` 含 `"": {LocalRead: true}` 兜底键**：使未知 action 在确认决策里被当成只读。
+  但 handler 对未知 action 仍要求 `stmt`，且 `CheckReadonlyStatement`/`CheckReadonlyStatementInBox` 两侧都在 → **无可观测后果**；
+  风险是「将来新增 action 时静默放行确认」，属将来引入的坑，记录不报
+- **`skill.go` 的 `"": {LocalRead: true}` 兜底**：同上，且 `load`/`""` 都真的只读
+- **`log.go` 的敏感串清单**（`accesskey`/`password`/`token`…）被脚本误报为「case 但不在枚举」，实为脱敏关键字表，非 action 分派
+
+### 四、本子系统已完成的排除项（后续轮次省去重复投入）
+
+- **工具注册表三方一致性零漏项**：34 个工具的 `action` 枚举、`ActionEffects` 键、handler `case` 三方 diff 全等；
+  `ActionEffects` 无「枚举里没有的键」，枚举里的写操作全部声明了 `LocalWrite`
+- **`safeActions` / `safeWholeTools` 全局 action 白名单**：逐工具核对后**未发现写操作与白名单同名**
+  （`notebook.open/close`、`template.render`、`ref.refresh`、`export.md` 均为只读语义）；
+  `import.md` 有专门的前置拦截（`:1723-1726`）→ 第 15 轮「全局 action 白名单可被新工具撞名」的担忧本轮未命中
+- **SQL 工具的双重只读校验**：`sql.go:52-59` 的 `CheckSingleStatement` + `CheckReadonlyStatement(InBox)`，
+  底层 `stmt_validate.go:198-228` 另有 `isReadonlyQueryStatement`（提前拒 ATTACH/DETACH/事务控制）+ `sqlite3_stmt_readonly` → 无旁路
+- **`Tool.EffectsFor` / `IsAvailable` 的 nil 守卫**：见误报表新增条目（形态上像 D1d，实际自带守卫）
+
+### 五、方法论增量
+
+1. **「同一文件里两层用不同的身份」比「同一份数据写两遍」更值得单列**：本轮 5 条里 3 条是它的变体
+   （ID/Name 路由、解析值被丢弃、前端/内核两份校验），归纳为 D1p + P45。
+   **跨层比对**是它的唯一入口——静态看每层都对。
+2. **`--min-files 4` 得 0 条要先自证「不是没扫到」**：本轮先用相对路径触发退出码 2，改用绝对路径后才得到 0。
+   **零发现与没扫到在输出上无法区分**，这正是判据 A 里写的那条，本轮实际用上了一次。
+3. **「前端校验窄于内核」的取证要点是「顺序」而非「差异」**：差异只是候选，
+   真正决定后果的是 `inputDialog.destroy()` 在调 API **之前**——若它在之后，同样的差异只是「多一次往返」。
+   已写入 SKILL.md 判据 B 的第二个入口。
+4. **指南文本在本轮是「需求侧权威」**：判据是「文档可用于证明承诺了某能力，
+   不可用于证明某行为是有意设计」。这两件事此前被我混用，本轮首次分开。
+
 ## 如何更新本文
 
 每轮审计后追加：
