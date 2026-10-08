@@ -2902,6 +2902,15 @@ CI 用 `go-version-file: kernel/go.mod`（恰好 1.26.5）→ 按提示重新生
    与 `Lute.EscapeHTMLStr` 概念上易混（该文件内用了 16+ 次）
 5. `getBlockDragSelectBlock`（`wysiwyg/blockDragSelect.ts:28/33`）对 mindmap 不识别为容器 → 划选落到内部块而非整个
    mindmap 根。**后果未证实**，只请维护者确认选择
+6. **CI 的测试信号强度（本轮顺带核实，判据 G4）**：`.github/workflows/cd.yml` 的 `on` 只有
+   **版本 tag**（`*-alpha*`/`*-beta*`/`*-rc*`）与 `workflow_dispatch`，**不以 push/PR 触发**；
+   `.github/workflows` 下无其它跑测试的工作流。且该文件内**每个测试步骤都带 `continue-on-error: true`**
+   （`:132`/`:137`/`:182`/`:190`/`:212`/`:225` 等），唯一例外是 `:228`「Test OCR build and resource scripts」。
+   内核选择面已修好（`:183` 是 `go test -tags "fts5 sqlcipher" ./... -count=1`，不再是白名单 → 第 18 轮
+   #19472 的「只跑 4 个包」已不成立），但**「CI 绿」不等于「测试通过」**：失败只作为记录。
+   **这是有意的政策**（`f4ba6cbe10`「Keep end-to-end tests non-blocking」、`e149329df6`
+   「Keep prerelease packaging running after test failures」），**不要当作缺陷上报**；
+   它的实践含义是——**用 CI 结论验证修复时必须读该步骤本身的结果，不能读 job 状态**。
 
 ### 本轮零残留
 
