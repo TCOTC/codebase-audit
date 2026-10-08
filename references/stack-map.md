@@ -198,10 +198,18 @@
   - 同类宿主页面的配置不对称（9 处有 `nodeIntegration`，唯独 boot window 没有）→ D1g、P25
   - 平台/宿主环境假设（注册表、换行符、临时目录归属）→ E2
   - 构建产物被测试框架收集成假失败 → G4 变体
-- **既有校验器**：无专用；靠 `npx tsc -p tsconfig.typecheck.json` 与人工核对
+- **既有校验器**：`app/tests/exportDependencyBoundary.test.js`（导出包入口 `protyle/method.ts` 的运行时闭包
+  不得含 `config|layout|menus|mobile|plugin` 与 `protyle/(hint|toolbar|header|gutter|ui)`；2026-10-08 实测闭包 52）；
+  构建产物本身无校验器，其余靠 `npx tsc -p tsconfig.typecheck.json` 与人工核对
 - **取证陷阱**：
   - 本机 `app/electron/*.js` 检出为 **CRLF**（`core.autocrlf=true`）；`.gitattributes` 的
     `*.ts text eol=lf` 只保证 TS，**按 `"\n"` 切片源码的测试在本机必失败**
+  - **`app/stage/build/**` 不随 `pnpm dev` 更新**：判产物体积或产物内容前先比对 `LastWriteTime` 与
+    `git log -1 --format=%ad`；产物早于修复时只能做代码审查（实测产物 16:25 vs 修复 17:56）
+  - **测模块闭包要用与被测构建同一套 loader**（`webpack.export.js` 的 ifdef-loader options + esbuild 类型擦除）；
+    **esbuild 会剔除未使用的 import** → 做「加边是否被守卫拦住」的实验必须把 import 真正用起来，否则闭包不变、实验假通过
+  - 闭包计数按 `[target, +.ts, +.js, index.ts]` 解析，**`.scss` 说明符被静默丢弃**
+    （入口的 `../assets/scss/export.scss` 是唯一一条）→ 「N 个模块」不含样式
   - `app/build/win-unpacked` 是构建副本，会被 `node --test` 收集 → 制造与源码无关的失败
   - 远端/降级路径是这类缺陷的**唯一触发场景**，本地常态下看不到
 

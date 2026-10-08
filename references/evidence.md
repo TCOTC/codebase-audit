@@ -2936,6 +2936,50 @@ CI 用 `go-version-file: kernel/go.mod`（恰好 1.26.5）→ 按提示重新生
 5. **终端软换行会伪造「字中间有空格」的现象**：`print(repr(slice))` 的长输出被控制台折行后，
    看起来像 CJK 二字之间插了空格。判「文本被篡改」要直接对原字符串做正则或 `find`，不要读 `repr` 的屏幕输出
 
+## 第四十三轮（验证，2026-10-08）：#20219 修复复核（1 条符合预期 + 1 条新提 #20227）
+
+> 用户要求「只读检查 #20219 的修复是否符合预期」。基线：工作树正在修复提交 `41f78a8f2e` 上，
+> `git rev-list --count HEAD..origin/dev` = 0；`cd.yml` 只按版本 tag 与 dispatch 触发 → **该提交没有 CI 记录**。
+
+### 复核结论（符合预期，判据 G1 已由新增测试补上）
+- 用与新增测试同一算法复现：父提交 `41f78a8f2e^` 闭包 **887** → 修复后 **52**；在 issue 自己的基线
+  （`git log --until=<issue 创建时间> -1` → `2b02f86fde`）测得 **886**（issue 报 929，约 5% 测量口径差异，结论不受影响）
+- `app/tests/exportDependencyBoundary.test.js` **是有效回归测试**：把它的守卫原样施加到父提交得到 FAIL，
+  且首两条命中正是守卫里的 `protyle/util/selection.ts`、`protyle/render/tableCellRichEditor.ts`
+  → 那两个显式条目是必要绊线，不是死代码。它也在 CI 执行集内（`cd.yml` frontend-tests → `pnpm test`）
+- **不要复报「守卫前缀太窄」**：对 `search/ history/ dialog/ card/ template/ sync/ ai/ emoji/ boot/ util/ plugin/`
+  下 21 个模块逐个测闭包（887~948），绝大多数经间接传递命中受守卫前缀；加一条被使用的 `editor/openLink`
+  → 闭包 52→888、守卫 FAIL。**未找到能绕过它的入口**
+- 搬移合规：`selectionOffsets.ts` 是纯搬移、无第二份实现、`selection.ts` 无转发再导出；`tsc`（typecheck + api）
+  与 `npx eslint .` 均 exit 0；本次改动的 17 个测试文件 23 用例全过
+- **未能验证**：导出产物早于修复 → 只报「模块图层面的边界已成立」，**不报体积下降**
+
+### 确认（→ #20227，判据 G3）
+`app/tests/settingsWindow.test.js:192` 的模块白名单未登记 `app/src/config/setting/nativeWindow.ts:15`
+新增的 `../../protyle/toolbar/catalogSnapshot`（引入提交 `f46d1026df`，#20211，2026-10-08 12:49；
+该测试文件最后改动是同 00:45 的 `63b1b4001c`）→ 单独运行 exit 1。
+同类形态 #19474（`mobileBacklinks.test.js` 缺 `editor/assetOpen`）与 #19501（替身缺 `util/zIndex`）已修，
+**但该文件当时不在两者的清单内 → 是新实例，需独立立论**（这也是 G3 会反复复发的原因：修的是实例，不是机制）。
+**标题被当场纠正**：首版照搬 #19501 写成「Frontend CI is red because …」，复核 `cd.yml:223-226` 发现
+`pnpm test` 步骤带 `continue-on-error: true` 且工作流只按 tag 触发 → **该步骤失败不会让 job/工作流变红**；
+改为「Frontend test failure: …」，并按 `AGENTS.md` 把旧标题留作正文首段。
+
+### 方法论增量
+1. **「加边实验」必须让 import 被使用**：第一次加边写成 `import {openLink}` 却不使用，闭包不变，
+   差点报成「守卫拦住了」——实际是 esbuild 的 DCE 剔除了未使用的 import。
+   **设计实验时要考虑工具链自身的死代码消除**
+2. **回读校验不能用 PowerShell 管道**：`gh api --jq .body | Out-File -Encoding utf8` 得到的是
+   UTF-8 字节被按 GBK 解码的乱码（`鍓嶇`）；**显式 `-Encoding utf8` 修不回已被管道解码破坏的文本**。
+   改为 Node `execFileSync("gh", [...])` 取 stdout 按 utf8 解码后，比对立即一致
+3. **报缺陷要落到「哪个步骤/哪个对象」，不要用 job 级词**：在 `continue-on-error` 与 tag-only 触发下，
+   「CI 变红」是错的。这条与 B 线第 6 项（CI 测试步骤全部非阻塞是有意政策）是同一事实的两面
+
+### 本轮零残留
+- 临时脚本全在 `%TEMP%\audit-r43x4-20219-verify\`（仓库外）：`closure.js`、`sweep.js`、`unresolved.js`、
+  `verify-issue.js`、`*.diff.txt`、`i19474.md`、`i19501.md`、导出的 `before/`/`issuebase/`/`after-src/` 源码树
+- 目标仓库未改任何文件；两个 payload JSON（建后与改后各一个）已确认删除
+- 已提 issue：**#20227**；title/body 逐字段回读一致（106/1122，两次都验）
+
 ## 如何更新本文
 
 每轮审计后追加：
