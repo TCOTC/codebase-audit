@@ -3238,6 +3238,46 @@ goja / 反射暴露（`plugin/api_logger.go:36 Warn`）、gomobile 绑定包（`
 会系统性地漏报整类。这与第四十四轮前半段「产物新鲜度」的教训是同一形状：
 **筛子选错比筛子不严更危险**（前者永远筛不到东西，而报告看起来仍然正常）。
 
+## 第四十六轮（2026-10-08）：前端性能定向审计（`app/src`，4 条全部低，未提 issue）
+
+用户要求「审计前端性能问题」。**性能维度不在判据 A–I 内**（本文第1354行自陈「`性能`/`基准` 在 SKILL.md 里 0 命中」），
+故按 same 取证纪律另立方法：机械筛选（布局读取/循环内 DOM 查询/正则编译/定时器/监听器失衡）→ 语义判读 →
+差分审查维护者近期性能提交。**同日已有一轮内核侧性能审计**（#20247–#20265，见该轮记录），本轮只做前端。
+
+**取证受限（决定全部置信度）**：内核未运行（`127.0.0.1:6806` 连接被拒）＋
+`app/stage/build/desktop` 产物 16:25 早于源码 21:29 / HEAD 21:49（§⑦）→ **只做代码审查级结论，无运行期量测**。
+
+**主报告 0 条有实质性能影响**：五条主要热路径（编辑器渲染、AV 表格虚拟滚动、事务提交、渐进加载、CSS 动画）
+逐条回读后**未发现未被修复的缺陷**，且普遍带显式优化与说明注释——`av/virtualScroll.ts`（`rowHeight` 缓存避免每帧
+读 `offsetHeight`、`doTrim` 两遍读写分离）、`av/row.ts` 的 `stickyRow`（源码注释即写明「先批量读取…再更新」）、
+`onGet.ts:290-360`（trim 循环体内只有读、无写）、`GlobalBacklinkList.updateViewport`（`scrollVersion` + rAF 节流）。
+CSS 侧：自研 `:has()` **0 处**（唯一命中在 PDF.js 移植），`transition: all` 仅 1 处且在已裁剪的 PDF 样式，
+15 个 `@keyframes` 中只有 `pdf/_pdf.scss` 动画化 `left`（第三方）。
+
+**4 条产出（全部为可维护性/微效率，未提 issue）**：
+
+| # | 内容 | 位置 |
+| --- | --- | --- |
+| 1 | mouseover 驱动的块标全量重建**无「同块短路」**，而同族已有两处该类短路却只覆盖容器块与页签 | `protyle/ui/initUI.ts` 的 `mouseover` → `gutter.render`；`gutter/index.ts` 的 `this.element.innerHTML = html`；对照 `gutter/container.ts` 的 `isContainerGutterBridge`（白名单仅 bq/callout/sb） |
+| M1 | `aiUi.ts` 两处「每帧 rAF 自轮询清理 `setInterval`」，面板在 DOM 内即 60Hz 常驻 | `config/tabs/ai/aiUi.ts:164-173`、`:509-518` |
+| M2 | `Constants.ZWSP` 的**正则每次调用重新编译 11 处**，且无既有常量；**同类修复今天刚在内核侧完成**（`3454b03dc4` #20256「Reuse constant patterns」+ #20243），只改了 `kernel/api/extension.go`、`kernel/api/filetree.go`、`kernel/model/import_obsidian.go`，**未触及前端** | `ai/editor.ts:163`、`AgentComposer.ts:310`、`hint/extend.ts:646`、`hint/index.ts:719`、`lite/fragmentEditor.ts:48`、`util/compatibility.ts:508`、`wysiwyg/emptyTextBlock.ts:11`、`wysiwyg/index.ts:1162/2114/3558/5386` |
+| M3 | AI 思考计时 100ms 且每次对整段消息区做子树 `querySelectorAll`，而同语义的 `ai/editor.ts:397` 用 1000ms | `layout/dock/agent/AgentChat.ts:4753-4763` |
+
+**修法陷阱（M2）**：带 `g` 标志的正则对象有 `lastIndex` 状态，共享同一实例只能用 `String.prototype.replace`
+（每次重置 `lastIndex`），**不可**用于 `.test()`/`.exec()`。现有 11 处全部是 `.replace(new RegExp(Constants.ZWSP, "g"), "")`，
+故共享安全——但将来新增 `.test()` 调用点需另建无 `g` 的实例。
+
+**修法陷阱（第 1 条）**：只比较 `nodeElement` 会漏掉键盘改变选区的情况（键盘不会产生 `mouseover`，
+块标会停在旧块上），所以守卫应比较**计算出的 `html` 字符串**而非仅比较块身份。挑战门第一轮据此否掉了更省事的版本。
+
+**工具坑（本轮自伤一次，必须记）**：把 `addEventListener("scroll", …)` 之类**依赖字符串字面量**的模式放在
+`strip_strings_and_comments()` **之后**匹配 → 恒 0 命中、且看起来像「干净的负面结果」。
+凡 pattern 里含引号/BOM 引用的扫描必须在 raw 源上跑，或同时跑 raw 与 clean 两遍取并集。
+（本轮同一脚本的「循环体内布局读取」部分不受影响，因为那些 pattern 不含引号。）
+
+**误报表 +3**：每帧 `requestAnimationFrame` 自轮询、`backdrop-filter`、全局 `mouseover`/`mousemove`
+处理器里的 DOM 查询与布局读取（详见 `known-false-positives.md`，本条的第 1 条同时升级了「必须逐条验触发频率」这一检查法）。
+
 ## 如何更新本文
 
 每轮审计后追加：
