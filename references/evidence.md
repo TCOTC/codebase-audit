@@ -2623,6 +2623,44 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 
 ---
 
+## 第四十二轮（2026-10-08）：内核 L1 数据与索引定向审计（1 条确认 + 8 项已核对为干净）
+
+- 基线：目标仓库 `HEAD == origin/dev == 2b02f86fde`（0/0），分支 `dev`，工作树干净；范围由用户选定 =
+  `kernel/model` 的导入导出/历史/索引 + `kernel/sql` + `treenode` 读写路径（257 个 Go 文件），**只读审计**
+- 机械扫描：`--min-files 4` **14 条**、`--min-files 2` **83 条**，逐条回读**全为已知噪声**
+  （`assets/`、`siyuan://blocks/`、`/export/`、`conf.json`、`sort.json`、`petals.json`、`plugin.json`、
+  `.sy.zip`、`.action{`、`query_embed`——最后一条第 11 轮已核实为误报）
+- **唯一确认（低，判据 D3 闭合集合漏项；第 16 轮已登记为「未取证候选」，本轮只补证据）**：
+  `kernel/sql/index_queue.go:110` 的 `dbOpToIndexEntry` 缺 `update_block_content` 分支 →
+  `default: return nil`（`:141`）→ `appendToIndexQueue`（`:76`）静默返回 →
+  该 op **永不写入 `temp/queue/index.queue`**。
+  **同族四处 action 分派 switch 里三处都登记了它**（`queue.go:99` backlinkIndexChange、`:159` boxID、`:472` execOp），
+  唯「磁盘序列化」这一处漏 —— 同包自相矛盾再次是最省力的判定入口。
+  `git log -S update_block_content -- kernel/sql/index_queue.go` **为空** → 自磁盘队列引入
+  （`b0177c4aa1`，2026-05-13）起从未支持；而该 action 自 2023-01-31（`204580bf36`，issue #7213）就存在 → 引入队列时漏项。
+  **可达**：`getEmbedBlock(updateIndex=true)` → `model/index.go:463 updateEmbedBlockContent` →
+  `UpdateBlockContentQueue`（`queue.go:516`）——前端每次渲染嵌入块（`/api/search/getEmbedBlock`）都走这条路径。
+  **后果**：非正常退出（崩溃/断电/被杀）后，嵌入块的 `blocks.content` / `blocks_fts.content`
+  （`sql/block.go:135 updateBlockContent`）保持旧值；10 分钟一次的 `IndexEmbedBlockJob`
+  （`job/cron.go:43` → `model/index.go:386`）只补 `content = ''` 的嵌入块（`sql/block_query.go:38`），
+  因此**非空但过期**的内容不会被自愈（重开该文档触发再次 `getEmbedBlock`，或全库重建才修）。
+  正常启动只走 `sql/database.go:133 recoverIndexQueue()` 重放磁盘队列，**不重建全库**
+- **修法陷阱（本轮最值得记）**：`indexEntryToOp` 若照抄兄弟分支「`filesys.LoadTree` + `buildBlockFromNode`」，
+  写入的是**字面 `{{…}}` 查询脚本**而不是查询结果 —— 比原问题更糟：它非空，于是 10 分钟任务永远不再修它。
+  正确修法是重算查询结果（复用 `autoIndexEmbedBlock` 的查询逻辑），或在 entry 中携带足够信息重建该值
+- **本轮「已核对为干净」（后续勿重复投入）**：
+  ① 删除路径的表集合闭合——`batchDeleteByPathPrefix`/`deleteByRootID`/`batchDeleteByRootIDs` 三者一致覆盖
+  blocks_fts/blocks/spans/assets/refs/file_annotation_refs/attributes（`block_embeddings` 由调用方另删），与建表集合一一对应；
+  ② 容器块闭合集合三份实现一致（`treenode.IsContainerType` / `model.Block.IsContainerBlock` / sql 委托版，各 10 项），
+  缩写表 `typeAbbrMap` 无冲突，与上游 Lute `ast.Node.IsContainerBlock()` 仅差脚注定义块（建文档时脚注已转列表项，属有意排除）；
+  ③ `removeDoc` 用路径前缀删除**覆盖文档自身**是有意设计——文档文件名即文档 ID（`path.go:62-110`、`file_test.go:199`）；
+  ④ `documentPathPrefixCondition`（`sql/delete_path.go:29`）的范围约束是 LIKE 匹配集的**超集**（非 ASCII/通配符走回退分支）；
+  ⑤ `nonEditorTx` 是 nil 接收者但不会 panic（`getAttrViewBoundNodes` 有显式 `nil == tx` 分支）；
+  ⑥ `finishAttributeViewMutation` 二次调用幂等（state 置 nil 后早退）；
+  ⑦ sort.json 的读-改-写全部持 `fileTreeSortLock`（无丢失更新）；
+  ⑧ 索引订正流水线五步的进度推送齐全（1/5–5/5）
+- 观察项（未报）：`model/index_fix.go:472` 的 `if nil == root { continue }` 是恒假守卫（map 值来自非 nil block），仅冗余防御
+
 ## 如何更新本文
 
 每轮审计后追加：
