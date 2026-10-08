@@ -210,6 +210,11 @@
     **esbuild 会剔除未使用的 import** → 做「加边是否被守卫拦住」的实验必须把 import 真正用起来，否则闭包不变、实验假通过
   - 闭包计数按 `[target, +.ts, +.js, index.ts]` 解析，**`.scss` 说明符被静默丢弃**
     （入口的 `../assets/scss/export.scss` 是唯一一条）→ 「N 个模块」不含样式
+  - **导出包是用 `MOBILE: true` 编译的**（`app/webpack.export.js:62`）：它是 2022 年为修 #5326 引入的
+    **依赖闸门**（当时把闭包 165→19，唯一差异是 `layout/status.ts` 顶部 `#if !MOBILE` 的 `getAll` import），
+    **不是平台声明**。判「某段渲染逻辑为何在导出页失效」时要先算闭包内的 `!MOBILE` 块数
+    （2026-10-08 实测为 0，但 0 ≠ 永远 0）；反过来，别因为它叫 MOBILE 就以为导出页跑在移动端
+    ——该包的主要消费方是桌面 PDF 预览窗口（`app/electron/main.js` 的 `BrowserWindow` + `printToPDF`）
   - `app/build/win-unpacked` 是构建副本，会被 `node --test` 收集 → 制造与源码无关的失败
   - 远端/降级路径是这类缺陷的**唯一触发场景**，本地常态下看不到
 
@@ -262,6 +267,13 @@
   - 判定 `fixed` 必须以**最后一个引用该 issue 的提交的 CI 结论**收口，
     提交信息与维护者评论都不算
   - 测试运行器的**汇总行**必须读全，不能用输出尾部代替（曾因此把 13 处失败写成 1 处）
+  - **PowerShell 的 `*>` / `>` 重定向默认写 UTF-16LE**：落盘后 `Select-String` 读不到汇总与失败清单，
+    要先用 `[Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($p))` 解码
+  - **G3 的新形态：按「文件名清单」装配模块的测试**（每个文件一个独立 IIFE）在被装配的模块拆分后必然失绑。
+    **只把新文件追追加进清单无效**——第二个 IIFE 绑定不到原模块内部的引用，
+    必须把两份语句合并进同一模块体（本仓库现成写法：`app/tests/verticalNavigation.test.js:18-22`）
+  - 判「某测试的失败是否由某提交引入」**不能只跑目标树**：该文件可能在父树也是红的（只是失败在另一条断言上）。
+    用「同一测试文件 + 两份源码树」做对照，并优先用不依赖 electron / DOM 的静态装配复现
 
 ---
 

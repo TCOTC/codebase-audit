@@ -2974,11 +2974,59 @@ CI 用 `go-version-file: kernel/go.mod`（恰好 1.26.5）→ 按提示重新生
 3. **报缺陷要落到「哪个步骤/哪个对象」，不要用 job 级词**：在 `continue-on-error` 与 tag-only 触发下，
    「CI 变红」是错的。这条与 B 线第 6 项（CI 测试步骤全部非阻塞是有意政策）是同一事实的两面
 
+### 同日收尾（新提 #20228、#20229；#20227 正文补正；全量前端测试汇总）
+
+**1. #20228：G3 的新形态——「按文件名清单装配模块」的测试在模块被拆分后必然失绑**
+
+`app/src/protyle/render/listMindmap/model.test.ts` 报 `ReferenceError: focusByRange is not defined`。
+该测试用「文件名清单 + 提取各文件 `export const` 名字」在 `new Function` 里搭假作用域，
+**每个文件各自生成一个独立 IIFE**；`#20219` 把 `focusByRange` 搬进 `selectionOffsets.ts` 后，
+`selection.ts` 内部仍引用它 9 处且已不在同一作用域。
+
+- **因果取证（不依赖 electron / DOM，比跑用例快且不受既有红干扰）**：用与该测试相同的装配逻辑，
+  父提交 `41f78a8f2e^` 得到 BOUND、`41f78a8f2e` 得到 FREE。
+- **修法不可只把新文件追加进清单**——那会生成第二个 IIFE，绑定不到原模块内部的引用。
+  同一提交已对同类清单做了正确处理：`app/tests/verticalNavigation.test.js:18-22` 把两份语句**合并进同一模块体**。
+- **诚实定性**：该文件在父树本来就失败（另一条断言 `native pointer capture saves a drag exactly once`，`0 !== 1`）
+  → 不是新回归，而是失败点被提前到装配阶段，该文件其余断言全部失效。
+
+**2. #20229：`webpack.export.js:62` 的 `MOBILE: true` 是依赖闸门，不是平台声明**
+
+- `2065aeded9`（2022-07-01，为修 #5326「导出 PDF 图表无法渲染」）**只翻了这一行**；
+  在该提交的源码树上实测：`MOBILE: false` 闭包 **165**、`true` 闭包 **19**，唯一差异是
+  `layout/status.ts` 顶部 `#if !MOBILE` 里的 `import {getAllDocks} from "./getAll"`（`getAll` 再引出
+  `layout/index`、`editor`、`dock/*`、`asset`、`search`）。
+- 该职责已由 `#20219` 替代（拆出 `selectionOffsets.ts` + 边界测试）：今天闭包 **52 与 52**、
+  **闭包内 `!MOBILE` 块为 0**、唯一随标志变化的文件是 `util/functions.ts` 的 `getFrontend()`（闭包内 0 个调用）
+  → 翻转是严格空操作，已据此建议改 `false`，正文同时给出「若保留则须注释 + 断言 0 个 `!MOBILE` 块」的替代。
+- **纠正自己上一轮的一个未验证断言**：预览窗口的 UA 被 `app/electron/main.js` 显式加了 `SiYuan/` 前缀，
+  所以 `getFrontend()` 在那里返回 `"mobile"`（不是我先写的 `"browser-mobile"`）。
+
+**3. #20227 正文补正**：根因同一但影响面是 **3 个文件 14 个用例**（`tests/nativeSettingsOwner.test.js` 12、
+`tests/settingsWindow.test.js` 1、`src/config/entryVisibility/mobileUi.test.ts` 1），首版只写了 1 个文件。
+
+**4. 全量前端测试汇总**（与 `pnpm test` 同参数，不经 pnpm 以免改写 lockfile）：
+`tests 4494 / suites 515 / pass 4459 / fail 27 / skipped 8`，27 条按根因三类：
+
+| 根因 | 处数 | 文件 |
+|---|---|---|
+| `catalogSnapshot` 白名单未收录（= #20227） | 14 | `nativeSettingsOwner`(12)、`settingsWindow`(1)、`mobileUi.test.ts`(1) |
+| `focusByRange` 搬运后未合并（= #20228） | 1 | `listMindmap/model.test.ts`(1) |
+| 与本次复核无关 | 12 | `readonlyKeydown`(6)、`contextMenuHotkey`(1) 出自 `4b10638cab`（#20202）；`avRichTextEditor`(1)、`newRefDocAtPath`(1) 出自 `128ec67623`（#20201）；另 4 处未追引入提交 |
+
+**5. 方法论（两条工具坑）**
+
+- **PowerShell 的 `*>` / `>` 重定向默认写 UTF-16LE**：汇总行与失败清单用 `Select-String` 读不到
+  （不是正则写错）。正确做法：`[Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes($p))` 解码后再按行匹配。
+- **判「某测试的失败是否由某提交引入」不能只跑目标树**：该文件在父树也是红的，只是失败在另一条断言上；
+  必须先取父树（`git archive <rev>^ app/src` + 复用 `app/stage/protyle` 与 `node_modules` 联接）做对照，
+  并优先用不依赖 electron / DOM 的静态装配复现。
+
 ### 本轮零残留
 - 临时脚本全在 `%TEMP%\audit-r43x4-20219-verify\`（仓库外）：`closure.js`、`sweep.js`、`unresolved.js`、
   `verify-issue.js`、`*.diff.txt`、`i19474.md`、`i19501.md`、导出的 `before/`/`issuebase/`/`after-src/` 源码树
 - 目标仓库未改任何文件；两个 payload JSON（建后与改后各一个）已确认删除
-- 已提 issue：**#20227**；title/body 逐字段回读一致（106/1122，两次都验）
+- 已提 issue：**#20227**（含正文补正）、**#20228**、**#20229**；三处 title/body 逐字段回读一致（106/1442、122/1499、125/2171）
 
 ## 如何更新本文
 
