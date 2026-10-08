@@ -2660,6 +2660,11 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
   ⑦ sort.json 的读-改-写全部持 `fileTreeSortLock`（无丢失更新）；
   ⑧ 索引订正流水线五步的进度推送齐全（1/5–5/5）
 - 观察项（未报）：`model/index_fix.go:472` 的 `if nil == root { continue }` 是恒假守卫（map 值来自非 nil block），仅冗余防御
+- **已提 issue #20214**（state=open）：`Embed block content index is missing from the crash recovery queue, so it stays stale after an abnormal kernel exit`。
+  正文首段为对应中文标题；标题/正文逐字段回读一致（115/115、2164/2164，`rstrip` 后完全相等）。
+  **去重检索**（覆盖 open + closed）10 组关键词：`update_block_content`/`dbOpToIndexEntry`/`IndexEmbedBlockJob`/`UpdateBlockContentQueue` 均 0 命中；
+  `indexEntryToOp` 命中 #17716（**刷盘过程中崩溃**，症状与位置均不同）、#18034；`embed block index crash recovery` 命中 #20175
+  （**恢复/汇总类**批量 issue）——两条均已读正文确认不覆盖本条，非重复报告。labels 未随载荷提交（无 push 权限会被静默丢弃，按 `AGENTS.md` 不做补标签请求）
 
 ## 如何更新本文
 
