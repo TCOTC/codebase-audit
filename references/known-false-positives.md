@@ -79,6 +79,9 @@
 | 「移动端少了一段桌面逻辑 ⇒ 漏实现」 | `MobileFiles.onLsHTML` 缺 `parentDocClick.cancel()`、`updateDocInfo` 缺 `aria-label` 刷新、`onDocSortModeChanged` 缺 `draggable`；`MobileOutline.setCurrent` 缺 `setCurrentById("")` | **四类都要先问「该平台的对应机制存在吗」**：① 该字段在那一端**无消费者**（`lastSelectedElement` / `dataset.bookmark` / `.ariaLabel` 在 `mobile/**` 全无使用点；移动端渲染的是 `<span class="b3-list-item__text">` 而非 `.ariaLabel`）；② 有**同端专有机制**顶替（移动端 `mobile/util/onMessage.ts:134/143` → `removeMobileBacklinkContent` 承担了桌面的逐面板清理）；③ 机制不同故该属性无用（`draggable` 属 HTML5 鼠标拖拽，移动端触摸拖拽已按 `sort === 6` 门控并走 `/api/notebook/reorder`）；④ 外层已被守卫挡住（`MobileOutline` 注册在 `window.siyuan.mobile.docks.outline`，**不进 `models.outline`**，桌面 `editor/util.ts:787` 那条 `setCurrent(undefined)` 路径到不了移动端）；⑤ 无副作用（`onMount` 的 `liElement.remove()` 位置差异：被读的 `.counter` 是 `closeElement` 头部那一个，位于被删 `li` **之前**，`querySelector` 取到的永远是它）。**「移动端少一段」不是结论，先验消费者与同端替代机制** |
 | 「同一意图的刷新/失效范围不同 ⇒ 陈旧」 | `refreshDatabaseAttributePanels`（`protyle/render/av/dateFormatMenu.ts:7`、`number.ts:6`）刷新**所有**显示了该库的编辑器面板，而 `av/action.ts:1401`（改名）、`av/blockAttr.ts:538`（删行）只刷新当前 protyle | **先找中央机制再判陈旧**：本仓库面板刷新有**三条**并存路径——每个 protyle 的 `databaseAttributePanel?.refreshForOperation(operation)`（`protyle/wysiwyg/transaction.ts:1483/1501`，本身覆盖 `removeAttrViewBlock` 与整张 `refreshActions` 表）、内核 `refreshAttributeView` **WS 推送**（`protyle/index.ts:264-271` 让每个编辑器刷新自己的面板）、以及调用点自加的显式刷新。在确认推送是否覆盖该操作之前，**「只刷当前」推不出「其它编辑器陈旧」** |
 | 「同名函数的多份副本里只有一处被 `/// #if !MOBILE` 包裹 ⇒ 不一致」 | `BacklinkContent.ts:598 handelCallback`（拼写错误，带 `/// #if !MOBILE`）与 `Graph.ts:360`、`Outline.ts:301` 的 `handleCallback` 函数体**逐字相同** | **差异由平台可达性决定，不是漏项**：`BacklinkContent` **在移动端被实例化**（`mobile/util/openBacklinks.ts:43` 直接 `new BacklinkContent(...)`，`MobileBacklinks extends BacklinkContent`），故需要该守卫；桌面 `Graph` / `Outline` **在移动端不被实例化**（`mobile/util/initFramework.ts` 的 dock 分派只建 `MobileOutline` / `MobileBacklinks` / `MobileBookmarks` / `MobileTags` / `Inbox` / 插件 dock，**没有 graph**），故不写守卫无害。**判「副本不一致」前先查每份的实例化端**。补充：移动端的 `BacklinkContent` 创建时**不传 `tab`**，`if (options.tab && options.type !== "bottom")` 使其回调在移动端根本未注册 |
+| 「导出函数零引用 ⇒ 死代码」按名字计数即定论 | 用 `\bName\b` 全仓计数得到「零引用」的函数 | **必须过五条排除清单**：① **命名空间导出**（`import * as X from "m"` 后再展开或赋给对象，模块内每个导出都是活的——本仓库 `plugin/API.ts:14 import * as platformUtils` → `:431 platformUtils,`，据此曾把 `plugin/platformUtils.ts:24 getStorageVal` 误判为死代码）；② **字符串或注册表派发**（`register("name")`、`data-type` 表、反射）；③ **`.js` 导入方**（只扫 `.ts` 会看不见移植的 JS）；④ **vendored 目录**（`kernel/heif/internal/**` 的 7 条是上游库公开面，不按自研标准要求）；⑤ **只被自身测试引用**（那是「伪活」，属另一类）。**计数前必须剥离注释与测试文件**，否则后两种会把死函数留在「活」里（本仓库 `model/search.go:627 FindReplace` 只因注释里出现一次而一度漏判） |
+| 「函数只被自己的测试调用 ⇒ 测试在验证死路径（假覆盖）」 | `kernel/agent` 包 12 个函数生产引用为 0、测试引用 12–43 次，据此判定测试覆盖是假的 | **先判该函数是转发壳还是自实现**：本仓库 12 个里 10 个是 3–5 行的 `return <活函数>(…)`，其测试**顺带覆盖了活函数**（活函数另有直接测试：`compaction_test.go:238`、`instructions_test.go:113`、`capability_test.go:233`…）→ 只能定性为「封装残留 + 维护成本」。只有自实现体（`agent.go:2242 buildInitialMessages`、`:2606 agentMessagesToEntries`）才可能构成假覆盖，且仍需证明活路径另有未覆盖分支 |
+| 「包装脚本里的重复路径只是冗余 ⇒ 无害」 | 认为 `entrypoint.sh` 与镜像 `CMD` 同时写了内核路径、且 `entrypoint.sh` 又把 CMD 首元追加进 `ARGS`，只是可读性问题 | **重复的具体程度决定后果**：本仓库实测这条重复拼出的 argv 是 `/opt/app/kernel --workspace=/ws /opt/app/kernel serve`，严格解析的 CLI（cobra）直接报 `unknown command`，镜像**默认启动方式彻底不可用**（#18699）。**判「重复无害」前必须把两处拼成一条真实命令行，再去读该 CLI 的解析规则** |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 
@@ -91,6 +94,13 @@
   为由判为环境噪声，理由不成立——**测试在 Windows 上确定失败说明它不可移植，而白名单来源可被本机改写是产品层设计缺陷**。
   已提 #19475，维护者改为固定扩展名映射并显式写死 `Content-Type`（`2d0561daf5`）。
   **可复用教训：「CI 跑不到」不是免报牌，它是判据 G4 的独立发现。**
+
+- **「缺陷已由别人提过并关闭 ⇒ 不能重报」**：#18699 在 2026-08-13 提了 Docker 镜像默认启动失败，
+  **4 分钟后由同一账号以「v3.7.3 同样报错，非 3.8.0 引入」自行关闭**。
+  **该关闭理由只否定了「这是 3.8.0 的回归」这一措辞，没有否定缺陷本身**；
+  HEAD（2026-10-08）的 `Dockerfile:83` 仍是 `CMD ["/opt/siyuan/kernel", "serve"]`。
+  去重时读到的「已关闭」**必须连同关闭理由一起读**——`state_reason=completed` 不代表已修，
+  尤其当关闭者是**报告者自己**时。此类命中应写成「既往记录：#NNNN（关闭理由不成立），本轮新增 <机制级证据>」。
 
 ## 维护
 

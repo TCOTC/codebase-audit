@@ -1478,6 +1478,42 @@ linter 也看不到；只有「功能 A 的退出路径 × 功能 B 的借用」
 - #20220 移动端不派发 `opened-notebook` / `closed-notebook`（桌面 `Files.ts:1232`/`:1254` 有，移动端无）
 - #20224 移动端 `setCurrent` 的**回溯分支**缺容器排除，而**首分支**有——**同一函数内**两处不一致
 - #20225 两端的大纲成员判据只排除 2 类容器，内核 `collectOutlineHeadings` 排除 4 类（漏 `NodeTabItem`）
+
+
+### P48 包装脚本与容器默认值各注入同一段命令行（重复参数被第三方 CLI 当作未知子命令）
+
+**判据**：A（同一标识符——这里是可执行文件路径——在两处重复且无单一真源）＋ B（启动参数两份提供）
+＋ E1/E3（对第三方 CLI 的解析行为做假设）。**定性靠「实际拼出的 argv」，不靠「两处都看着对」**。
+
+**形态**：前置脚本以硬编码路径起进程，并把**默认 CMD 的全部 token** 收集进变量后再追加：
+
+```sh
+exec su-exec "${UID}:${GID}" /opt/app/kernel --workspace="${WS}" ${ARGS}   # ARGS 含 CMD 的首元
+# Dockerfile: CMD ["/opt/app/kernel", "serve"]
+# 实际：/opt/app/kernel --workspace=/ws /opt/app/kernel serve   ← 路径出现两次
+```
+
+只要 CLI 是**严格解析**的（cobra / click / argparse 的子命令模式），多出来的第一个非 flag 参数就会被
+当成子命令名 → `unknown command`；而在旧版 CLI（忽略位置参数）上**完全看不出来**，
+所以缺陷会长期潜伏，直到 CLI 改成子命令解析后集中爆发。
+
+**检查法（三步）**：
+1. 把**前置脚本 ＋ 镜像默认值 ＋ 用户的 `command:`** 三种来源合起来，**逐 token 拼出真实 argv**，而不是分开看；
+2. 用**第三方 CLI 的源码**确认解析规则（本仓库：`cobra@v1.10.2` 的 `args.go:28 legacyArgs`
+   对「root ＋ 有子命令 ＋ `len(args) > 0`」报错，`Find` 仅在 `commandFound.Args == nil` 时走它）；
+   同时确认根命令**没有** `Args`/`Run` 兜底；
+3. 查**「最近的 CLI 结构变更提交」有没有同步改包装脚本**（本仓库 `bcbd18658a` 删掉了 `main.go` 的
+   「无子命令自动补 `serve`」兼容层，却把默认值改成带路径的 CMD → 重复）。
+
+**与「文档已写明」的关系**：README 写「必须显式传 `serve`」只解释了**用户传参那条路**，
+不能解释**镜像默认值那条路**为什么坏——两者是不同入口，必须分别验。
+入口脚本/Dockerfile 的注释（「默认启动伺服」）在本仓库正是**与实现相矛盾**的那一侧，
+**它是权威依据（承诺了行为），不是「有意设计」的证据**。
+
+**误报排除**：若 CLI 对位置参数宽容（忽略多余参数）或包装脚本用 `"$@"` 原样转交，则重复不会致错——
+必须先读解析源码再定。
+
+**本仓库实证**：`kernel/entrypoint.sh:52` ＋ `Dockerfile:83` ＋ `kernel/main.go:27-31`（第四十四轮，与 #18699 同源）。
 - #20226 移动端搜索在语义搜索方式下不拦截替换，而桌面端拦截——**同一个特性的两份实现**（`mobile/menu/search.ts` ↔ `search/util.ts`，共享 4 个同名函数），成因提交 `c0fdb2a694`（#17788）只改了桌面端；内核亦无兜底（只拒 `2 == method`，`switch method` 无 `case 4` → `default: // 关键字`）
 - 另有「同族缺空守卫」（`onLsSelect`）、「同族缺路径规范化与环检测」（`selectItem`）两条可达性未证实
 

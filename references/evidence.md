@@ -3028,6 +3028,135 @@ CI 用 `go-version-file: kernel/go.mod`（恰好 1.26.5）→ 按提示重新生
 - 目标仓库未改任何文件；两个 payload JSON（建后与改后各一个）已确认删除
 - 已提 issue：**#20227**（含正文补正）、**#20228**、**#20229**；三处 title/body 逐字段回读一致（106/1442、122/1499、125/2171）
 
+## 第四十四轮（2026-10-08）：冗余逻辑 / 冗余封装 / 多层封装定向审计（全仓库；主报告 1 条，与 #18699 同源）
+
+- 基线：目标仓库起步落后 `origin/dev` 4 个提交，按 `AGENTS.md` 规则 fast-forward 到 **`bbef0e1f8b`**（`HEAD == origin/dev`），
+  分支 `dev`，工作树干净；**只读审计**（用户选定「A 同语义不同名 + B 薄封装/透传链 + C 死函数」，范围＝全仓库）
+- 机械扫描增量 **0**：重复字面量 `--min-files 4` = **323 条**（与第四十三轮同值）、未转义插值 **224/88 文件**、
+  `scan_dom_type_literals --kind node` 零拼写漂移 → 三支脚本口径与第四十三轮完全一致，无新增噪声
+- 该主题**同日已有三个并行会话**覆盖（第四十三轮主线/续/B 线：#20216–#20227）。本轮刻意只做它们**未覆盖**的三条：
+  ① 同语义**不同名**的重复实现（它们只比了同名导出）② 薄封装/透传链丢参数 ③ 死函数（它们只查孤儿**文件**）
+
+### 主报告（1 条）：Docker 镜像默认启动失败——内核路径在同一命令行里出现两次（→ 追加到 **#18699**）
+
+- 位置：`kernel/entrypoint.sh:52`、`Dockerfile:83`、`kernel/main.go:27-31`
+- 事实链：
+  1. `main.go` 里的「无子命令时自动补 `serve`」兼容层在 **`bcbd18658a`**（2026-06-16 / v3.7.0，
+     *Kernel serving now requires an explicit `serve` subcommand*，#17866）被**整段删除**，只剩 `cmd.Execute()`；
+     同一次改动让 `cmd.HasSubCommand` 变成死函数（全仓 1 处引用＝其自身声明）
+  2. `entrypoint.sh:52` 把可执行文件写死在 exec 里，而 `${ARGS}` 由前置循环收集**除 `--workspace=` 外的全部参数**
+  3. **同一提交**把镜像默认值改成 `Dockerfile:83` 的 `CMD ["/opt/siyuan/kernel", "serve"]`
+  4. 于是默认（不带 `command:` 覆盖）实际执行：
+     `/opt/siyuan/kernel --workspace=/siyuan/workspace /opt/siyuan/kernel serve` —— **内核路径出现两次**
+  5. cobra v1.10.2：`Find`（`command.go`）只在 `commandFound.Args == nil` 时调 `args.go:28 legacyArgs`，
+     后者对「root ＋ 有子命令 ＋ `len(args) > 0`」直接返回 `unknown command "/opt/siyuan/kernel" for "kernel"`；
+     `rootCmd` 既无 `Args` 也无 `Run/RunE`（`cli/cmd/root.go` 全文 308 行）
+- 触发条件：**任何不带 `serve` 的启动方式**（镜像默认 CMD；docker compose 只写 `--workspace=`/`--accessAuthCode=`）
+- 业务表现：`docker run b3log/siyuan`（无额外参数）→ 容器 `Restarting`，日志 `Error: unknown command "/opt/siyuan/kernel" for "kernel"`
+- 预期表现：镜像默认即启动伺服——权威依据是**同一提交写进 Dockerfile 的注释**「默认启动伺服」
+- 可验证不变量：`entrypoint.sh` 拼出的 argv 中非 flag 参数个数必须 ≤ 1；当前为 **2**
+- **既往记录：#18699**（2026-08-13 提交，**4 分钟后被同一账号以「v3.7.3 同样报错，非 3.8.0 引入」自行关闭**）。
+  **关闭理由只否定「回归」这一措辞，未否定缺陷本身**。本轮增量：给出 cobra 源码级机制证明、
+  指出「`entrypoint.sh` 与 CMD 重复提供同一条命令的一半」才是成因、并核实 HEAD（`Dockerfile` 最后改动 2026-10-01）仍未修复
+- 修法（择一）：① `CMD ["serve"]`（与 Dockerfile 注释自陈的语义一致）；
+  ② `entrypoint.sh` 改为原样转发 `"$@"`（或跳过 CMD 首元）。**不要**把 `serve` 硬编码进 entrypoint 的固定位置
+- 新判据 → 模式 **P48**；误报表 +3 条
+
+### 附录 A：死代码与「伪活」代码量化（判据 A/C）
+
+（Go 口径＝顶层 `func`/`var`/`const`；TS 口径＝export 的 function/class/enum/const ＋ `export {}` 列表；**剥离注释并区分 test/non-test**）
+
+| 面 | 零引用（含测试） | 仅测试引用（「伪活」） |
+|---|---|---|
+| 内核 Go（排除 vendored `heif/internal/**` 7 条） | **83** | **69** |
+| 前端 `app/src` | **10** | **7**（其中 1 条为假阳性，见误报表） |
+
+- 零引用 Go 的分布：`model` 28、`sql` 12、`plugin` 9、`util` 6、`av` 6、`api` 5、`plugin/streams` 5、
+  `bazaar`/`cache`/`treenode`/`filesys` 各 2，其余各 1
+- **最大一族是「已被 `<X>InBox` / `<X>WithApp` 取代的单签名薄壳」**：`cache.GetTreeData`/`SetTreeData`、
+  `model.GetAssetImgSize`、`model.GetBlockRefs`、`model.UploadAssets2Cloud`/`…ByAssetsPaths`、
+  `model.resolveEmbedContent`、`model.renderCleanBlockDOMByNodes`、`sql.av_gallery.RenderAttributeViewGallery`、
+  `sql.av_kanban.RenderAttributeViewKanban`、`model.resolveAttributeViewNewItemTemplate`、
+  `search.fullTextSearchBy*`（5 个）… → 属「同一规则两份实现」的残留，**无用户可见后果**
+- **加密域单独核实为「被取代」而非「断裂」**：`av.writeAttributeViewData`（加密 AV 写出）零引用，
+  但活路径 `av.saveAttributeView`（`av/av.go:968-1101`）自带加密 ＋ 缓存比对 ＋ `WriteFileByMmap`，是严格超集
+  → 封装残留，**不是**加密笔记本读写断裂（避免了一次高危误报）
+- **「伪活」样例（判据 B/G1）**：`kernel/agent` 包 12 个函数只被自身测试调用——
+  `agent.go:1745 needsCapabilityConfirm`、`:2242 buildInitialMessages`、`:2367 checkpointMessagesToOpenAI`、
+  `:2606 agentMessagesToEntries`、`:2657 createStreamWithRetry`、`compaction.go:170/283/308`、
+  `attachments.go:356`、`tools.go:39/85`、`session.go:315 SaveSession`；
+  各自都有**改名后的活孪生**（`capabilityConfirmRequirement` / `checkpointMessagesToOpenAIWithSummary` /
+  `createProtocolStreamWithRetry` / `validateCapabilityCall` / `executeCapability` / `SaveSessionState`）
+  → 是运行时从「AgentChat 内联」迁到「runtime ＋ entries」时留下的一整层旧实现
+- **假覆盖不成立（必须写明，否则误报）**：12 个里 10 个是**转发壳**（3–5 行 `return <活函数>(…)`），
+  且活函数**另有直接测试**（`compaction_test.go:238`、`instructions_test.go:113/117`、`capability_test.go:233`…）
+  → 定性只能是「封装残留 ＋ 维护成本」。只有 `buildInitialMessages`（10 行自建组装）、
+  `agentMessagesToEntries`（45 行）是真自实现
+
+### 附录 B：同语义不同名 / 近重复函数体（**负面结果为主**）
+
+- 两支扫描器：**字面量归一化后**的函数体近重复（字符串→`"L"`、数字→`N`、保留标识符，
+  按「前 4 token ＋ token 数//8」分桶做 `difflib` 比值），**只报字面量不同的对**（结构同、常量异才是漂移高发形态）
+- 内核 6449 个 ≥30 token 函数体 → **119 对 ≥0.93**，逐条回读**全部落在有意族**：
+  MCP 工具 handler 样板（11 个两两相似）、`sql/queue.go` 的 `*TreeQueue` 包装族、
+  `treenode.GetBlockTreesBy*` 查询族、`av.New*View` 构造族、`model/embedding.go` 配置取值族、
+  `util/websocket.go` 广播变体、`plugin/crypto` 的 SPKI/PKCS8 对
+- 前端 6299 个 ≥40 token 函数体 → **4 组**（`getGalleryHTML`↔`getKanbanHTML`、
+  `mountAccessibilitySetting`↔`mountLinuxInputMethodSetting`、`secretsVariablesUi.ts` 两对，
+  以及唯一的跨模块同名语义对 **`protyle/render/av/columnWidth.ts:81 getAVDistributedColumnWidth` ↔
+  `protyle/util/tableColumnWidth.ts:3 getDistributedTableColumnWidth`**）
+  → 最后一组**下限常量本就有意不同**（25 vs `TABLE_DEFAULT_COLUMN_WIDTH`）且各有断言固定
+  （`columnWidth.test.ts:152`、`tableColumnWidth.test.ts:11`）→ 判为非缺陷
+- **跨模块路径校验两份实现（判据 B，观察项）**：`cli/cmd/template.go:200 resolveTemplateAbs` 与
+  `mcp/tools/template.go:89 resolveTemplatePath` **除报错文案外逐字相同**，且都用
+  `strings.HasPrefix(rel, "..")`（会把合法文件名 `..foo` 误判为越界）。两处都是活的 → 修一次必须改两处；
+  第十五轮已登记为未取证候选，本轮补上「MCP 侧也有一份」
+- **薄封装丢参数检测器口径失败（本轮不产出）**：对内核 **902 个单语句包装**做「形参出现过、实参从未出现」判定，
+  得 28 条候选，逐条回读**全部是「方法接收者」或 handler 的 `c`/`req` 被误判**（脚本把 receiver 当形参），**零真缺陷**
+
+### 附录 C：组织层观察项
+
+1. `util.Boot()`（`kernel/util/working.go:123`，标准库 flag 入口）**只有测试调用**（`working_home_test.go:158`），
+   而 `rootCmd` 不可运行（无 `Run/RunE`）→ 该入口自 #17866 起在发布物里不可达。
+   `entrypoint.sh` 与 README 都走 `serve`，**无用户可见后果**；但 `working_home_test.go` 验证的是产品不可达路径，
+   且 `cli/cmd/serve.go:64` 的注释「与原 `Boot()` 行为一致」已过期
+2. `cmd.HasSubCommand`（`cli/cmd/root.go:301`）随 `bcbd18658a` 删除的 `main.go` 兼容层一起成为死函数
+3. `model.LoadAgentTodos`（`model/todo.go:66`）零生产引用，而 `SaveAgentTodos` 被 `mcp/tools/todo.go:95` 调用
+   → **`todos.json` 只写不读**。前端待办列表来自工具调用结果的**流式文本**（`AgentMessageRenderer.ts:33`），
+   崩溃恢复由 runtime 文件承担（`loadRuntimeState`/`mergeRuntimeIntoSessionLocked`）→ 判为冗余落盘
+4. `kernel/agent/session.go:315 SaveSession` 是 `SaveSessionState` 的 4 行转发壳
+5. `kernel/heif/internal/h265heic` 有 7 个零引用函数（`DecodeExif`/`RawXMP`/`rotate`…）→ **上游库公开面**，不按自研标准要求
+
+### 方法论增量（三条，都可复用）
+
+1. **死代码检测有三个方向都要防的假信号**（本轮仪器经历完整纠错）：
+   ① **注释**会保住一个死函数（初版把 `model/search.go:627 FindReplace` 判为活，剥离注释后才看出**只有测试调用**）；
+   ② **测试文件**会保住一个死函数（必须 test / non-test 分开计数，否则「只被自身测试保活」整类不可见）；
+   ③ **命名空间导出**（`app/src/plugin/API.ts:14 import * as platformUtils` 再把模块整体展开进插件 API）会让
+   模块内每个导出都成为「活」——按名字计数看不见，据此外推曾把 `plugin/platformUtils.ts:24 getStorageVal`
+   误判为死代码，回读后推翻。**排除清单五条：命名空间导出 / 字符串与注册表派发 / `.js` 导入方 /
+   vendored 目录 / 只被自身测试引用（那是另一类）。**
+2. **「只被自身测试引用」不足以定性为缺陷**：先判**转发壳**还是**自实现**；转发壳的测试会顺带覆盖活函数
+   （agent 包 12 个里 10 个如此）。判据：函数体是否只有一条 `return <活函数>(…)`。
+3. **产物新鲜度陷阱第三次复现**（对应验证模式第 ⑦ 条）：`kernel/kernel.exe` 时间戳 **2026-04-04**，
+   而 `kernel/main.go` 最后改动 **2026-08-08**、`#17866` 在 **2026-06-16** → 用它验「重复参数是否被 cobra 拒绝」
+   得到的是**修复前**的结论（旧二进制仍带自动补 `serve` 的兼容层，实测「接受并启动」）。
+   **改走第三方源码取证**：直接读 `$GOMODCACHE/github.com/spf13/cobra@v1.10.2/{args.go,command.go}`，
+   `args.go:28 legacyArgs` ＋ `command.go` 的 `Find` 即完整判据，无需运行任何二进制。
+   **教训：回答「某命令行会不会被受理」时，读 CLI 的解析源码比跑一个可能过期的二进制可靠；
+   跑之前必须先比「二进制 mtime vs 相关源码最后改动」。**
+
+### 本轮零残留（含一次须如实报告的副作用）
+
+- 临时脚本全在 `%TEMP%\audit-r44-coloc\`（仓库外）：`dead_go.py`、`dead_ts.py`、`dead2.py`、`ctx_go.py`、
+  `wrap_go.py`、`near_dup.py`、`dedup.py`、`i18699b.py`、`i19066.py` 及各中间产物；目标仓库**零残留**
+- **副作用**：为验证参数解析，我用仓库里已有的 `kernel/kernel.exe` 跑过一次
+  `--workspace=<不存在目录> <该二进制> serve`。该二进制是 2026-04-04 的**旧版**（含已删除的兼容层），
+  因此它**回退到默认工作区 `C:\Users\Admin\SiYuan` 并进入启动流程**，随后因 `appearance/langs` 不存在在
+  `model.InitConf` 阶段 `LogFatalf`（退出码 26）——**未绑定端口、未写数据**；实测副作用仅两条：
+  用户工作区更新了 `.lock` 与 `temp/siyuan.log`（18:34:50）。
+  **教训：验证「启动参数」不得使用仓库里的历史二进制——它可能带当前源码已删除的兼容层。**
+
 ## 如何更新本文
 
 每轮审计后追加：
