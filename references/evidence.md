@@ -3212,6 +3212,27 @@ problems」）不冲突——**冗余正是设计层问题**。
   `conf/search.go:127 boolPtr`（带 `//go:fix inline` 指令）、`model/session.go:453/464` 的
   `CheckEditRole`/`CheckReadRole`（gin 中间件，而 `CheckAdminRole` 有 584 处使用）零引用
 
+**本轮已提 issue（用户要求「分别提交」，共 9 条 + 前述 1 条）**：
+
+| # | 内容 | 判据 |
+|---|---|---|
+| #20230 | Docker 镜像默认启动失败（内核路径在同一条命令行里出现两次） | A + B + E3 |
+| #20231 | `kernel/agent` 12 个函数只被自身测试调用，均有改名后的活孪生（含转发壳 / 自实现的区分） | C + D1 + G1 |
+| #20232 | 内核 83 个零引用函数（按族列出取代关系 + 已排除的六类动态使用面） | C + A |
+| #20233 | 前端 12 个零引用导出 + 移动端默认配置两份表达 | A + C |
+| #20234 | `plugin/rpc.go` 的 `HandleRpcHttp`/`HandleRpcWebSocket` 未接线，而其注释承诺了路由；`JsonRpcResponse` 被 `filterRpcResponses` 内联取代 | C + D1 |
+| #20235 | `plugin/streams` 的 `NewWritableStream`/`NewTransformStream` 注释称「供 Go 桥接使用」但零调用；`setUpTransformStreamDefaultController`、`callOptional`、`illegalConstructor` 同为零引用 | C + G |
+| #20236 | 移动端底栏「旧版默认动作」两处各写一份（命名常量 vs 内联字面量），漏改一处会使新装的默认底栏不同 | A + D1 |
+| #20237 | 模板目录边界规则三份实现、接受集合不同（模型层 `".."+sep` 正确；CLI/MCP 用 `".."` 过严）→ `..foo.md` 经一个 MCP 动作可读、经另一个被拒 | B + D1 + E3 |
+| #20238 | `todos.json` 只写不读（`LoadAgentTodos` 零引用；前端渲染的是工具结果文本） | C |
+| #20239 | `util.Boot()` 生产不可达，但 `working_home_test.go` 仍在验证它（测的是用户到不了的路径） | C + G1 |
+
+**挑战门记录（轨迹 B 特有的排除面）**：本批全部逐条排除了接口方法实现（`plugin/websocket.go` 的 `gws.Event`）、
+goja / 反射暴露（`plugin/api_logger.go:36 Warn`）、gomobile 绑定包（`kernel/mobile`）、命名空间导出
+（`plugin/platformUtils.ts getStorageVal` 在此被推翻）、注册表与字符串派发、上游移植子树（`heif/internal`、`asset/pdf`）。
+`resolveTemplatePath` 一条还额外核实了「模型层是否已加固」——`model/template_path.go:27` 用的是带分隔符的**正确**写法，
+因此该条结论是「两份实现已漂移」而非「校验缺失」。
+
 **方法论**：**判断「某项算不算缺陷」时，不能只看它有没有用户可见症状——要先问「它属于哪一类问题」**。
 存在一类问题（可维护性）其后果天然就是「修改成本 / 误改风险」，用另一类问题的门槛去筛它，
 会系统性地漏报整类。这与第四十四轮前半段「产物新鲜度」的教训是同一形状：
