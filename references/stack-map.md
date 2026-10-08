@@ -266,6 +266,12 @@
   - **断言的真值依赖宿主环境值**（对 `getBoundingClientRect()` 这类 float32 布局量做精确相等，
     而期望侧由被舍入过的样式值在 double 里算出）→ 在非整数显示缩放的机器上恒红 → J5
 - **既有校验器**：`go test -tags "fts5 sqlcipher" ./...`（`kernel/`）；`pnpm test`、`pnpm run lint`（`app/`）
+- **实测（2026-10-09，第五十轮）**：`kernel/go.mod` 用 `go 1.26.5`，CI 与 `cd.yml:168-170/232-234/524-526` 的
+  `actions/setup-go` 都写 `go-version-file: kernel/go.mod` → **CI 的 Go 版本由 go.mod 决定，本机常高于它**，
+  于是「本机红、CI 绿」可能来自语言/标准库实现差异（见 J5 的工具链形态）。
+  **判定门禁强度时不能只看「有没有 PR 触发」**：本仓库有 `pull_request_target` 工作流
+  （`.github/workflows/target-branch.yml`），但它只把 PR 基分支从 `master` 改回 `dev`、**不跑任何测试**；
+  判据必须是「哪个工作流实际执行了测试命令」。
 - **取证陷阱**：
   - **CI 覆盖 ≠ 本地覆盖**；「本地红、CI 绿」本身就是独立发现，不是噪声
   - `pnpm test` 会重写 `app/pnpm-lock.yaml`

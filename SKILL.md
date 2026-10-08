@@ -647,6 +647,16 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
   **权威依据**：FIRST 的 Repeatable（同一输入在任何机器上得到同一结论——这条正是它缺的）、
   Google ch11「flaky 测试接近 1% 就开始摧毁套件可信度」。
 
+  **环境值不止显示缩放**（第四十九/五十轮实测四种，修复方向各不相同）：
+  ① **显示缩放**（布局量的 float32 取整，本仓库 `settingsWindow.test.js` 与 `panelPosition.test.ts` 各一例）；
+  ② **工具链版本**——`kernel/api/network_test.go` 的 `TestForwardProxyResponseSizeLimit` 断言
+  `gzip` 把 65 字节压到 64 字节以下，实测 go1.27.0 下是 **90 字节**（deflate 对极小输入走 stored 块），
+  而 CI 用 `go-version-file: kernel/go.mod` 固定工具链 → 断言的是第三方压缩器行为，不是被测逻辑；
+  ③ **操作系统**——`kernel/util/plugin_development_test.go` 用带尾随空格/点的路径做夹具，
+  在 Windows 上 `os.MkdirAll` 必然失败（Win32 剥掉分量末尾的空格与点），而 CI 的 Go 测试跑在 ubuntu；
+  ④ 已登记的 `TMPDIR`/`GOTMPDIR`（判据 G4）。
+  **共同后果是「本地红、CI 绿」**，与 G4 一起构成「本机测试结论不能当作回归判据」的两种来源。
+
 ### 待实证的检查方向（**不是判据**，不占用字母、无 P 条目）
 
 以下方向由通用运行时经验提出，**本仓库尚无确认的缺陷实例**。按模式库「从一次已确认的缺陷出发」的

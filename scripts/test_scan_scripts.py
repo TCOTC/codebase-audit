@@ -873,6 +873,44 @@ func legacyCaptured(t *testing.T) []byte {
 \treturn data
 }
 """)
+    # 承重：夹具现场构造，同时又读**自己刚写出的导出文件**做往返校验。
+    # 把 `os.ReadFile` 当成「读了捕获产物」会让这条漏报——P53 的样板案例正是这种形态。
+    write("kernel/pkg/roundtrip_test.go", """package pkg
+
+import (
+\t"os"
+\t"path/filepath"
+\t"testing"
+)
+
+func legacyRoundTripFixture() []byte {
+\treturn []byte{'S', 'Y', 'A', 'E'}
+}
+
+func TestLegacyRoundTrip(t *testing.T) {
+\tpath := filepath.Join(t.TempDir(), "export.bin")
+\tif err := os.WriteFile(path, legacyRoundTripFixture(), 0600); err != nil {
+\t\tt.Fatal(err)
+\t}
+\tif _, err := os.ReadFile(path); err != nil {
+\t\tt.Fatal(err)
+\t}
+}
+""")
+    # 反向承重：迁移期把旧实现存成闭包做对照，那不是「旧格式夹具」，不得被报出。
+    write("kernel/pkg/contractlegacy_test.go", """package pkg
+
+import "testing"
+
+func TestLegacyHandlerEquivalence(t *testing.T) {
+\tlegacy := func(body []byte) []byte {
+\t\treturn body
+\t}
+\tif got := legacy([]byte{1, 2, 3}); len(got) != 3 {
+\t\tt.Fatal("bad")
+\t}
+}
+""")
     write("kernel/pkg/callorder_test.go", """package pkg
 
 import "testing"
@@ -1053,6 +1091,12 @@ check("prosemention_test.go" not in out,
       "只在注释里提到 legacy 不被报出",
       "缺少 FIXTURE_SITE 条件时，任何提到旧版本的契约测试都会入选")
 check("captured_test.go" not in out, "读 testdata 的夹具不被报出")
+check("roundtrip_test.go" in out,
+      "现场构造夹具 + 读自己写出的导出文件时仍被报出",
+      "把 os.ReadFile 一律当成「读了捕获产物」会让 P53 的样板案例漏报")
+check("contractlegacy_test.go" not in out,
+      "把旧实现存成闭包做对照时不被报出",
+      "判据若宽到「任意 legacy 命名的赋值」，本仓库 4 条候选会全部变成假阳性")
 
 # --- 12.7 结构绑定 ----------------------------------------------------------
 code, out, err = run(SCAN_TQ, "--repo", TQ_A, "--section", "binding")

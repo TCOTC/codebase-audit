@@ -394,17 +394,27 @@ def ts_oracle_candidates(text):
 FIXTURE_HINT = re.compile(r"legacy|old[_A-Z]?format|\bv1\b|previous[_A-Z]?format",
                           re.I)
 # 「提到 legacy」不够：注释里提一句、或字段名叫 legacy 都会命中。
-# 要求它确实是一个**被构造出来的夹具**：要么有夹具构造函数声明，
-# 要么有 legacy/old 开头的变量赋值。
+# 但**宽到「任意 legacy 命名的赋值」同样不够**——迁移期把旧实现存成闭包做对照
+# （`legacy := func(c *gin.Context) (result *gulu.Result) {…}`）很常见，那不是夹具；
+# 实测旧的宽判据在本仓库给出 4 条候选，**全部为假阳性**（2 条闭包名、2 条 `legacyStats`
+# 字段名），同时把 P53 的样板案例 `kernel/model/crypto_asset_legacy_test.go` 挡在门外。
+# 新的判据是：legacy 命名的符号**自己产出旧格式的字节/串**——返回 `[]byte`/`string` 的函数，
+# 或被赋值一个字节字面量。实测 4 条 → **2 条，且 2/2 为真**（第四十九轮）。
+# 已知盲区：JS 侧用 `Buffer.from` / `new Uint8Array` 构造的旧格式夹具检测不到
+# （本仓库 0 例，故不设未被用例覆盖的分支）。
 FIXTURE_SITE = re.compile(
-    r"func\s+\w*(?:Legacy|Old|V1)\w*\s*\("
-    r"|\b\w*(?:legacy|old)\w*\s*:?=\s*"
-    r"|\b\w*(?:legacy|old)\w*\s*:\s*\[?\s*\{", re.I)
+    r"func\s+\w*(?:Legacy|Old|V1)\w*\s*\([^)]*\)\s*(?:\[\]byte|string)\b"
+    r"|\b\w*(?:legacy|old)\w*\s*:?=\s*\[\]byte\s*[\({]"
+    r"|\b\w*(?:legacy|old)\w*\s*:\s*\[\]byte\s*[\({]", re.I)
 FIXTURE_BUILD = re.compile(
     r"\[\]byte\s*\{|bytes\.Repeat|hex\.DecodeString|binary\.BigEndian|binary\.LittleEndian"
     r"|new Uint8Array|Buffer\.from|\.setUint\d")
+# 只认「读捕获产物」。**不能写成 `os\.ReadFile|os\.Open`**：旧格式往返测试常读
+# 自己刚写出的导出文件（`os.ReadFile(exportPath)`）做校验，那与「读夹具」无关——
+# 实测该写法在 8 个文件里生效，而其中恰好包含 P53 的样板案例。
+# 判据是**路径里出现 testdata/fixtures 这类夹具目录**，而不是「用过读文件 API」。
 FIXTURE_CAPTURED = re.compile(
-    r"testdata|os\.ReadFile|os\.Open\(|embed\.FS|//go:embed|readFileSync|require\(\s*[\"']\./fixtures")
+    r"testdata|//go:embed|embed\.FS|readFileSync|fixtures")
 
 
 def fixture_candidates(path, text):

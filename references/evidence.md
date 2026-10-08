@@ -3533,6 +3533,69 @@ P53 兼容性夹具不是外部权威。P53 与 H3 的分工写进了条目：**
 - **`gh api -X GET search/issues` 检索关键词要包含**报错里的**数字**（`"31.333333"`），
   只按文件名/功能词检索会漏掉「同一文件、不同形态」的既有 issue。
 
+## 第五十轮（2026-10-09）：测试套件定向审计（续）；把「dev 上测试红」逐条归因，8 条 issue + 1 条评论
+
+**范围与基线**：`kernel/**/*_test.go` 与 `app/**/*.test.{ts,js}`（判据 J 的对象）；
+目标仓库 `HEAD == origin/dev == d196c8b3f1`（分支 `dev`，工作树干净，0/0）。
+
+**起点**：用户要求把第四十九轮发现的那一类「恒红测试」分别提 issue，并继续审计。
+本轮改为**先把「dev 上到底有多少个测试是红的、各自因为什么」查清**，再逐条决定是否上报——
+避免把「有测试红」直接写成「产品坏了」。
+
+**取证方式（本轮最有价值的方法）**：直接运行仓库自带的两个校验器——
+`cd app; node --import tsx --test --test-concurrency=1 "src/**/*.test.ts"`（646 个文件，exit=1）
+与 `cd kernel; go test -tags "fts5 sqlcipher" ./...`（exit=1）。**两者都是红的**，且根因分属四类：
+
+| 根因类 | 位置 | 用例数 |
+|---|---|---|
+| 断言的真值依赖**环境值**（J5） | `app/tests/settingsWindow.test.js:354`、`app/src/block/panelPosition.test.ts:68`（150% 缩放下 float32 取整）；`kernel/api/network_test.go:149-162`（go1.27 的 gzip 输出 90 字节）；`kernel/util/plugin_development_test.go:14-42`（Windows 上 `MkdirAll` 带尾随空格的路径失败） | 4 个测试（其中 contract 那 1 个含 57 个子用例） |
+| 手写替身/装配表**缺新符号**（G3/J4） | `app/src/layout/dock/agent/agentSkill.test.ts`（缺 `getFrequentSlashItems`，来自 #20240）；`app/src/boot/globalEvent/readonlyKeydown.test.ts` ×7 与 `app/src/protyle/util/contextMenuHotkey.test.ts` ×1（缺 `handleDocumentBoundaryHotkey` / `getCurrentEditor`，来自 #20202） | 9 |
+| **过期的期望** | `app/src/protyle/util/storageStartup.test.ts:85`（#20269 已把「无配置」归一化成 `{sidebarButtons: true}`，该行仍按旧值断言） | 1 |
+| **契约文案漂移** | `kernel/api/contract_bazaar_test.go` / `contract_repo_test.go` 等（解析错误文案里的内部类型名由 `map[string]interface {}` 变成 `map[string]jsontext.Value`） | 4 个测试 / 57 个子用例 |
+| 未归因（行为断言） | `app/src/protyle/export/imageLayout.test.ts`（`Image must cover the whole table`）、`app/src/protyle/render/listMindmap/model.test.ts`（`native pointer capture saves a drag exactly once: 0 !== 1`） | 2 |
+
+另：`kernel/agent` 的 `TestSystemPromptPreservesNativeStructure`（系统提示词里出现 `previousID`，
+与工具描述重复，违反 #20163 的「细节只放工具描述」规则）——第四十九轮已提 #20285。
+
+**第四十九轮的 float 断言归因已修正**：`_dialog.scss` 的 `border-bottom` 在 **`_dialog.scss:23`**（我上一轮写成 `:26`）。
+
+**已提 issue（8 条，全部 open，title/body 逐字段回读一致）**：
+#20284（`settingsWindow.test.js:354` 浮点精确比较）、#20285（agent 系统提示词重复工具参数细节）、
+#20286（agentSkill 缺 `getFrequentSlashItems`）、#20287（`storageStartup.test.ts:85` 过期期望）、
+#20288（readonlyKeydown ×7 + contextMenuHotkey ×1 缺符号）、#20289（`kernel/api` 契约错误文案里的内部类型名）、
+#20290（plugin_development 夹具在 Windows 上写不出）、#20291（前向代理断言 gzip 输出尺寸）。
+另在 **#20284 追加一条评论**（同类第二处 `panelPosition.test.ts:68`，730 字符回读一致）。
+
+**关键事实（可复现，供后续轮次复用）**：
+- `util.JsonArg` / `util.ParseJsonArgs` 在**生产代码里零调用点**，只作为契约兼容性测试里的冻结 oracle 存在；
+  `DecodeFailure` 默认返回 `Failure[Data](-1, err.Error())`（`kernel/apicontract/response.go:126`）→
+  **解析错误文案就是接口响应里的 `msg`**，所以 `map[string]jsontext.Value` 是对调用方可见的。
+- `gzip.NewWriter` 对 65 字节 `"a"` 的输出在 go1.27.0 下是 **90 字节**（stored 块），
+  129 字节是 24、1024 字节是 29；CI 的 Go 版本由 `go-version-file: kernel/go.mod`（1.26.5）决定。
+- `.github/workflows/` 里 **`pull_request_target` 存在但不跑测试**（`target-branch.yml` 只改 PR 基分支），
+  门禁强度必须看「哪个工作流实际执行测试命令」，不能看「有没有 PR 触发」。
+- `git blame` 是把「红」归因到提交的最省力手段：本例 8 条里 6 条直接由 blame/caller 定位到
+  `2031e1637d`(#20240)、`4b10638cab`(#20202)、`5223e35a2e`(#20269)、`7525a4d6bd`、`d60af96eee`(#20206)。
+
+**工具增量（第四十九轮已修，本轮验证）**：`scan_test_quality.py` 的 `blocks()` 三条件合取后，
+`assert` 小节候选由 12 降到 4；本轮又修掉夹具小节的两个方向问题——
+`FIXTURE_CAPTURED` 不再把任何 `os.ReadFile` 当成「读了捕获产物」（P53 的样板案例正因读自己写出的导出文件被漏报），
+`FIXTURE_SITE` 收紧为「legacy 命名的符号自己产出旧格式字节/串」。实测候选 **4 → 2，且 2/2 为真**
+（`kernel/model/crypto_asset_legacy_test.go`、`kernel/model/inline_style_test.ts` 类）。
+**并已用该夹具核对文档**：`docs/ENCRYPTED-NOTEBOOK.md:345` 规定的旧 `SYAE` 分块 AAD
+（`siyuan:asset:<boxID>:assets/<diskName>:content:<index>`，无 `v2`）与该夹具一致 → 该夹具**有文档权威依据**，J3 对它是干净的。
+
+**本轮副作用（如实记录）**：`go test ./kernel/...` 会在源码树里留下 `kernel/api/index.queue`、
+`kernel/model/conf.json`、`kernel/model/index.queue` 三个未跟踪文件（0 字节/小文件），已删除并确认
+`git status` 干净。
+
+**方法论教训**：
+- **「本机测试红」不是「产品回归」的同义词**。本轮 8 条里只有 2 条需要维护者判断产品侧该怎么改，
+  其余 6 条的修法都在测试侧。**逐条 blame 之后再定性**，否则会把过期期望写成行为回归。
+- **环境值不止显示缩放**：工具链版本（标准库实现细节）与操作系统（路径合法性）同样是环境值，
+  且这两种失败的共同形态都是「本地红、CI 绿」——判据 G4 问执行集，J5 问取值来源，两者互补。
+- **副产物必须收尾**：跑测试会在被测仓库留下文件，收尾时 `git status` 是最后一道检查。
+
 ## 如何更新本文
 
 每轮审计后追加：
