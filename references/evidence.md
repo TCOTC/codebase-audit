@@ -2744,6 +2744,77 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
   `kernel_attrs.py`、`orphans.py`、`dup4.txt`、`domtype.txt`；目标仓库未改任何文件（`git status` 干净）
 - **未提 issue**（本轮无用户可见缺陷）
 
+## 第四十三轮（续，2026-10-08）：分层与职责深挖（1 条确认 → #20219；2 条负面结论 + 2 条方法论纠正）
+
+> 用户要求「提交 issue 并且继续审计 附录：分层与职责观察项」。上一段的 3 条组织层问题已提
+> **#20216**（内置 `custom-sy-*` 属性名未集中：常量已存在却裸写、跨端各自定义、成对属性一个有一个没有）、
+> **#20217**（`icon.js` 重复 `iconTurnInto` + 预览页缺 `iconLayoutLeft`）；本条是同一轮「继续」的部分。
+
+### 确认（→ #20219，中低，架构/职责）
+**导出渲染库的依赖边界完全没有约束。** `app/src/protyle/method.ts` 是 export 包入口
+（`AGENTS.md` §5：*a rendering library (global `Protyle`, …) for code, math, and diagrams*），
+只暴露 13 个静态渲染方法，但**剔除 `import type` 后的运行时闭包 = 929/1617 文件（57%）**：
+
+| 分组 | 闭包内文件数 |
+|---|---|
+| `protyle/render/av` | 113 |
+| `protyle/util` | 101 |
+| `config/` | 108（`config/tabs` 33、`config/setting` 18、`config/tabs/ai` 17、`config/entryVisibility` 11） |
+| `layout/` | 73（`layout/dock` 33、`layout/dock/agent` 20） |
+| `protyle/wysiwyg` | 65 |
+| `mobile/` | 59（`mobile/util` 43、`mobile/menu` 8） |
+| `menus/` | 24 |
+
+- 产物实测 `app/stage/build/export/protyle-method.js` **4.71 MB（4,936,220 字符）**，另有
+  `12.js` 289 KB / `401.js` 160 KB / `429.js` 95 KB 与 `base.css` 224 KB；产物内含
+  `JSAndroid` ×55、`window.siyuan` ×6841。
+- 消费方确凿：`app/src/protyle/export/index.ts:532`、`:1161` 把
+  `<script src=".../stage/build/export/protyle-method.js">` 写进导出页（`:235`/`:1143` 链接 `base.css`），
+  内核 `kernel/model/export.go:1274`、`:1450` 把 `stage/build/export` 列入打包来源。
+- 核心层直接跨入 UI 层的边共指向 **63 个 UI 模块**，主要是 `protyle/wysiwyg/transaction`、
+  `plugin/Menu`、`protyle/ui/hideElements`、`menu`/`dock`/`config`/`mobile` 一族；
+  典型例子 `protyle/util/selection.ts:21` 从 `layout/status`（状态栏 UI 模块）引入
+  `countBlockWord`/`countSelectWord`，而 `selection.ts` 被 83 个文件引用。
+- **不存在单条可切断的根因边**（见方法论第 3 条）→ 结论必须是「边界未被强制」，不是「某处误引用」。
+- 附带：`webpack.export.js:62` 为 `MOBILE: true`（`webpack.desktop.js:68` 是 `false`），
+  闭包内 113 个文件带 `/// #if MOBILE`/`!MOBILE`（76 / 88 个文件，479 行）。已核查唯一「全函数体被
+  `!MOBILE` 包裹且被导出」的 `asset/renderAssets.ts:29 pdfResize`——它在导出包中变空函数，但唯一
+  调用点 `layout/tabUtil.ts:238` 在应用侧，导出页不会调用 → **未确认用户可见后果**，只请维护者确认选择。
+
+### 已核对为干净（勿重复投入）
+1. **`mobile/**` 目录内 `/// #if` 出现 0 次**是有意约定：移动端目录整体进包，平台差异由
+   **共享文件里的 `/// #if MOBILE`** 或**被调函数内部的运行时判断**承担。非 mobile 文件对
+   `mobile/**` 的 118 处静态引用、145 个使用点逐类核对后**全部安全**（三种守卫形态见误报表新增条目）。
+   **不要按「目录」判跨端违规。**
+2. **前端 438 节点大环不是缺陷**：剔除 `import type` 后 1617 个文件构成**单个 438 节点 SCC**
+   （小环 0 个），闭包内**顶层读取 `window.siyuan` 的语句 0 处** → 无初始化顺序危害。
+3. `protyle/export/index.ts` 的 `/// #if !BROWSER` 三处（`:3`/`:88`/`:195`/`:1207`）与 `export/util.ts`
+   的 `:1`/`:24` 是 Electron 专属分支，`BROWSER: true` 下正确剔除。
+
+### 方法论（三条，都可复用）
+1. **仪器自检不能省**：`Select-String -SimpleMatch -AllMatches` 对一个 4.7 MB 的**单行** JS 产物
+   返回 **0 命中**（用同一个模式在 Python `re` 与 `[regex]::Matches` 下分别得到 55 / 6841）。
+   「大文件 + 单行 + PowerShell 管道」会静默给出「干净」的假结果——**先拿一个必然命中的串校准**。
+2. **测量模块图必须先剔除 `import type`**：不剔除会（a）闭包虚高 957 → 929，
+   （b）凭空造出一个两节点环（`render/listMindmap/model.ts ↔ summary.ts`）。
+   剔除方式：先按 `(?:^|\n)\s*(?:import|export)\s+type\b[^;]*?;` 删除整条语句，再匹配模块说明符。
+3. **「单边切除」是验证根因归属的便宜手段**：把怀疑的边从图中删掉重算可达集。
+   本轮据此**推翻了自己的假设**——删掉 `protyle/util/selection.ts → layout/status.ts` 后闭包
+   仍为 929（减少 0），证明耦合弥散而非单点误引用（若不做这一步，报告会写成「根因是这一条边」）。
+
+### 文档纠正
+- **`stack-map.md` 的「`protyle/render/` 是纯渲染，不得读 DOM / 发请求」被实测推翻**：
+  `app/src/protyle/render/**` 非测试文件有 **100 处**网络请求调用（`render/av/action.ts:923`、
+  `render/blockRender.ts:83` 等）并大量读写 DOM。已改写该段，并把「结论不可复用」的理由写明，
+  以防后续轮次按此产出上百条假阳性。
+
+### 本轮零残留
+- 临时脚本 `%TEMP%\audit-r43b\`：`dedupe.py`、`post.py`、`post3.py`、`body1-3.md`、`layers.py`、
+  `cycles{,2}.py`、`ifdef.py`、`crossings.py`、`cut.py`、`counts.py`、`orphans`/`mobile_*`/`kfp2` 等；
+  目标仓库未改任何文件
+- 已提 issue：**#20216**（属性名常量）、**#20217**（图标注册表）、**#20219**（导出包边界）；
+  三条 title/body 均逐字段回读一致（98/2879、100/1175、101/3212）
+
 ## 如何更新本文
 
 每轮审计后追加：

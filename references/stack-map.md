@@ -620,9 +620,15 @@ K2 **0**、A6 **0**、K5 的「确认」由 18 降到 16（剩下的正是已判
   `fluentui-blazor` / `mvvm-toolkit*` / `react19-*` / `react-container-presentation-component`
   （React、Vue、LWC、Blazor、.NET 平台专用）：**本仓库是原生 TypeScript +
   模板字符串 + SCSS，无组件目录、无组件注册表（`components.json` / `COMPONENTS.md` 均无命中），
-  这些 skill 的载体在目标仓库里不存在**。其中唯一可迁移的原理——「渲染函数归 `ui`、
-  含状态/副作用/异步者归 `features`」——在本仓库的对应物是 `protyle/render/`（纯渲染，
-  不得读 DOM / 发请求）与 `protyle/util/`（有副作用）的分工，已作为判据 D 的检查点记录。
+  这些 skill 的载体在目标仓库里不存在**。
+  **原稿写过「本仓库的对应物是 `protyle/render/`（纯渲染，不得读 DOM / 发请求）与
+  `protyle/util/`（有副作用）的分工，已作为判据 D 的检查点记录」——第四十三轮实测推翻该断言**：
+  `app/src/protyle/render/**` 的非测试文件里有 **100 处**网络请求调用（例：`render/av/action.ts:923`
+  `fetchPost("/api/attr/getBlockAttrs")`、`render/blockRender.ts:83` `fetchPost("/api/search/getEmbedBlock")`），
+  并且大量直接读写 DOM；`protyle/render/av/**` 本身就是一个完整功能层（发请求、开对话框、
+  改文档、开菜单）。**不要把「目录名 render」当成纯渲染契约**，否则会产出上百条假阳性。
+  该入口真正有据可查的问题在别处：`protyle/method.ts`（导出渲染库）的依赖边界没有任何强制手段，
+  见 evidence 第四十三轮（#20219）。
 - `a11y.instructions.md` 里的 **V（视觉与颜色）与 D（媒体）两类反模式**：
   对比度、只用颜色传达信息、固定字号、动效降级、字幕 —— 这些需要颜色计算与视觉基线，
   取证手段与本 skill 完全不同（axe / Lighthouse / 设计审查），**有意不纳入**。
