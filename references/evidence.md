@@ -2666,6 +2666,84 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
   `indexEntryToOp` 命中 #17716（**刷盘过程中崩溃**，症状与位置均不同）、#18034；`embed block index crash recovery` 命中 #20175
   （**恢复/汇总类**批量 issue）——两条均已读正文确认不覆盖本条，非重复报告。labels 未随载荷提交（无 push 权限会被静默丢弃，按 `AGENTS.md` 不做补标签请求）
 
+## 第四十三轮（2026-10-08）：功能架构 / 代码组织定向审计（全仓库；主报告 0 条用户可见缺陷，3 条组织层问题进附录）
+
+- 基线：目标仓库 `HEAD == origin/dev == 2b02f86fde`（0/0），分支 `dev`，工作树干净；**只读审计**（用户选定「全仓库（内核 + 前端，含跨层注册表）」+「缺陷 + 架构观察项」）
+- 机械扫描：重复字面量 `--min-files 4` **323 条** / 1851 文件（P1 263 / P2 23 / P3 37），逐条回读全是已知噪声
+  （`assets/`、`/stage/loading-pure.svg`、`/api/block/getDocInfo`、`conf.json`、`sort.json`、`petal.json`、
+  `plugin.json`、`127.0.0.1`、`image/png`、`separator_1`/`separator_2`、`INPUT`/`SPAN`/`BUTTON`…）；
+  `scan_dom_type_literals.py --kind node` 得 **27 个 Node\* 值 / 528 处引用，零疑似拼写漂移**
+- **本轮是负面结果为主的一轮**，最值得记的是「哪些看似可疑的注册表其实干净」：
+
+### 已核对为干净（后续轮次勿重复投入）
+1. **命令 / 快捷键注册表三方集合零漂移**。自写脚本提取 `Constants.SIYUAN_KEYMAP.general`（72）与
+   `.editor.general`（71）、`nativeCatalog.ts` 的 `DESKTOP_COMMAND_PANEL_GENERAL_KEYS`（68）/
+   `MOBILE_...`（26）/ `COMMAND_PANEL_EDITOR_KEYS`（2）做差集：**幽灵键 0、重复项 0、移动 ⊆ 桌面成立**。
+   未进面板的 4 个（`agentChat`/`agentSend`/`commandPanel`/`openContextMenu`）是「面板自身入口」与
+   「上下文/Agent 专用」，属有意排除；`editor.general` 71 个只暴露 2 个也是有意的分类
+   （`nativeCatalog.test.ts`/`registry.test.ts` 已钉住）。`registry.ts` 还有 `id` 重复即 `throw` 的自检。
+2. **设置页签注册表是单一对象字面量**（`config/setting/tabs.ts` 的 `createSettingTabs()`），
+   桌面 `config/index.ts` 与移动 `mobile/menu/mainMenu.ts:273` **都迭代 `getSettingTabDefs()`**，
+   不存在第二份；`settingTabToMenuId()` 由同一个 key 生成，无漏项空间。
+3. **前端无孤儿模块**。对 1617 个 TS 文件建 import 图，只有 8 个「无人导入」，逐个核实全为合法：
+   3 个 webpack 入口（`mobile/index.ts`/`protyle/method.ts`/`window/index.ts`）、3 个 Worker
+   （`AgentMarkdownWorker.ts`/`layoutWorker.ts`/`RecordMediaWorker.ts`，按 URL 字符串加载）、
+   `config/setting/window.ts`（独立设置窗口入口）、`asset/anno.ts`（**由 `.js` 导入**，见误报表）。
+4. **跨文件同名导出只有 10 组**，逐组回读全部合法（见误报表新增条目）。
+5. **图标表 267 个 symbol / 预览页 265 个引用**，集合差只有 1 项（见下）。
+6. `escapeHtml`/`escapeAttr`/`escapeAriaLabel`/`escapeHtmlTextAndAttr` 只有 `util/escape.ts` 一份；
+   `sanitizeKernelHTML` 只有 `util/hostCapabilities.ts` 一份。
+7. `app/src/types/dist/**` 与 `app/stage/build/**` 均被 `.gitignore` 排除（`git ls-files` 计数 0），生成物边界正确。
+8. `kernel/apicontract` 的 AV 富文本白名单 `isAllowedValueTextRichBlockIAL`（`kernel/av/value.go:1318`）
+   与表单元格富文本 `ParseTableCellRich` 是**有意分开的两套白名单**，
+   `kernel/av/table_cell_rich_test.go:42` 明确断言「表格代码设置不得扩张数据库富文本白名单」→ 不是漏项。
+9. `kernel/av/av.go:1432-1438` 的 `custom-sy-av-s-text` 与前端 4 处 `"custom-sy-av-s-text-"` 前缀
+   宽度不同（内核无尾随连字符、前端有），但**构造出的键一致**（内核一律 `+ "-" + avID`）→ 无漂移。
+
+### 附录 A：组织层问题（有权威依据与可验证不变量，但当前无用户可见后果）
+1. **AGENTS.md 第 8 条（`custom-sy-*` 属性名常量必须定义在 `app/src/constants.ts`）有多处违背**：
+   - `app/src/protyle/util/onGet.ts:441` 裸写 `"custom-sy-readonly"`，而 `Constants.CUSTOM_SY_READONLY`
+     （`constants.ts:84`）存在且被 12 处引用
+   - `app/src/protyle/util/headingNumberCore.ts:12` 自建 `CUSTOM_HEADING_NUMBER_ATTRIBUTE = "custom-sy-heading-number"`，
+     与 `constants.ts:87` 的 `CUSTOM_SY_HEADING_NUMBER` 同值两份；另一处 `breadcrumb/index.ts` 用常量
+   - `app/src/protyle/util/tableCellRichValue.ts:2` 自建 `TABLE_RICH_ATTRIBUTE`，与内核
+     `kernel/treenode/table_cell_rich.go:17` 的 `TableCellRichTableAttribute` 同值两份
+   - `app/src/protyle/util/table.ts:56,57,61,77` 裸写 `custom-sy-table-header-row` / `-column`（无任何常量）
+   - `app/src/protyle/hint/extend.ts:651`、`hint/index.ts:712`、`util/clear.ts:53`、
+     `wysiwyg/transaction.ts:1446` 四处裸写 `custom-sy-av-s-text-` 前缀，而内核有
+     `av.NodeAttrViewStaticText`（`kernel/av/av.go:1436`）
+2. **内核侧同类缺位（判据 A 的「同目录已有同义常量却未复用」档）**：
+   - `kernel/model/block.go:1581` 与 `kernel/sql/block_ref_query.go:247` 裸写 `"custom-avs"`，
+     而 `av.NodeAttrNameAvs`（`kernel/av/av.go:1432`）存在且 `kernel/model` 普遍引用 `av`
+   - `kernel/av/value.go:1348`、`:1445` 裸写 `custom-sy-code-tab-spaces`，**内核侧无任何常量**
+     （前端有 `Constants.CUSTOM_SY_CODE_TAB_SPACES`）
+   - `custom-heading-mode`（5 处裸写）**没有常量**，而它的成对属性 `custom-heading-level`
+     有 `embedHeadingLevelAttr`（`kernel/model/embed_heading.go:26`）→ 同族不对称
+   - `custom-sy-readonly`（4 处）与 `custom-reminder-wechat`（2 处）同样无内核常量
+   - 实测：以上**当前零漂移**（两侧字面量逐字相同），故是潜在分叉风险而非现行缺陷
+3. **图标注册表两处一致性问题**（权威依据 = `AGENTS.md` 第 3 条）：
+   - `app/appearance/icons/litheness/icon.js:139` 与 `:142` **两个 `<symbol id="iconTurnInto">`**，
+     `path` 数据逐字相同 → 重复 `id` 是非法 DOM，第二份是死标记；
+     `document.querySelectorAll('#iconTurnInto').length === 2`
+   - `iconLayoutLeft` 定义在 `icon.js:375`、被 `app/src/asset/pdf/viewerTemplate.ts:184` 使用，
+     但**不在 `app/appearance/icons/index.html`**（预览页 265 个引用里没有它）；
+     同仓 `app/src/config/ocr.test.ts:44` 已把「预览页必须含 `#iconOCR`」写成断言，
+     说明该页被当作需维护的产物
+
+### 附录 B：分层观察项
+- 内核包依赖存在**基础层反向依赖特性包**：
+  `kernel/util/chatgpt.go:14 → kernel/chatgpt`、`kernel/util/ocr.go:41 → kernel/ocr`；
+  `kernel/treenode/{av.go:20, table_cell_rich.go:13, table_cell_rich_export.go:6} → kernel/av`；
+  `kernel/filesys/stat.go:25 → kernel/av`；`kernel/conf/search.go:24 → kernel/treenode`。
+  无环（`av → util → chatgpt/ocr` 均单向），但「只想要 `treenode` 的字符串工具也会拉进 AV 引擎与 AI 客户端」。
+- `app/src/business/` 目录只剩一个模块 `openRecentDocs.ts`（+ 测试），
+  「business 层」未曾成形，是历史命名的残留。
+
+### 本轮零残留
+- 临时脚本全部在 `%TEMP%\audit-r43\`（仓库外）：`cmp_keymap.py`、`dup_exports.py`、`custom_attrs.py`、
+  `kernel_attrs.py`、`orphans.py`、`dup4.txt`、`domtype.txt`；目标仓库未改任何文件（`git status` 干净）
+- **未提 issue**（本轮无用户可见缺陷）
+
 ## 如何更新本文
 
 每轮审计后追加：
