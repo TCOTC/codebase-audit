@@ -3596,6 +3596,96 @@ P53 兼容性夹具不是外部权威。P53 与 H3 的分工写进了条目：**
   且这两种失败的共同形态都是「本地红、CI 绿」——判据 G4 问执行集，J5 问取值来源，两者互补。
 - **副产物必须收尾**：跑测试会在被测仓库留下文件，收尾时 `git status` 是最后一道检查。
 
+## 第五十一轮（2026-10-09）：把第五十轮留下的两个「未归因」失败查清，并补跑 tests/electron/scripts
+
+**起点**：第五十轮末尾列了两条未归因的行为断言失败与「`app/tests/**`、`app/electron/**` 未单独跑全」。
+本轮把这三件事全部收口，另开 5 条 issue（#20299–#20303）。
+
+**基线**：`HEAD == origin/dev == d196c8b3f1`，工作树干净。
+
+### A. `app/src/protyle/export/imageLayout.test.ts:177` / `:185` → **#20299**
+
+同文件对 `mobile` 取 `[false, true]` 两次运行：`mobile=false`（1000px 窗口）通过、`mobile=true`（390px 窗口）失败。
+插桩取全精度值（测试自带 `devicePixelRatio = 2`）：
+
+| 量 | 值 |
+|---|---|
+| `image.left` / `image.right` / `image.width` | `23.708333969116211` / `1635.7083339691162` / `1612` |
+| `table.left` | `35.708335876464844`（= `image.left + 12.000001907348633`） |
+| `table.right` | `1635.7083358764648` |
+| `table.right - image.right` | **`1.9073486328125e-06`**（一个 float32 ULP） |
+
+`image.width(1612) = 12 + 1600` = 表格偏移 + 表格宽度 → **图片确实覆盖到表格右边缘**，差值纯属取整。
+桌面视口侥幸通过，是因为图片比表格右边缘多出 **49px** 余量；移动端按
+`updateExportImageLayout` 的 `minWidth = ceil(imageWidth + overflowWidth)` **贴齐、零余量**。
+加 5 秒轮询无效（`waited=5012ms`）→ 不是时序问题。
+**对照实验**：只把两处 `<=` 改成 0.5px 容差 → 整文件 **exit=0**（证明这两处是该文件唯一的失败点）。
+**确定性**：未修改版本累计 4 次失败（第五十轮全量 src 一次 + 本轮独立 3 次），断言与位置完全一致。
+同文件 `:218`、`:227` 是同样的 `<=` 形状（靠余量侥幸通过），已在 issue 里建议一并收紧。
+
+### B. `app/src/protyle/render/listMindmap/model.test.ts:1901` → **#20300**
+
+插桩取到的关键事实：原生事件（`webContents.sendInputEvent`）**确实投递**，但命中
+`mindmap-view__route-handle mindmap-view__route-endpoint`（**端点**句柄），而测试查询的是
+`:not(.mindmap-view__route-endpoint)`（**中点**句柄）。
+
+几何：中点句柄 **20×20**、两个端点句柄 **28×28**（中心仅相距 9px）；夹具的关系线段
+`pts=[{x:131.5,y:67},{x:131.5,y:85}]` **只有 18px**，两个 28px 端点句柄把中点句柄**完全盖住**，
+`elementFromPoint(中点句柄中心)` 返回端点句柄。
+
+28px 来自 `app/src/assets/scss/protyle/_mindmap-view.scss:872` 的 `@media (any-pointer: coarse)`
+（基准 12px 在 `:770-772`，中点句柄 20px 在 `:737-741`）。
+本机实测 `anyCoarse: true`、`maxTouchPoints: 10`，而 **`pointerCoarse: false`** ——
+`any-pointer` 只要有**任一**粗指针设备就命中，**笔记本触摸屏**即中，即使用户用鼠标。
+
+**对照实验（唯一变量）**：只用内联样式把端点句柄压回 12px（其余不动，即模拟无触屏机器）→
+中点句柄可命中，**整文件 exit=0**。
+事件打到端点句柄后被拖到 110px 空白处，对「端点拖拽」而言无合法目标、**不产生变更是正确行为**
+（即拖拽逻辑没问题）。CI 的 `windows-latest` 通常无触屏 → **本地红、CI 绿**（该点为推断，未实测 CI）。
+issue 里另附产品层观察（触屏设备上短线段的中点句柄不可命中；用户仍可拖关系线本身，非功能死路）。
+
+### C. 补跑 `app/tests/**` + `app/electron/**` + `app/scripts/**`：4 处失败 → **#20301 / #20302 / #20303**（+ 已知 #20284）
+
+| 文件 | 报错 | 引入者 |
+|---|---|---|
+| `tests/agentStreamingMarkdown.test.js:865` | `AgentWelcomeGreeting_1.AgentWelcomeGreeting is not a constructor` | `9466a93e17`（2026-10-07） |
+| `tests/newRefDocAtPath.test.js:183` | `dailyNote_1.getDailyNoteHints is not a function` | `128ec67623`（#20201） |
+| `tests/superBlockCreation.test.js:394` | `ReferenceError: escapeHtml is not defined` | `2031e1637d`（#20240，与 #20286 同源） |
+| `tests/settingsWindow.test.js:618` | 浮点精确相等 | 已上报 **#20284** |
+
+三处都是「**替身/装配表未随生产新增依赖同步**」，且两处用了**静默回退**的写法，把「缺模块」变成深层的
+`is not a constructor` / `is not a function`：
+
+- `tests/agentStreamingMarkdown.test.js:60-61`：`if (!sources[name]) return stub;` —— 未知模块一律返回
+  **同一个 stub 对象**，`stub.AgentWelcomeGreeting` 为 `undefined`；
+- `tests/newRefDocAtPath.test.js:16`：`reference => dependencies[reference] || dependencies` ——
+  未知引用回退成**整个 deps 对象**。
+
+`newRefDocAtPath` 这一处**第五十轮的上一轮（第四十三轮）已观察到**并归因到 `128ec67623`，
+但当时被归入「与本次复核无关」而未上报；本轮新增机理与可复现命令后补报。
+
+**汇总（本轮全部失败）**：`src/**/*.test.ts` 13 个用例 / 8 个文件；`tests|electron|scripts` 4 个用例 / 4 个文件；
+`kernel` 侧 3 个包（第五十轮已全部上报）。
+
+**方法论教训**：
+- **「查不清的失败」要用对照实验闭合，不能停在相关性**：查到「事件命中端点句柄」只是相关性；
+  把唯一变量改掉（28px → 12px）后整文件转绿，才是因果证明。同理 `imageLayout` 的
+  「两处 `<=` 加容差 → exit=0」既证明了根因也界定了失败点的**完整集合**。
+- **不要相信自己在探针里做的四舍五入**：第一版探针把几何值 `Math.round(x*1000)/1000`，
+  于是「加等待后就通过」，得出「这是竞态」的错误结论；取全精度后才看出是 1 ULP，且等待确实超时（5012ms）。
+- **`@media (any-pointer: coarse)` 是本仓库最易忽略的宿主环境值**：它不是「设备类型」而是
+  「存在任一粗指针设备」，且 `pointer: coarse` 仍为 `false`，所以只检查后者会漏。新增为 J5 的第 ⑤ 类环境值。
+- **插桩位置会被测试自己的 stub 遮蔽**：该测试替换的是 `HTMLElement.prototype.setPointerCapture`，
+  在 `Element.prototype` 上打补丁永远收不到调用（`captures: 0` 是假阴性）。
+  **给测试打桩前先确认它改了哪一层原型。**
+- **探针脚本要放对目录**：`__dirname` 相对源码的测试无法移到 `%TEMP%`（模块解析也找不到 `typescript`）；
+  本轮用「复制到 `%TEMP%` + 同时复制它 `__dirname` 依赖的源文件」解决，避免在目标仓库留下文件。
+  确实需要放回仓库时用独立文件名，**跑完立即删除并 `git status` 确认**。
+
+**已提 issue**：#20299（imageLayout 精确相等）、#20300（脑图粗指针句柄覆盖）、
+#20301（AgentWelcomeGreeting）、#20302（getDailyNoteHints）、#20303（escapeHtml）。
+全部 open，title/body 逐字段回读一致。
+
 ## 如何更新本文
 
 每轮审计后追加：

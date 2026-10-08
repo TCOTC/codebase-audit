@@ -284,6 +284,12 @@
   - **G3 的新形态：按「文件名清单」装配模块的测试**（每个文件一个独立 IIFE）在被装配的模块拆分后必然失绑。
     **只把新文件追追加进清单无效**——第二个 IIFE 绑定不到原模块内部的引用，
     必须把两份语句合并进同一模块体（本仓库现成写法：`app/tests/verticalNavigation.test.js:18-22`）
+  - **G3 的另一个形态：替身表「静默回退」使缺模块表现为深层 TypeError**。两个实测写法——
+    `if (!sources[name]) return stub;`（`app/tests/agentStreamingMarkdown.test.js:60-61`，未知模块一律返回**同一个 stub 对象**）
+    与 `reference => dependencies[reference] || dependencies`（`app/tests/newRefDocAtPath.test.js:16`，未知引用回退成**整个 deps 对象**）。
+    两者都不报「缺模块」，而是让 `new X()` / `X()` 在深层报 `is not a constructor` / `is not a function`，
+    归因成本远高于 `throw new Error("unexpected module: " + name)`（本仓库正确写法见 `app/tests/settingsWindow.test.js`）。
+    **审计时看到这两类深层 TypeError，先去找生产代码新加了哪个 import，而不是去读报错栈里的业务函数**。
   - 判「某测试的失败是否由某提交引入」**不能只跑目标树**：该文件可能在父树也是红的（只是失败在另一条断言上）。
     用「同一测试文件 + 两份源码树」做对照，并优先用不依赖 electron / DOM 的静态装配复现
 
