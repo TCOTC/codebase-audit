@@ -2815,7 +2815,7 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 - 已提 issue：**#20216**（属性名常量）、**#20217**（图标注册表）、**#20219**（导出包边界）；
   三条 title/body 均逐字段回读一致（98/2879、100/1175、101/3212）
 
-## 第四十三轮（B 线，2026-10-08）：桌面/移动孪生副本漂移（6 条确认：#20220–#20225）
+## 第四十三轮（B 线，2026-10-08）：桌面/移动孪生副本漂移（7 条确认：#20220–#20226）
 
 > 与同日的「第四十三轮」/「第四十三轮（续）」是两个并行会话：那两条覆盖
 > 分层/职责与导出包边界（#20216/#20217/#20219），本条覆盖**前端 `app/src` 的桌面 ↔ 移动孪生副本**。
@@ -2833,7 +2833,7 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
   未转义插值 `--root app/src` 得 **224 处 / 88 文件**（与历轮口径 242–244 一致）。**真缺陷增量 0**，
   两条发现全部来自定向语义核查
 
-### 确认（6 条，均已提 issue，title/body 逐字段回读一致）
+### 确认（7 条，均已提 issue，title/body 逐字段回读一致）
 
 | # | 判据 | 结论 | 位置 |
 |---|---|---|---|
@@ -2842,6 +2842,7 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 | #20222 | A + E2 | API 生成物随 Go 工具链变化：`networkEchoStandardSchema` 反射标准库类型，go1.27 新增 `ConnectionState.LocalCertificate` 与 `Certificate.RawSignatureAlgorithm` → `api:check` 必失败 | `kernel/apicontract/network_echo.go:44-60` → `schema.json` / `app/src/types/api/index.d.ts` |
 | #20223 | B + D1 | `Table.GetField` 的 `for _, column := range` 丢弃下标 → `fieldIndex` 恒为 0，与 `Gallery`/`Kanban` 的 `for i, field` 漂移；**休眠**（`GroupCalc` 全仓无写入端） | `kernel/av/layout_table.go:178-185` |
 | #20224 | D1 + B | 移动端 `setCurrent` 的**回溯分支**缺容器排除，而**首分支**有（同一函数内不一致）；`setCurrentById` 先清全部高亮再查找，查不到即 `return` → 无高亮 | `mobile/dock/MobileOutline.ts:440-446` vs `layout/dock/Outline.ts:590-597` |
+| #20226 | B + D1 + D1j | 移动端搜索在 `method === 4`（语义搜索）下**不拦截替换**，桌面端拦截；内核只拒绝 `2 == method`，且 `switch method` 无 `case 4` → `default: // 关键字`，于是替换目标集合由**字面关键字**匹配决定，与屏幕上的语义结果集不同 → 移动端可写入桌面端拒绝写入的内容 | 移动端 `mobile/menu/search.ts:44-52`；桌面端 `search/util.ts:1419-1425`；内核 `kernel/model/search.go:633-641`/`:1658+`（成因提交 `c0fdb2a694` #17788 只补了桌面端） |
 | #20225 | D3 + A | 两端大纲成员判据只排除 `bq`/`callout-content` 2 类，内核权威源排除 4 类（漏 `NodeTabItem`、`NodeBlockQueryEmbed`） | `layout/dock/Outline.ts:585-594`、`mobile/dock/MobileOutline.ts:434-441`；权威 `kernel/model/heading_number.go:141-156` |
 
 **#20222 的取证（可复现）**：`cd kernel && go run ./apicontract/cmd/apigen -check -root ..`
@@ -2862,7 +2863,7 @@ CI 用 `go-version-file: kernel/go.mod`（恰好 1.26.5）→ 按提示重新生
 `handleCallback` ×2 + `handelCallback` ×1、两个渲染器构造函数 ×2）。
 
 **分类纪律**：比值低不等于缺陷——30+ 处差异逐条回读后归为五类（有意的平台差异 / 该端无消费者 /
-同端另有替代机制 / 外层已被守卫挡住 / 二者都对），只有能写出用户可见后果的 6 条升级为主报告。
+同端另有替代机制 / 外层已被守卫挡住 / 二者都对），只有能写出用户可见后果的 7 条升级为主报告。
 判据细节与反例全部写入模式 **P47** 与误报表 4 条新条目。
 
 **该方法的假阴性（必须声明）**：按函数名配对只能抓「复制品」。`menus/*` 与 `mobile/menu/*`
@@ -2909,12 +2910,13 @@ CI 用 `go-version-file: kernel/go.mod`（恰好 1.26.5）→ 按提示重新生
   另 `%TEMP%\audit-r43x2\`（第二轮）、`%TEMP%\audit-r43x\`（第一轮）已删除
 - 目标仓库 `git status --porcelain` 为空；**并行会话的 `%TEMP%\audit-r43`、`%TEMP%\audit-r43b`、
   `%TEMP%\audit-r43x4-20219-verify` 未被触碰**
-- 6 条 issue 的载荷文件（`p1-p4.json`、`pA/pB.json`、`created.json`）已删除并确认不存在
+- 已提 issue：**#20220–#20226**（移动端插件事件、`limit ≤ 0` 契约、`api:check` 随工具链失败、`Table.GetField` 下标恒 0、移动端大纲容器排除、大纲成员判据漏页签、移动端语义搜索可替换）；
+  七条 title/body 均逐字段回读一致（75/986、107/1147、91/1074、94/1069、100/1482、89/1546、125/2455）
 - 本地内核 3.8.7-alpha.7 在跑，只用只读接口（`/api/system/version`、`/api/outline/getDocOutline`）
 
 ### 方法论增量
 
-1. **「同族差异」必须逐条分类，不能按「有差异 = 缺陷」上报**：本轮 30+ 处差异只有 6 处是缺陷，
+1. **「同族差异」必须逐条分类，不能按「有差异 = 缺陷」上报**：本轮 30+ 处差异只有 7 处是缺陷，
    其余全部合法。**分类纪律本身就是产出**——它把「17 个函数不同」从噪声变成可复核的清单
 2. **同一函数内的两处不一致 > 跨文件比较**：`setCurrent` 的首分支与回溯分支相邻，比对成本最低，
    而「对齐某侧」的提交（`59dd2a0bc3`）**恰好只改了首分支** → **`git show <sha> -- <file>` 要数它覆盖了几个镜像分支**
