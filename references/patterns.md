@@ -1441,3 +1441,56 @@ linter 也看不到；只有「功能 A 的退出路径 × 功能 B 的借用」
 （本仓库会写成 `{{查询}}` 脚本），比原缺陷更糟——值变成非空，于是周期补全任务永远不再处理它。
 正确做法是恢复**派生内容的生成逻辑**（复用原计算路径），或在 entry 中存下重建所需的足够信息。
 
+
+### P47 桌面/移动孪生副本的漂移（复制后只改一侧）
+
+**判据**：B（同一语义两份实现且已漂移）+ D1（镜像分支不对称）+ D1d（同族缺前置守卫）+ D3（闭合集合漏项）。
+
+**形态**：同一功能在两个目录里各有一份**手工复制的实现**——本仓库是 `app/src/layout/dock/*` 与
+`app/src/mobile/dock/*`（`Files`/`MobileFiles`、`Outline`/`MobileOutline`、`Tag`/`MobileTags`、
+`Bookmark`/`MobileBookmarks`，`BacklinkContent` 是两者的共同基类）。之后某一次改动只改了其中一侧，
+另一侧停在被修改前的状态。**危害会累积**：`AGENTS.md` 第 2 节第 11 条要求的「同步检查」在缺少共享基类时
+只能靠人眼，于是同一功能面上反复出现不同表现。
+
+**扫描法（成本低、产出高）**：按大括号配对提取两个文件的**同名函数体**，逐对算
+`difflib.SequenceMatcher` 比值，把 `.999` 以下的全列出再人工分类。本仓库实测：
+`Files` 24 个同名函数里 **17 个不同**、`Outline` 16/21、`Tag` 3/4、`Bookmark` 3/3。
+第二路是**全局函数体哈希**（归一化空白后取 sha1）：986 个非测试 TS 文件得到 **15 组**
+「同一函数体出现两次以上」，其中 11 组即上述孪生对，另 **4 组是非孪生的重复**
+（`config/tabs/ai/aiUi.ts:332` 与 `config/tabs/secretsVariablesUi.ts:356` 的 `showDeleteConfirm`；
+`protyle/render/av/dateFormatMenu.ts:7` 与 `number.ts:6` 的 `refreshDatabaseAttributePanels`；
+`layout/dock/Graph.ts:360` 与 `Outline.ts:301` 的 `handleCallback`；
+`layout/dock/graph/{canvas,label}Renderer.ts` 的构造函数）。
+
+**分类纪律（决定报告可信度）**：比值低**不等于**缺陷。必须逐条回读并归入下列之一：
+① **有意的平台差异**（触摸 vs 鼠标、`this.tree.element` vs `this.element`、缩进常量 18 vs 20、
+`multiSelect` 守卫、`bindSort` 的两套独立拖拽实现）；
+② **该端无消费者**（移动端不渲染 `.ariaLabel`，故桌面那段 `aria-label` 刷新对它不适用）；
+③ **同端另有替代机制**（移动端用中央的 `mobile/util/onMessage.ts:134/143` → `removeMobileBacklinkContent`
+代替逐面板清理）；
+④ **外层已被守卫挡住**（`MobileOutline` 注册在 `window.siyuan.mobile.docks.outline`，**不进 `models.outline`**，
+故桌面 `editor/util.ts:787` 那条 `setCurrent(undefined)` 路径不可达）；
+⑤ **二者都对**（`onMount` 里 `liElement.remove()` 的位置差异：被读的 `.counter` 是 `closeElement` 头部那一个，
+位于被删 `li` **之前**，`querySelector` 取到的永远是它）。
+只有能写出**用户可见后果**的才升级为主报告。
+
+**本仓库由此产出的 6 条（形态样例）**：
+- #20220 移动端不派发 `opened-notebook` / `closed-notebook`（桌面 `Files.ts:1232`/`:1254` 有，移动端无）
+- #20224 移动端 `setCurrent` 的**回溯分支**缺容器排除，而**首分支**有——**同一函数内**两处不一致
+- #20225 两端的大纲成员判据只排除 2 类容器，内核 `collectOutlineHeadings` 排除 4 类（漏 `NodeTabItem`）
+- 另有「同族缺空守卫」（`onLsSelect`）、「同族缺路径规范化与环检测」（`selectItem`）两条可达性未证实
+
+**两个高价值检查点**：
+1. **同一函数内的两处不一致优先于跨文件比较**——`setCurrent` 的首分支与回溯分支相邻，一眼可辨，
+   且对齐提交 `59dd2a0bc3`（#18259「Align mobile outline behavior with desktop」）的 diff 恰好**只改了首分支**。
+2. **「对齐某侧」的提交要核它的 diff 覆盖了几个镜像分支**——`git show <sha> -- <file>` 看它漏了哪些分支；
+   这类提交最容易留下半成品。
+
+**方法限制（必须声明）**：按**函数名**配对只能抓到「复制品」。本仓库 `menus/*` 与 `mobile/menu/*`
+的同名函数为 **0**（`search`/`util`/`index` 三对全部 `common=0`）——它们是**各自手写**的两套实现，
+本方法给出「无发现」是**假阴性**，不能据此说该面干净。要覆盖它必须换判据：按**同一配置字段/同一 API
+参数的读写集**比对（第 13 轮的 #19442 就是这样找到的）。
+
+**修法方向**：本仓库这类漂移**不建议**大规模抽公共基类（两端的 DOM 结构、面板宿主、拖拽机制差异很大，
+抽基类会把差异压进 `if (isMobile())`）。可接受的最小做法是把「同一语义必须一致」的判据抽成**共享谓词**
+（如大纲成员判据、容器集合），并给它加交叉断言测试；纯 DOM 操作的分支保持两份，但需在改动时成对修改。

@@ -2815,6 +2815,116 @@ A/B 不崩溃；`⇧↓` / PageUp/PageDown / Tab / 鼠标退出四条路径都�
 - 已提 issue：**#20216**（属性名常量）、**#20217**（图标注册表）、**#20219**（导出包边界）；
   三条 title/body 均逐字段回读一致（98/2879、100/1175、101/3212）
 
+## 第四十三轮（B 线，2026-10-08）：桌面/移动孪生副本漂移（6 条确认：#20220–#20225）
+
+> 与同日的「第四十三轮」/「第四十三轮（续）」是两个并行会话：那两条覆盖
+> 分层/职责与导出包边界（#20216/#20217/#20219），本条覆盖**前端 `app/src` 的桌面 ↔ 移动孪生副本**。
+> 编号分配遵循「先提交先占用」，本条编号 20220–20225 与对方的 20216/20217/20219 无交集。
+>
+> 起因：用户要求审「功能架构、代码组织、冗余逻辑、可能有更简洁直白的做法、可维护性、冗余封装」，
+> 并指定用子代理分别覆盖「前端 `app/src`+`app/electron`」「内核未定向覆盖的包」「内核↔前端跨层契约」。
+
+### 基线与范围
+
+- 目标仓库 `d:\CodeProjects\siyuan`，起点 `715129808d`（起步时落后 `origin/dev` 1 个提交，按 `AGENTS.md` 规则 fast-forward；
+  中途上游推进到 `41f78a8f2e`，已同步并**在新基线上重新核对全部行号**）
+- 全程只读：未修改目标仓库任何文件，未跑 `pnpm lint/test/build`，未编译内核
+- 机械扫描：重复字面量 `--root kernel --root app/src` 得 **323 条 / 1851 文件**（P1 263），头部全为已知噪声；
+  未转义插值 `--root app/src` 得 **224 处 / 88 文件**（与历轮口径 242–244 一致）。**真缺陷增量 0**，
+  两条发现全部来自定向语义核查
+
+### 确认（6 条，均已提 issue，title/body 逐字段回读一致）
+
+| # | 判据 | 结论 | 位置 |
+|---|---|---|---|
+| #20220 | B + D1 | 移动端不派发 `opened-notebook` / `closed-notebook` 插件事件 | 桌面 `layout/dock/Files.ts:1232`/`:1254`；移动端 `mobile/dock/MobileFiles.ts:708-710`/`:729-733` |
+| #20221 | D1b + G | `file` 的 list/find/grep 把 `limit ≤ 0` 当默认 200，与「0 或负数表示不限」的帮助文本和 MCP 工具描述冲突；`kernel/mcp/tools/file.go:1132` 的 `max <= 0` 一支恒不可达 | `kernel/cli/cmd/file.go:291-293`/`:331-333`/`:456`/`:459`；`kernel/mcp/tools/file.go:295-301`/`:49`/`:1132` |
+| #20222 | A + E2 | API 生成物随 Go 工具链变化：`networkEchoStandardSchema` 反射标准库类型，go1.27 新增 `ConnectionState.LocalCertificate` 与 `Certificate.RawSignatureAlgorithm` → `api:check` 必失败 | `kernel/apicontract/network_echo.go:44-60` → `schema.json` / `app/src/types/api/index.d.ts` |
+| #20223 | B + D1 | `Table.GetField` 的 `for _, column := range` 丢弃下标 → `fieldIndex` 恒为 0，与 `Gallery`/`Kanban` 的 `for i, field` 漂移；**休眠**（`GroupCalc` 全仓无写入端） | `kernel/av/layout_table.go:178-185` |
+| #20224 | D1 + B | 移动端 `setCurrent` 的**回溯分支**缺容器排除，而**首分支**有（同一函数内不一致）；`setCurrentById` 先清全部高亮再查找，查不到即 `return` → 无高亮 | `mobile/dock/MobileOutline.ts:440-446` vs `layout/dock/Outline.ts:590-597` |
+| #20225 | D3 + A | 两端大纲成员判据只排除 `bq`/`callout-content` 2 类，内核权威源排除 4 类（漏 `NodeTabItem`、`NodeBlockQueryEmbed`） | `layout/dock/Outline.ts:585-594`、`mobile/dock/MobileOutline.ts:434-441`；权威 `kernel/model/heading_number.go:141-156` |
+
+**#20222 的取证（可复现）**：`cd kernel && go run ./apicontract/cmd/apigen -check -root ..`
+→ `generated API contract is out of date`，退出码 1；`go version` = go1.27.0 而 `kernel/go.mod:3` = `go 1.26.5`（无 `toolchain` 指令）；
+`git grep -c "LocalCertificate\|RawSignatureAlgorithm" -- app/src/types/api/index.d.ts` = 0。
+CI 用 `go-version-file: kernel/go.mod`（恰好 1.26.5）→ 按提示重新生成会让 CI 反向失败。
+
+**#20224 / #20225 的权威依据**：`collectOutlineHeadings`（`kernel/model/heading_number.go:141-156`）
+**就是**大纲内容的唯一真源——它被 `kernel/model/outline.go:316` 的 `outline()` 调用。
+（`kernel/model/outline.go:57` 的同名排除属 `moveOutlineHeading`，**不要**拿它当大纲成员判据。）
+
+### 方法：孪生副本漂移扫描（新判据 → 模式 P47）
+
+按大括号配对提取两个文件的**同名函数体**逐对算比值，再用**全局函数体哈希**补漏。
+量化结果（`layout/dock/*` ↔ `mobile/dock/*`）：`Files` 24 个同名函数里 **17 个不同**、
+`Outline` 16/21、`Tag` 3/4、`Bookmark` 3/3；全局哈希在 986 个非测试 TS 文件里得到 **15 组**同一函数体，
+11 组是孪生对，**4 组是非孪生重复**（`showDeleteConfirm` ×2、`refreshDatabaseAttributePanels` ×2、
+`handleCallback` ×2 + `handelCallback` ×1、两个渲染器构造函数 ×2）。
+
+**分类纪律**：比值低不等于缺陷——30+ 处差异逐条回读后归为五类（有意的平台差异 / 该端无消费者 /
+同端另有替代机制 / 外层已被守卫挡住 / 二者都对），只有能写出用户可见后果的 6 条升级为主报告。
+判据细节与反例全部写入模式 **P47** 与误报表 4 条新条目。
+
+**该方法的假阴性（必须声明）**：按函数名配对只能抓「复制品」。`menus/*` 与 `mobile/menu/*`
+的同名函数为 **0**（`search`/`util`/`index` 三对全部 `common=0`）——两套**各自手写**的实现，
+本方法报「无发现」**不能**视为该面干净（第 13 轮的 #19442 只能靠「同一配置字段的读写集」比对找到）。
+
+### 已核对为干净 / 已排除（勿重复投入）
+
+- 4 组非孪生重复逐组回读后**都不是缺陷**，全部写入误报表：`handleCallback` 三副本的 `/// #if !MOBILE`
+  差异由实例化端决定（`mobile/util/openBacklinks.ts:43` 直接 `new BacklinkContent(...)` 且**不传 `tab`**，
+  故回调在移动端未注册；桌面 `Graph`/`Outline` 在移动端不被实例化——`mobile/util/initFramework.ts` 的
+  dock 分派无 `graph`）；`refreshDatabaseAttributePanels` 与 `action.ts`/`blockAttr.ts` 的刷新范围差异
+  在查清**三条并存刷新路径**（`refreshForOperation` / `refreshAttributeView` WS 推送 / 调用点显式刷新）
+  之前推不出陈旧
+- 移动端「少一段桌面逻辑」的 4 处（`parentDocClick.cancel()`、`aria-label` 刷新、`draggable`、
+  `setCurrentById("")`）逐条验消费者与同端替代机制后**全部排除**（依据见误报表）
+- `onMount` 的 `liElement.remove()` 位置差异：被读的 `.counter` 是 `closeElement` 头部那一个（位于被删 `li` 之前）→ 无差异
+- `MobileFiles.selectItem` 的布尔漂移是项目级设计（补了规范化 + 环检测的**提交**核实为
+  `61ce34707b`（:sparkles: AI Agent，#17797）与 `4e88c1dd30`（#18034 加密笔记本）两次大范围加固顺手加的，
+  **不是**针对某个用户复现输入的修复）→ 可达性未证实，只作低置信度候选
+- 内核侧近重复函数体 13 组全为平台 build-tag 对或有意分层包装；`cli/cmd/*` 与 `mcp/tools/*` 各持一份的
+  `copyPath`/`expandGlobBrace` 等归一化后逐字相同
+
+### 观察项（有依据但无可观测后果）
+
+1. **「容器块」在仓库里至少三份成员集合**：内核 `treenode/blocktree.go:507` `IsContainerType` 10 项（含
+   `mindmap`/`mindmap_item`）、前端 `protyle/wysiwyg/getBlock.ts:238` `isContainerBlock` 7 个 CSS 类
+   （缺 mindmap 两项）、内核 `collectOutlineHeadings` 4 类父容器。用途不同故不必合并，但**第 3 个判据被搬到
+   前端另行枚举**正是 #20225 的根因
+2. **同语义的三份 `getNextBlockSibling`**：`blockSelection.ts:14`、`removeRange.ts:6`、`transactionMove.ts:1`
+   （后者名 `getNextBlockElement`）；`removeRange` 用 `hasAttribute("data-node-id")`，另两处用 `getAttribute(...)`
+   → 对 `data-node-id=""` 判定相反（全仓无该形态节点，不可观测）
+3. **`getViewIcon` 两份实现已漂移**：`av/fieldVisibility.ts:9-23` 有 `default: return "iconTable"` 且无 `case "table"`；
+   `av/view.ts:581-593` 有 `case "table"` 却**无 `default`**（未知类型返回 `undefined`，模板会拼出 `#undefined`）
+4. **`escapeHTML` 是局部别名**：`config/tabs/ai/aiProviderUi.ts:38` 的 `const escapeHTML = (value) => escapeHtmlTextAndAttr(value ?? "")`
+   与 `Lute.EscapeHTMLStr` 概念上易混（该文件内用了 16+ 次）
+5. `getBlockDragSelectBlock`（`wysiwyg/blockDragSelect.ts:28/33`）对 mindmap 不识别为容器 → 划选落到内部块而非整个
+   mindmap 根。**后果未证实**，只请维护者确认选择
+
+### 本轮零残留
+
+- 临时脚本全在 `%TEMP%\audit-r43x5\`（仓库外）：`dedup_outline.py`、`outline_probe.py`、`make.py`、`post.py`、
+  `classify.py`、`clones.py`、`menu_twins.py`、`p47.md`、`append_p47.py`；
+  另 `%TEMP%\audit-r43x2\`（第二轮）、`%TEMP%\audit-r43x\`（第一轮）已删除
+- 目标仓库 `git status --porcelain` 为空；**并行会话的 `%TEMP%\audit-r43`、`%TEMP%\audit-r43b`、
+  `%TEMP%\audit-r43x4-20219-verify` 未被触碰**
+- 6 条 issue 的载荷文件（`p1-p4.json`、`pA/pB.json`、`created.json`）已删除并确认不存在
+- 本地内核 3.8.7-alpha.7 在跑，只用只读接口（`/api/system/version`、`/api/outline/getDocOutline`）
+
+### 方法论增量
+
+1. **「同族差异」必须逐条分类，不能按「有差异 = 缺陷」上报**：本轮 30+ 处差异只有 6 处是缺陷，
+   其余全部合法。**分类纪律本身就是产出**——它把「17 个函数不同」从噪声变成可复核的清单
+2. **同一函数内的两处不一致 > 跨文件比较**：`setCurrent` 的首分支与回溯分支相邻，比对成本最低，
+   而「对齐某侧」的提交（`59dd2a0bc3`）**恰好只改了首分支** → **`git show <sha> -- <file>` 要数它覆盖了几个镜像分支**
+3. **「休眠缺陷」的可达性要查写入端，不是查读取端**：`GroupCalc` 在读取侧（契约、渲染、计算、消费者）一应俱全，
+   只有写入端为空——`grep GroupCalc -- kernel/model` 只剩一个**读**点，`SetAttributeViewGroup` 经逐行阅读确认不写它
+4. **不要用权威源之外的同名函数当判据来源**：`kernel/model/outline.go:57` 与 `heading_number.go:147`
+   有形状相同的排除，但前者属 `moveOutlineHeading`（文档根第一层标题）——引用错一处会让整条立论失去依据
+5. **终端软换行会伪造「字中间有空格」的现象**：`print(repr(slice))` 的长输出被控制台折行后，
+   看起来像 CJK 二字之间插了空格。判「文本被篡改」要直接对原字符串做正则或 `find`，不要读 `repr` 的屏幕输出
+
 ## 如何更新本文
 
 每轮审计后追加：
