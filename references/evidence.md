@@ -3468,6 +3468,71 @@ P53 兼容性夹具不是外部权威。P53 与 H3 的分工写进了条目：**
 脚本清单从「七个」改到「八个」；`模式库` 行的 P 编号范围从 `P1–P38` 修正为 `P1–P53`（此前落后 15 条）。
 **自检全绿**：`test_scan_scripts.py`（含新第 [12] 组）、`skill_self_check.py`（7 组）。
 
+## 第四十九轮（2026-10-09）：测试套件定向审计（判据 J 再跑；新增 **J5**；修掉 `scan_test_quality.py` 的一个真缺陷）
+
+**范围与基线**：`kernel/**/*_test.go` 与 `app/{src,tests,electron,scripts}/**/*.test.{ts,js}`（判据 J 的对象）；
+目标仓库 `HEAD == origin/dev == d196c8b3f1`（分支 `dev`，工作树干净，0/0）。
+
+**去重**：第四十八轮已建立判据 J 并跑过同一范围（结论「未提 issue」）。本轮**只做增量**——
+① 逐条回读第 48 轮未回读的 `--section assert` 残留候选；② 复核 oracle / fixture / binding；
+③ 修掉扫描器的缺陷；④ 把「确定性红测试」从「形态问题」落到**可复现的行为**上。
+
+**发现 1（真缺陷，已升格为判据 J5）**：`app/tests/settingsWindow.test.js:354` 对布局量做**精确相等**。
+- **位置精确定位**：被测脚本由 `(${runCases.toString()})()` 在 Electron renderer 里拼装执行，报错栈里的
+  `<anonymous>:213:32` 经复算等于源文件 **354** 行（`loadRendererModule` 8 行 + `rendererModules` 32 行 +
+  前缀 ⇒ `runCases` 首行落在 assembled 第 39 行；213 − 39 + 180 = 354）。
+- **两侧独立取整**：`rect.bottom` 来自 `getBoundingClientRect()`（Blink 的 `DOMRect` 内部分量是 **float32**），
+  期望侧是 `toolbar.bottom - parseFloat(borderBottomWidth)`（double 减法）。实测实际值
+  `31.33333396911621` 正好等于 `Math.fround(31.333333)`。
+- **环境值来源**：`border-bottom: 1px`（`app/src/assets/scss/component/_dialog.scss:26`）在非整数显示缩放下
+  被**吸附到整设备像素**；本机 `HKCU:\Control Panel\Desktop\WindowMetrics\AppliedDPI = 144`（150%），
+  于是 1px 的计算值变成 `0.666667px`（**= 1/1.5**），`32 − 0.666667 = 31.333333`。
+  100% 缩放下 `32 − 1 = 31` 与 `float32(31)` 恰好相等 → **通过**。⇒ 只在非整数缩放的机器上红，
+  与 tag-only 的门禁合起来就是 **「本地红、CI 绿」**。
+- **同族不一致**：同一文件 341/345 行对同类布局量用的是容差断言（`Math.abs(...) < 1`）。
+- **复现**：`cd app; node --import tsx --test --test-concurrency=1 tests/settingsWindow.test.js` → exit 1，
+  `AssertionError: 31.33333396911621 !== 31.333333`。
+- **去重**：`gh api -X GET search/issues` 搜 `"31.333333"` **0 命中**；#20227（已关闭，修复提交
+  `f41ce32cf5`）是**同一文件的另一个失败形态**（手写替身表缺 `catalogSnapshot`），不是本条。
+
+**发现 2（工具缺陷，已修）**：`scan_test_quality.py` 的 `blocks()` 对 `test(name, {options}, fn)`
+取「头之后第一个 `{`」，拿到的是 **options 对象**而非函数体 → 有断言的测试被整条报成「无断言」。
+本仓库 12 个前端候选里 **8 个**（67%）由此而来：`model.test.ts:3635`、`publishReadonlyFold.test.js:184`、
+`imageOCR.test.ts:143`、`GlobalBacklinkList.test.ts:73`、`inlineElementBoundary.dom.test.ts:172`、
+`longTextWrap.dom.test.ts:185`、`backlinkReference.test.js:162`、`mobileBacklinks.test.js:371`。
+`skip: process.platform === "linux" && !process.env.DISPLAY` 只在 Linux 无显示环境时成立，形态极隐蔽。
+**修法**：三条件合取——与头之间**只有空白** ∧ 内容像**对象字面量**（`key:` / `...`）∧ 之后**紧跟 `,`**
+（末位实参之后是 `)`），避免误伤 `test(name, fn, timeout)`；自检第 [12] 组补**双向承重用例**。
+
+**回读后仍无可报项（下轮勿重复投入）**：
+- `assert` 残留 4 条：`app/electron/notebookSystemLock.test.js:35` 把 `assert.fail` **作为回调注入**
+  （被测代码一旦调用即抛错，判定力真实存在）、`afterPack.test.js:27`、`pending.test.ts:40` 与 Go 的
+  `kernel/util/websocket_test.go:27` 是「不得抛错/挂起」型 → 按既有标准属「缺断言形式」而非无判定力。
+- `oracle` 31 条：抽查 `kernel/api/ref_revision_test.go:25`（同输入哈希稳定 + 换字段必须变）、
+  `kernel/agent/capability_test.go:20`（稳定 + 唯一 + 长度上限）、
+  `kernel/plugin/service_contract_test.go:451`（**轮询**看计数器是否停止增长）、
+  `kernel/model/history_diff_test.go:301`（同一变换作用于两个不同输入）→ 期望值都来自实现之外，与第 48 轮一致。
+- `fixture` 4 条：`legacy` 是**局部闭包名**（迁移前 handler 实现的副本，作为**外部 oracle** 与新契约 handler
+  逐字段比对），`bazaar` 的 `legacyStats` 只是兼容字段名 → 全为假阳性。
+- `binding`：Go 的 `wantCalls`（`relation_refresh_test.go:105`）断言「每个数据库只查一次」、
+  `repository_range_test.go:66` 断言分页次数——是效率不变量，纯重构不必然变红。
+
+**聚合事实（较第 48 轮刷新）**：测试文件 Go **873** / 前端 **745**（另 3 个移植文件被排除）；
+首次加入 **1738 / 1739 都在 2026 年**（7 月 202 / 8 月 374 / 9 月 839 / 10 月 310）；
+门禁仍为 **tag-only**（`cd.yml` 的 `on:` 只有 `*-alpha*` / `*-beta*` / `*-rc*` 与 `workflow_dispatch`）。
+另：`app/build/` 下已无测试文件，故 #19473「构建副本被收集」当前不成立；两份曾过时的替身表
+（`mobileBacklinks.test.js` 的 `assetOpen`、`connectionManager.test.js` 的 `util/zIndex`）**均已补齐**。
+
+**本轮未提 issue**（用户只要求审计）。若继续，修法是给该断言加容差（照同文件 341/345 的写法）。
+
+**方法论教训**：
+- **工具误报要先怀疑工具**：options 对象被当成函数体，让整节候选 **67%** 失真，而输出看上去完全正常
+  ——与 P35「假成功」同类，只是发生在分析工具内部。
+- **报「红测试」必须区分「代码坏了」与「断言取值方式坏了」**：本条的产品代码没有缺陷，
+  缺陷是断言对布局量做了精确相等；写成「设置窗口回归」会把维护者引向错误方向。
+- **`gh api -X GET search/issues` 检索关键词要包含**报错里的**数字**（`"31.333333"`），
+  只按文件名/功能词检索会漏掉「同一文件、不同形态」的既有 issue。
+
 ## 如何更新本文
 
 每轮审计后追加：

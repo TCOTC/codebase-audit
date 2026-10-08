@@ -263,6 +263,8 @@
   - **测试跑了却没有可失败的断言**（断言缺失、断言在 helper 里、Benchmark 被当成测试）→ J2 / P51
   - **夹具不是外部权威**（测试代码重写旧格式，而非捕获产物/跳实现产物）→ J3 / P53
   - **测试绑定实现结构**（手写模块表、内部调用序列断言）→ J4 / P52
+  - **断言的真值依赖宿主环境值**（对 `getBoundingClientRect()` 这类 float32 布局量做精确相等，
+    而期望侧由被舍入过的样式值在 double 里算出）→ 在非整数显示缩放的机器上恒红 → J5
 - **既有校验器**：`go test -tags "fts5 sqlcipher" ./...`（`kernel/`）；`pnpm test`、`pnpm run lint`（`app/`）
 - **取证陷阱**：
   - **CI 覆盖 ≠ 本地覆盖**；「本地红、CI 绿」本身就是独立发现，不是噪声
@@ -288,7 +290,7 @@ Microsoft .NET 单测最佳实践（FIRST、单 Act、断言之外不写逻辑�
 ThoughtWorks 技术雷达 Vol 34（变异测试 Trial、浏览器组件测试 Trial、反馈传感器 Trial）。
 **「测试太少」「没上 TDD」「用了 mock」不是缺陷**——不得据此立论。
 
-**四个观察点，对应四个可机械取证的信号**：
+**四个观察点各有一个可机械取证的信号；第五个（第四十九轮新增）靠 grep 断言里的布局量**：
 
 | 观察点 | 判据 | 机械信号 | 回读问句 |
 |---|---|---|---|
@@ -296,6 +298,7 @@ ThoughtWorks 技术雷达 Vol 34（变异测试 Trial、浏览器组件测试 Tr
 | 有没有判定力 | J2 / P51 | `--section assert` | 「改坏实现，这个测试会红吗？」 |
 | 夹具是否外部权威 | J3 / P53 | `--section fixture` | 「夹具是捕获的，还是测试代码重写的？」 |
 | 是否绑定结构 | J4 / P52 | `--section binding` | 「纯重构会让它红吗？」 |
+| 断言取值是否依赖环境 | J5 | grep 断言里的 `getBoundingClientRect` / `getComputedStyle` / `devicePixelRatio` / `innerWidth` | 「等式两侧是否各自独立取整？同族的兄弟断言用的是容差吗？」 |
 
 **先建聚合事实，再看单文件**——这是本层与其它层最大的不同：单看一个测试文件无法判断它是常规还是异常。
 三个必做量（全部用 `git log --diff-filter=A --name-only` + `--section gate` 取证，不估算）：

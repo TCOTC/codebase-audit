@@ -630,6 +630,22 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
   机械候选 `--section binding`：前端手写模块/桩清单（`sources = {`）、Go 的调用序列断言（`wantCalls`）。
   结构绑定的直接后果是**失败信息无法归因**——红的时候与用户看到的行为无关，
   于是要么被长期忽略（本仓库有确定性红测试挂在 dev 上），要么被随手改绿。
+- **J5 断言的真值依赖宿主环境值 → 在部分机器上恒红**（判据 E2 在**测试侧**的镜像）。
+  最典型的形态是**对布局量做精确相等**：`getBoundingClientRect()` 返回的是 **float32**
+  （Blink 的 `DOMRect` 内部用 `float` 存分量），而期望值常写成「读一个已被舍入过的样式值，
+  再在 double 里做减法」→ 两侧各自独立取整，**必然失配**，与产品行为无关。
+  本仓库实例（第四十九轮，已实测）：`app/tests/settingsWindow.test.js:354` 的
+  `assert.equal(rect.bottom, toolbar.getBoundingClientRect().bottom - parseFloat(getComputedStyle(toolbar).borderBottomWidth))`。
+  `border-bottom: 1px` 在非整数缩放下会被**吸附到整设备像素**，150% 缩放时计算值变成 `0.666667px`（= 1/1.5），
+  于是期望 `32 − 0.666667 = 31.333333`（double），实际 `31.33333396911621`（= `Math.fround(31.333333)`）；
+  100% 缩放下 `32 − 1 = 31` 与 `float32(31)` 恰好相等 → **通过**。即「本地红、CI 绿」，
+  与 G4 是同一后果的两个来源（G4 是契约/执行集侧，本项是断言取值侧）。
+  **检查法**：grep 断言中的 `getBoundingClientRect` / `getComputedStyle` / `devicePixelRatio` /
+  `innerWidth` / `offsetWidth`，再问「这个等式的两侧是否都来自被舍入过的量、且舍入方式不同」；
+  **同族对照最省力**——本仓库同一文件 341/345 行对这种量用的是 `Math.abs(...) < 1`，
+  这一处的精确相等就是**同族不一致**。
+  **权威依据**：FIRST 的 Repeatable（同一输入在任何机器上得到同一结论——这条正是它缺的）、
+  Google ch11「flaky 测试接近 1% 就开始摧毁套件可信度」。
 
 ### 待实证的检查方向（**不是判据**，不占用字母、无 P 条目）
 

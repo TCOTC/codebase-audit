@@ -99,28 +99,51 @@ def blocks(head_text, brace_text, header_re, max_head=400):
     落到**函数体内的下一个块**，于是 body 被截成子块——实测这一处退化会把
     2582 个测试函数误报成「无断言」，而输出里的函数名还会变成跨行文本片段。
 
+    **末位实参才是测试体**：Node 的 `test(name, options, fn)` 会把 options 对象
+    放在函数之前，取「头之后第一个 `{`」会拿到 **options 对象**（`{skip: …, timeout: …}`），
+    于是整条测试被误报成「无断言」——实测本仓库 12 个前端候选里 8 个由此而来
+    （`skip` 只有在 Linux 无 DISPLAY 时才为真，形态很隐蔽）。判定条件三合一，
+    避免误伤 `test(name, fn, timeout)` 里的函数体：① 头与该 `{` 之间**只有空白**
+    （函数体前面必有 `async`/`=>`/`function`）；② 该组内容像**对象字面量**
+    （以 `key:` 或 `...` 开头）；③ 该组之后紧跟 `,`（末位实参之后是 `)`）。
+
     表达式体（箭头函数不写花括号）没有可界定的范围，按 `max_head` 放弃，
     宁可漏报也不产出跨函数的假体。
     """
     out = []
     for match in header_re.finditer(head_text):
-        brace = brace_text.find("{", match.end())
-        if brace < 0 or brace - match.end() > max_head:
-            continue
-        depth = 0
-        end = None
-        for i in range(brace, len(brace_text)):
-            ch = brace_text[i]
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end is None:
-            continue
-        out.append((match, brace + 1, end, brace_text.count("\n", 0, match.start()) + 1))
+        pos = match.end()
+        block = None
+        while True:
+            brace = brace_text.find("{", pos)
+            if brace < 0 or brace - match.end() > max_head:
+                break
+            depth = 0
+            end = None
+            for i in range(brace, len(brace_text)):
+                ch = brace_text[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end is None:
+                break
+            nxt = end + 1
+            while nxt < len(brace_text) and brace_text[nxt] in " \t\r\n":
+                nxt += 1
+            between_is_blank = not brace_text[match.end():brace].strip()
+            inner = brace_text[brace + 1:end].lstrip()
+            looks_like_object = re.match(r"(?:[A-Za-z_$][\w$]*\s*:|\.\.\.)", inner) is not None
+            if between_is_blank and looks_like_object and brace_text[nxt:nxt + 1] == ",":
+                pos = end + 1          # 这是 options 对象，继续找末位的函数体
+                continue
+            block = (match, brace + 1, end, brace_text.count("\n", 0, match.start()) + 1)
+            break
+        if block:
+            out.append(block)
     return out
 
 

@@ -926,6 +926,23 @@ test("no assertion at all", () => {
     parseTarget("c");
 });
 """)
+    # `test(name, options, fn)` 的 options 对象排在函数之前：取「头之后第一个 `{`」
+    # 会拿到 `{skip: …, timeout: …}`，于是有断言的测试被误报成「无断言」。
+    # 本仓库实测 12 个前端候选里 8 个由此而来。
+    write("app/src/withoptions.test.ts", """import {test} from "node:test";
+import * as assert from "node:assert/strict";
+
+test("options object before body", {skip: false, timeout: 1000}, () => {
+    assert.equal(parseTarget("e"), "e");
+});
+""")
+    write("app/src/optionsbare.test.ts", """import {test} from "node:test";
+
+// 反向：跳过 options 对象的判定若写成「恒跳过」，这条真无断言就漏报了。
+test("options object and no assertion", {timeout: 1000}, () => {
+    parseTarget("f");
+});
+""")
     # EXCLUDE_DIR_NAMES 里的目录不得被收集
     write("app/src/node_modules/ignored.test.js", """const {test} = require("node:test");
 
@@ -998,6 +1015,12 @@ check("useshelper_test.go" not in out,
 check("withhelper.test.ts" not in out,
       "断言在箭头 helper 里时不被误报")
 check("bare.test.ts" in out, "真无断言的 TS 测试被报出")
+check("withoptions.test.ts" not in out,
+      "`test(name, {options}, fn)` 的断言不被 options 对象遮蔽",
+      "options 对象排在函数之前，取第一个 `{` 就会把它当函数体")
+check("optionsbare.test.ts" in out,
+      "`test(name, {options}, fn)` 真无断言时仍被报出",
+      "跳过 options 对象的判定若写成恒跳过，这条会失败")
 check("bench_test.go" not in out and "skip_test.go" not in out,
       "Benchmark 与 skip-only 不参与无断言统计")
 check("ignored.test.js" not in out,
