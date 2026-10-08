@@ -3157,6 +3157,66 @@ CI 用 `go-version-file: kernel/go.mod`（恰好 1.26.5）→ 按提示重新生
   用户工作区更新了 `.lock` 与 `temp/siyuan.log`（18:34:50）。
   **教训：验证「启动参数」不得使用仓库里的历史二进制——它可能带当前源码已删除的兼容层。**
 
+### 第四十四轮（续，2026-10-08）：用户纠正——「可维护性」不得被「写不出业务表现」一票否决
+
+**用户的原话与理由**：「为什么有一堆建议『不提』的？只要是本项目里的代码都要考虑吧，除非是上游依赖我们管不着；
+『写不出业务表现的发现不得进主报告』调整一下，对整理代码、提高代码可维护性有帮助的也要报告。」
+
+**这是判据层的误用，不是执行失误**：SKILL.md 原「核心原则 5」把「业务表现」设成唯一门槛，
+于是**冗余逻辑 / 冗余封装 / 多层透传 / 重复实现 / 死代码**这一整类（本 skill 的判据 A / B / D1 / C 的主要产出）
+在报告里天然只能进附录。用户的诉求与 `description` 的既有范围（「审计…hidden design, contract, and correctness
+problems」）不冲突——**冗余正是设计层问题**。
+
+**改动（committed）**：
+1. 核心原则 5 改为**两条轨迹**：轨迹 A（行为）保留「业务表现/预期表现/可验证」；轨迹 B（可维护性）改为
+   「**维护成本/权威依据/可验证**」，并写明**不得因写不出业务表现而降级**。
+2. 新增「**可维护性条目模板（轨迹 B）**」，编号 `M1.`、`M2.` 与行为条目区分。
+3. 「适用场景」补**范围边界**：本项目自有代码全在范围内；成建制引入的上游/移植子树不在，
+   判定法三条任取一（移植许可声明 / vendored 或依赖覆盖 / 只被原生宿主调用）。
+4. 输出格式的「强制项」段改为按轨迹取字段；轨迹 B **必须在「挑战门」字段写明已排除的动态使用面**。
+
+**本轮为此新增的假信号清单（六类动态使用面，实测都给出过假阳性）**：
+
+| 类 | 实例 | 为何按名字搜不到 |
+|---|---|---|
+| 接口方法实现 | `plugin/websocket.go:48-72` 的 `WsEventHandler.OnOpen/OnClose/OnPing/OnPong/OnMessage` | 类型注释即写 `implements gws.Event`，实例在 `api_client.go:350`/`plugin.go:1056`/`rpc.go:315` 交给 gws → 接口分发 |
+| goja / 反射暴露的方法 | `plugin/api_logger.go:36 Warn` | `sandbox.go:103 console.RequireWithPrinter(&Printer{...})` → JS 调 `console.warn(...)` |
+| gomobile / 原生导出 | `kernel/mobile/kernel.go:131 VerifyAppStoreTransaction` 等 | 全仓无人 `import ".../kernel/mobile"`，调用者在 Java/Swift/Kotlin |
+| 命名空间导出（TS） | `plugin/platformUtils.ts:24 getStorageVal` | `plugin/API.ts:14 import * as platformUtils` 后整体展开给插件 |
+| 注册表与字符串派发 | 各处 `register("name")` / `data-type` 表 | 名字只以字符串出现 |
+| vendored 子树 | `kernel/heif/internal/**`、`app/src/asset/pdf/**`（PDF.js） | 上游公开面，本就不在范围 |
+
+**本轮在这些排除之后的实质产出（全部按轨迹 B 口径）**：
+
+- **主报告 1 条**（已提 **#20230**）：Docker 镜像默认启动失败——`entrypoint.sh:52` 与 `Dockerfile:83`
+  各提供了同一段命令行的一半，拼出 `/opt/siyuan/kernel … /opt/siyuan/kernel serve`；
+  cobra `args.go:28 legacyArgs` 对「根命令 ＋ 有子命令 ＋ 非空位置参数」报 `unknown command`。
+  与 #18699 同源（该 issue 4 分钟后被报告者自己以「非 3.8.0 回归」关闭，**关闭理由不否定缺陷**）
+- **死路由（轨迹 B，值得单独提）**：`plugin/rpc.go:292 HandleRpcWebSocket` 零引用，而其注释写着
+  `GET /ws/plugin/rpc/:name`；`kernel/api/router.go:740-741` 注册的是 `pluginJsonRpcWebSocket(ByName)`
+  （另一份实现）→ **注释承诺的 URL 与实际处理函数不是同一个函数**
+- **被内联取代的方法**：`plugin/rpc.go:222 (*JsonRpcProcessingResponse).JsonRpcResponse` 零引用，
+  等价逻辑已在 `rpc.go:487 filterRpcResponses` 内联展开；同型：`plugin/streams/transform.go:270
+  setUpTransformStreamDefaultController`（等价逻辑在 `transform_prototype.go:102/111` 内联）
+- **文档承诺但未接线**：`plugin/streams` 的 `NewWritableStream`（`writable.go:203`）与
+  `NewTransformStream`（`transform.go:320`），doc 注释写「供 kernel/plugin 的 Go 桥接代码使用」，
+  实测**无任何调用方**（JS 侧走 `module.go:66/70` 的 `new*StreamConstructor()`）→ 属「未接线的公开入口」
+- **同一默认值两份表达（判据 A）**：`mobile/util/mobileBottomBarConfig.ts:59 DEFAULT_MOBILE_BOTTOM_BAR_CONFIG`
+  零引用，而活的默认值在 `:110-111` 用 `[...DEFAULT_MOBILE_BOTTOM_BAR_ACTIONS]` 另建一份；
+  同型有 `mobile/util/mobileSidePanelConfig.ts:63 DEFAULT_MOBILE_SIDE_PANEL_CONFIG`
+- **迁移常量第三份副本**：`LEGACY_DEFAULT_MOBILE_BOTTOM_BAR_ACTIONS`（`mobileBottomBarConfig.ts:57`）
+  与 `protyle/util/compatibility.ts:791` 的 `actions: ["documents","search","newDoc","tabs"]` 同值两份
+  → 改一个默认动作要同改两处（**这正是轨迹 B 要的「维护成本」表述**）
+- **中间状态**：`plugin/rpc.go:234 HandleRpcHttp` 零生产引用（路由走 `api` 包的 contractHandler 包装），
+  仅测试引用；`util/misc.go:50 IsNullValue`、`util/sort.go:108 GBK2UTF8`、`util/net.go:413 GetRequestStringParam`、
+  `conf/search.go:127 boolPtr`（带 `//go:fix inline` 指令）、`model/session.go:453/464` 的
+  `CheckEditRole`/`CheckReadRole`（gin 中间件，而 `CheckAdminRole` 有 584 处使用）零引用
+
+**方法论**：**判断「某项算不算缺陷」时，不能只看它有没有用户可见症状——要先问「它属于哪一类问题」**。
+存在一类问题（可维护性）其后果天然就是「修改成本 / 误改风险」，用另一类问题的门槛去筛它，
+会系统性地漏报整类。这与第四十四轮前半段「产物新鲜度」的教训是同一形状：
+**筛子选错比筛子不严更危险**（前者永远筛不到东西，而报告看起来仍然正常）。
+
 ## 如何更新本文
 
 每轮审计后追加：
