@@ -52,7 +52,7 @@ argument-hint: '[scope: package or directory] [focus: literals | drift | state |
 |---|---|---|
 | 内核（Go） | L1 数据与索引、L2 API 与契约、L3 属性视图、L4 同步/快照/加密、L5 CLI/MCP/server | A、D1、D3、D3c、D4、G、H |
 | 前端（TS/Electron） | L6 编辑器内核、L7 UI 与配置、L8 Electron 宿主与打包、**L11 交互与状态** | C、D1e、D1g、D3c、E2、F、**I** |
-| 横切 | L9 i18n 与文档、L10 CI/测试/发布 | A、D3c、G3、G4、H、I4 |
+| 横切 | L9 i18n 与文档、L10 CI/测试/发布 | A、D3c、G3、G4、H、I4、**J** |
 
 ## 核心原则
 
@@ -585,6 +585,52 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 3. **焦点问题必须用键盘走**（`Tab` / `Shift+Tab` / `Esc`），用鼠标发现不了
 4. 虚拟滚动、`/// #if MOBILE` 编译期剔除、跨端模板差异见 [全栈层面地图](./references/stack-map.md) L6 的取证陷阱
 
+### J. 测试有效性（**测试套件自身**的审计）
+
+> **为何单列**：本 skill 的判据是「测试和 linter 抓不到的问题」。**测试套件自身的缺陷正好属于这一类**，
+> 而且产品代码里没有任何痕迹——每个测试文件单独看都正常，只有把**判定器**与**被测实现**对照才暴露。
+> `description` 早已声明覆盖 "auditing test blind spots"，但正文此前只有一处顺带提及，本条补上这个缺口。
+>
+> **与 G3 / G4 的分工（不重复计分）**：G3（测试替身白名单过时）、G4（测试不在 CI 执行集内）
+> 把结论归到**契约缺口**上，且 G3 明确写着「此项与本 skill 产出的缺陷无关，只污染修复验证的回归结论」。
+> J 类说的是**测试套件自身就是一个缺陷类别**：判定器指向哪里、断言有没有判定力、
+> 夹具是不是外部权威、测试是否绑定实现结构。**G3/G4 的实例在 J 下不重复立论**，只作为 J2/J4 的证据引用。
+>
+> **权威依据（不是审计者的口味）**：Kent Beck 的 Test Desiderata（Behavioral 与
+> Structure-insensitive 两条并列）；Google《Software Engineering at Google》ch11–ch12
+> （unchanging tests、test via public APIs、test state not interactions、DAMP over DRY、
+> 覆盖率不是质量指标）；Microsoft .NET 单测最佳实践（FIRST、无断言封装以外的逻辑、单 Act）；
+> ThoughtWorks 技术雷达 Vol 34（变异测试 Trial、浏览器组件测试 Trial、给 agent 的反馈传感器 Trial）。
+> **「测试写得太少」「没用 TDD」「没上 mock 框架」都不是缺陷**——不得据此立论。
+>
+> **取证前提：J 类必须先建立测试语料的聚合事实**，因为单看一个测试文件无法判断它是常规还是异常。
+> 三个必做量：① 测试文件数与**首次加入时间分布**（追加入库的批次一眼可见）；
+> ② **创建后再未被任何提交碰过**的比例（本仓库 45%）；③ 门禁强度（见下 J2 的指令）。
+> 三者都用 `git log --diff-filter=A --name-only` 与 `scan_test_quality.py` 取证，不靠估算。
+
+- **J1 自我参照判定器**：期望值由被测实现自己产生。
+  机械候选用 `scan_test_quality.py --section oracle`（标记 `[same]` 两侧同一函数、`[local]` 两侧都是本包函数、
+  `[repeat]` 被比较的两个操作数由同一函数产生）。**候选不是结论**：同一函数作用于两个**不同输入**
+  是正常写法（`docDiffBlockSignature(left)` vs `(right)`）。诊断问句只有一个——
+  **这个测试里有没有任何一处期望值的来源在被测实现之外**（字面量、捕获产物、另一实现、规范表）。
+  一处都没有才算零判定力；有外部绝对值断言时只能记「弱」。
+- **J2 无判定力（perpetually green）**：测试跑了，但没有能失败的断言。
+  候选用 `--section assert`；门禁强度由 `--section gate` 给出（判据是 `on:` 的**限定条件**，
+  `push: tags:` 只是发布级门禁，与 `branches:` 不是一回事）。
+  **两类回读前置**：断言可能封装在 helper 里（跨文件、泛型签名、箭头函数三种形态，扫描器已按目录收集，
+  仍须回读确认 helper 里真在断言）；「不得 panic」型测试本身没有 `t.Error*` 但并非无判定力。
+  权威依据见 ThoughtWorks 雷达：AI 生成测试普及后**覆盖率会被逻辑空洞的测试虚高**，
+  所以该看的是变异测试式的「改坏实现后测试会不会红」，而不是行覆盖率。
+- **J3 夹具不是外部权威**：兼容性/契约测试的期望值由**测试代码现场重建**旧格式（`--section fixture`）。
+  **与 H3 的分工**：H3 问「有没有上一版格式的夹具」，J3 问「这个夹具独立于实现吗」。
+  可信度从高到低：跨实现产物（如由 Node WebCrypto 生成的互操作夹具）＞ 捕获的真实旧产物
+  （`testdata/*-legacy.sy`）＞ 测试里重写旧格式。最后一档**两份实现由同一个人同时写，可能同错**——
+  注释自陈「不调用当前编码器」只是必要条件，不是可信度证明。
+- **J4 测试绑定实现结构**：判据是 **「纯重构是否会让它变红」**（Google ch12 的 unchanging test）。
+  机械候选 `--section binding`：前端手写模块/桩清单（`sources = {`）、Go 的调用序列断言（`wantCalls`）。
+  结构绑定的直接后果是**失败信息无法归因**——红的时候与用户看到的行为无关，
+  于是要么被长期忽略（本仓库有确定性红测试挂在 dev 上），要么被随手改绿。
+
 ### 待实证的检查方向（**不是判据**，不占用字母、无 P 条目）
 
 以下方向由通用运行时经验提出，**本仓库尚无确认的缺陷实例**。按模式库「从一次已确认的缺陷出发」的
@@ -815,17 +861,22 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 | 每轮开始（去重） | [已知误报](./references/known-false-positives.md) | 过滤集：不要报告的类别 + 曾被误判为误报但实为真缺陷 |
 | 确定范围 / 定层 | [全栈层面地图](./references/stack-map.md) | L1–L10 的关键路径、权威源、高发形态→判据、仓库自带校验器、取证陷阱、跨层连带检查表；另有两个**待实证检查点**：资源与生命周期、**定位参照帧** |
 | 审计 Go 侧 / 找「预期表现」的上游依据 | [Go 语言与工具链基线](./references/go-baseline.md) | 官方来源清单、**什么能当权威依据、什么不能**的边界、`go` 指令决定的**语言版本语义变更点**（判据 E2）、本仓库无 Go 静态检查器的事实 |
+| **审计测试套件自身**（判据 J） | 本文件 [判据 J](#j-测试有效性测试套件自身的审计) + `scripts/scan_test_quality.py` | 判定器是否在实现之外、有没有判定力、夹具是否外部权威、测试是否绑定实现结构、门禁强度 |
 | 审一个 PR / commit / diff | [差分审查模式](./references/diff-review.md) | 按 diff 定范围、三类必查（漏改 / 新引入 / 声明不符）、本模式特有误报 |
 | 过挑战门 | [挑战门](./references/challenge-gate.md) | 两轮对抗审查（审发现）+ 四问审查（审修法） |
-| 需要某条判据的细节 | [模式库](./references/patterns.md) | P1–P38 的定义、跨领域实例、检查法、修法陷阱 |
+| 需要某条判据的细节 | [模式库](./references/patterns.md) | P1–P53 的定义、跨领域实例、检查法、修法陷阱 |
 | 修复 / 架构调整 / 验证 | [修复与架构调整手册](./references/repair-playbook.md) | 授权边界、爆炸半径、变体分析、修法阶梯、架构判据、验证闭环、高危改动清单、模板 R1 |
 | 写「既往记录」字段 | [实证数据](./references/evidence.md) | 历轮发现登记表（去重的第二来源）与量化结论 |
 | 修改本 skill | [维护规范](./references/contributing.md) · [更新记录](./references/changelog.md) | 追加与整理规范、版本管理、编辑坑；历次变更历史 |
 
-`scripts/` — **七个机械扫描脚本与两个自检**：
+`scripts/` — **八个机械扫描脚本与两个自检**：
 `scan_duplicated_literals.py`（判据 A）、`scan_unescaped_html.py`（判据 F）、
 `scan_dom_type_literals.py`（前端 DOM 契约闭合集合）、`scan_doc_parity.py`（多语言文档一致性）、
 `scan_i18n_text_expansion.py`（判据 I4 文本膨胀）、`scan_a11y_antipatterns.py`（判据 I3 无障碍行为）、
+`scan_test_quality.py`（判据 J：切片含 gate / oracle / assert / fixture / binding 五节，
+`--repo` 指仓库根；**它的产出率全靠四道过滤拿到**——断言 helper 按目录收集（含泛型签名）、
+移植子树按文件头排除、Benchmark/skip-only 不计入、夹具要求「现场构造 + 夹具位点」双条件；
+去掉任一条，候选会从十几条涨到几百上千条）、
 `scan_focus_coverage.py`（判据 I3 焦点可见性；**它的价值在六个判定前提**——
 SCSS 嵌套的后代语义、`transform` 也算焦点指示、按类集合而非单类判定、兜底按标签匹配、
 **`:is()`/`:where()` 必须展开且不算进 `:not()` 内部**、**特异性分属性比较**，

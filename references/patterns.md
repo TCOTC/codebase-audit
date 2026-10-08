@@ -1561,3 +1561,124 @@ exec su-exec "${UID}:${GID}" /opt/app/kernel --workspace="${WS}" ${ARGS}   # ARG
 
 **修法方向**：把语义收敛到单一 helper（本例是让所有分支复用同一个「按需折叠 + 字面量替换」helper），
 而不是在 24 处各补一遍。
+
+### P50 自我参照判定器（期望值由被测实现自己产生）
+
+**判据**：J1（判定器在实现内部）＋ G1（两实现之间无一致性断言）＋ A（单一真源指向了被审计对象本身）。
+
+**形态**：断言里「实际值」与「期望值」都由被测实现产生。最常见的两种写法：
+① 断言两侧都是同一个函数（`f(left)` vs `f(right)`）；
+② **状态差分**——改前 / 改后各取一次同一个函数的返回值再比较（`before`/`after`、`got`/`want`）。
+
+第三种形态最隐蔽：**期望值不是调用得到的，而是测试代码把旧格式重新实现了一遍**（见 P53）。
+
+**为什么这算缺陷**：这类测试**不会因为实现出错而红**。它的判定器就是实现本身——实现错，
+期望值跟着一起错。ThoughtWorks 技术雷达 Vol 34 把变异测试重新列为 Trial 的理由正是这个：
+「AI 生成测试普及后，高覆盖率会掩盖**逻辑空洞**的测试」。覆盖率与文件数都看不出来。
+
+**本仓库实例（第四十八轮）**：
+- `kernel/sql/recent_index_test.go` `TestRecentUpdatedBlocksIndexesPreserveResults`：
+  `before` 与 `after` 都由 `SelectBlocksRawStmt` 产生，核心断言是 `reflect.DeepEqual(before, after)`
+  → 「建索引前后结果一致」这条**判定器就是被测函数自己**。
+  **但同一测试还有绝对值断言**（`len(after[0]) != 16`、`after[0][0] != "p-39"`、`after[2][0] != "d-39"`）
+  → 结论是「这条断言弱」，**不是「整个测试无效」**。
+- 全仓机械候选 31 条 / 25 文件（`scan_test_quality.py --section oracle`），
+  其中 `[same]` 12 条；绝大多数是**正常写法**（见下「检查法」第 ② 步）。
+
+**检查法**：`python scripts/scan_test_quality.py --repo <repo> --section oracle`，然后只问一个问题：
+**这个测试里有没有任何一处期望值的来源在被测实现之外？**（字面量、`testdata` 捕获产物、
+另一实现如 Node WebCrypto / 上游库、规范表如 i18n 语言文件）。
+① 一处都没有 → 零判定力，成立；
+② 有 → 记「弱」而不报，**不得因为出现了 `[same]` 就报**。
+
+**误报面（必须逐条排除，实测都出现过）**：同一变换作用于**两个不同输入**
+（`docDiffBlockSignature(left)` vs `(right)`）——这是正常的同一性断言；
+`reflect.ValueOf(f).Pointer()` vs `reflect.ValueOf(util.PushMsg).Pointer()`——比较函数指针；
+`strings.Join(a, "")` vs `strings.Join(b, "")`——工具函数对两个输入做同样的确定性变换；
+`Conf.Language(315)` vs `err.Error()`——**这一侧是外部权威**（i18n 表），是正例。
+
+**修法方向**：不要删测试，**补一条外部断言**（把期望值写成字面量或夹具）。
+保留原断言无害，缺的是「实现坏了会红」的那一条。走修复手册的修法阶梯第 1–2 级即可。
+
+### P51 无判定力测试（跑了但没有可失败的断言）
+
+**判据**：J2 ＋ G4（测试不在执行集内时更不可见）。
+
+**形态**：测试函数体里没有任何断言构造，也没有调用任何断言 helper。
+三种来源：① 真无断言（只剩 `f(x)` 的调用）；② 「不得 panic」型（本意如此，但从未声明）；
+③ 断言**封装在 helper 里**——扫描器按目录收集 helper 名后这一族会被消掉，
+但**仍须回读确认 helper 里真在断言**（存在名为 `checkXxx` 却什么都不校的函数）。
+
+**本仓库实例（第四十八轮）**：全仓 15 个文件 / 19 个测试函数命中；其中 12 个是同一形态的
+`kernel/api/contract_*_test.go` 批量（断言全在泛型 helper `compareSettingConfig[...]` 里，
+**已由扫描器的按目录 helper 收集排除**，属假阳性族）；残留的真实候选包括
+`kernel/util/websocket_test.go:27 TestContextPushMsgIgnoresInvalidContext`（「不 panic」型）。
+
+**为什么值得单列**：这类测试**通过率 100%**，因此既不会被注意到、也不会被删除。
+Google《Software Engineering at Google》ch11 的原话是「**A bad test suite can be worse than
+no test suite at all**」——它会让人以为该行为被覆盖了。
+
+**检查法**：`scan_test_quality.py --section assert`。**两类回读前置**（不去掉会得到整批假阳性）：
+① 断言 helper 可能是跨文件、泛型签名（`func compareSettingConfig[…](t *testing.T, …)`）、
+   箭头函数（`const checkTarget = (t, e) => { assert… }`）三种形态——扫描器按**目录**收集后仍要抽查；
+② `Benchmark*` 本就不该有断言，`t.Skip` only 也不是测试，两者都已排除。
+另外要读**汇总行**而不是尾部若干行（历史上把 13 处失败写成 1 处）。
+
+**修法方向**：先判断它**到底想验证什么**。想验证「不 panic」就写 `defer func(){ if r!=nil {t.Fatal} }()`；
+想验证行为就补断言；**确实没有可验证内容时应删掉测试**（Google ch12 对 sunk cost 的表述：
+对已经不再提供价值的测试，「按删除键」才是正确的）。
+
+### P52 测试绑定实现结构（纯重构即红）
+
+**判据**：J4 ＋ G3（手写替身白名单）＋ B（同一事实两份实现）。
+
+**形态**：测试断言的是**内部结构**而非公开行为：手写的模块 / 桩 / 导出清单、
+内部调用序列、私有符号、内部数据形状。判据只有一条——**纯重构会不会让它变红**。
+Google ch12 的表述是 the ideal test is **unchanging**：
+「重构、修 bug、加功能都不应需要改已有测试，只有**行为变更**才该改」。
+
+**本仓库实例（第四十八轮）**：前端手写模块表 28 个文件（`sources = {` / `modules = {` / `stubs = {`，
+集中在 `app/tests/*.test.js`）+ Go 的调用序列断言（`kernel/av/relation_refresh_test.go` 的 `wantCalls`、
+`kernel/model/repository_range_test.go` 与 `kernel/mcp/tools/bazaar_test.go` 的 `calls = append(`）。
+**直接后果是失败信息无法归因**：`app/tests/settingsWindow.test.js` 因「模块白名单未登记新模块」
+长期红在 dev 上，报错与业务无关（`unexpected module X`），于是既没人修也没人删。
+
+**与 G3 的分工**：G3 把这类失败归到「契约缺口」并声明「与产品缺陷无关，只污染修复验证」；
+P52 说的是**它本身就是测试套件的缺陷类别**，两者不重复计分。
+
+**检查法**：`scan_test_quality.py --section binding`。回读时问：
+**如果把被测实现内部重排（拆函数、改调用顺序、换内部数据结构）而行为不变，这个测试会红吗？**
+会红 → 命中。**不要把「用了 mock」当成命中**——mock 本身不是缺陷（判据 J 的权威依据里
+Google 与 Fowler 都只反对**滥用**）。
+
+**修法方向**：把断言从「调用了谁」移到「产生了什么结果」（Google ch12 的
+test state, not interactions）；手写模块表改成真实加载（本仓库已有 Playwright 基础设施）。
+
+### P53 兼容性夹具不是外部权威（用测试代码重写旧格式）
+
+**判据**：J3 ＋ H3（缺少上一版格式的回归夹具）。
+
+**形态**：格式变更的回归测试**确实有夹具**，但夹具不是捕获的真实产物，而是**测试代码现场构造**的。
+危险在于：夹具与实现由同一个人、同一时期编写，**两边可能共享同一个错误理解**，
+于是「旧版仍可读」这个承诺从未被真正验证。
+
+**与 H3 的分工**：H3 问「有没有上一版格式的夹具」，P53 问「这个夹具独立于实现吗」。
+**有夹具不等于有外部权威**。
+
+**可信度阶梯（本仓库实测三档）**：
+① **跨实现产物**（最高）：`kernel/plugin/crypto/testdata/interop.json` 由 **Node 的 WebCrypto**
+   生成（`generate_fixtures.mjs`，`0cb7631941`/`#20041`）、Go 侧消费——判定器是真实浏览器规范实现；
+   同理 `app/tests/fixtures/unicode17-emoji.json`、`kernel/treenode/testdata/*-legacy.sy`（捕获的旧 `.sy`）。
+② **捕获的真实旧产物**：直接从受支持的旧版本导出。
+③ **测试里重写旧格式**（最低）：`kernel/model/crypto_asset_legacy_test.go:19`
+   `legacyEncryptedAssetFixture` 注释自陈「按无版本字段的资源格式生成样本，**不调用当前资源编码器**」
+   ——这比自我参照强（两份独立实现），但仍可能同错。
+   **注释自陈只是必要条件，不是可信度证明。**
+
+**检查法**：`scan_test_quality.py --section fixture`（双条件：提到 legacy/旧版本 **且** 有现场构造点
+`[]byte{` / `bytes.Repeat` / `Buffer.from`，且**不读** `testdata`/`fixtures`）。
+本仓库 4 条候选；对照面是 **585 个**读 `testdata`/`fixtures` 的测试文件。
+**回读时先排除「只是注释里提到 legacy」**——不看「夹具位点」条件时，任何提到旧版本的契约测试都会入选。
+
+**修法方向**：优先把旧版产物**捕获**进 `testdata/`（H3 的要求），或改为跨实现夹具；
+必须保留自建夹具时，在测试注释里**显式标注可信度等级**，避免后续读者把它当成旧格式的权威样本。

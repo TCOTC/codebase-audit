@@ -259,6 +259,10 @@
   - 测试替身白名单过时 → G3
   - 测试环境前提互相矛盾（夹具临时目录 × 硬编码路径黑名单前缀）→ G4 增补
   - 构建产物被测试框架收集 → 假失败
+  - **判定器就在被测实现里**（改前/改后取同一函数再比较；两侧都是同一函数）→ J1 / P50
+  - **测试跑了却没有可失败的断言**（断言缺失、断言在 helper 里、Benchmark 被当成测试）→ J2 / P51
+  - **夹具不是外部权威**（测试代码重写旧格式，而非捕获产物/跳实现产物）→ J3 / P53
+  - **测试绑定实现结构**（手写模块表、内部调用序列断言）→ J4 / P52
 - **既有校验器**：`go test -tags "fts5 sqlcipher" ./...`（`kernel/`）；`pnpm test`、`pnpm run lint`（`app/`）
 - **取证陷阱**：
   - **CI 覆盖 ≠ 本地覆盖**；「本地红、CI 绿」本身就是独立发现，不是噪声
@@ -274,6 +278,54 @@
     必须把两份语句合并进同一模块体（本仓库现成写法：`app/tests/verticalNavigation.test.js:18-22`）
   - 判「某测试的失败是否由某提交引入」**不能只跑目标树**：该文件可能在父树也是红的（只是失败在另一条断言上）。
     用「同一测试文件 + 两份源码树」做对照，并优先用不依赖 electron / DOM 的静态装配复现
+
+### 测试审计检查点（判据 J；第四十八轮建立，有本仓库实证）
+
+**权威源（不是审计者口味）**：Kent Beck 的 Test Desiderata（Behavioral / Structure-insensitive）；
+Google《Software Engineering at Google》ch11–ch12（unchanging tests、test via public APIs、
+test state not interactions、DAMP over DRY、覆盖率不是质量指标）；
+Microsoft .NET 单测最佳实践（FIRST、单 Act、断言之外不写逻辑）；
+ThoughtWorks 技术雷达 Vol 34（变异测试 Trial、浏览器组件测试 Trial、反馈传感器 Trial）。
+**「测试太少」「没上 TDD」「用了 mock」不是缺陷**——不得据此立论。
+
+**四个观察点，对应四个可机械取证的信号**：
+
+| 观察点 | 判据 | 机械信号 | 回读问句 |
+|---|---|---|---|
+| 判定器在哪 | J1 / P50 | `scan_test_quality.py --section oracle`（`[same]` / `[local]` / `[repeat]`） | 「有没有任何期望值来自实现之外？」 |
+| 有没有判定力 | J2 / P51 | `--section assert` | 「改坏实现，这个测试会红吗？」 |
+| 夹具是否外部权威 | J3 / P53 | `--section fixture` | 「夹具是捕获的，还是测试代码重写的？」 |
+| 是否绑定结构 | J4 / P52 | `--section binding` | 「纯重构会让它红吗？」 |
+
+**先建聚合事实，再看单文件**——这是本层与其它层最大的不同：单看一个测试文件无法判断它是常规还是异常。
+三个必做量（全部用 `git log --diff-filter=A --name-only` + `--section gate` 取证，不估算）：
+测试文件数与首次加入时间分布（追加入库的批次一眼可见）；创建后再未被任何提交碰过的比例；
+门禁强度（看 `on:` 的**限定条件**，`push: tags:` 只是发布级门禁，与 `branches:` 不是一回事）。
+
+**本仓库当前取值（2026-10-08，第四十八轮实测）**：测试文件 1616 个（Go 874 / 前端 742）；
+首次加入 2026 年的 1644 / 1645；创建后再未被修改的 **45%**；门禁为 **tag-only**
+（`.github/workflows/cd.yml` 的 `on:` 只有 `*‑alpha*` / `*‑beta*` / `*‑rc*` 与 `workflow_dispatch`）。
+**组合含义**：新测试既不一定被执行、也未被读过——在这种状态下扩产测试，收益上限很低。
+
+**回读前置条件（不先做会得到整批假阳性，实测）**：
+① **断言 helper 按目录收集**，且要认**泛型签名**（`func compareSettingConfig[Request …, Data, Config any](t *testing.T, …)`）
+与**箭头函数**（`const checkTarget = (t, e) => { assert… }`）。
+实测漏掉前者会把 `kernel/api` 7 个契约测试整批误报，漏掉后者会把
+`app/src/util/parseNewDocTarget.test.ts` 的 52 个测试整批误报。
+② **移植/上游子树排除**：`kernel/plugin/encoding/**` 这类文件断言全在跨文件 helper 里，
+且按 `SKILL.md` 的**范围边界**本就不在审计范围内。
+③ `Benchmark*` 无断言是正常的，`t.Skip` only 不算测试。
+④ **夹具候选**必须同时满足「提到旧版本」与「有夹具位点」，否则注释里提一句就会入选。
+
+**取证陷阱**：
+  - **`[same]` 不是缺陷**：同一变换作用于两个不同输入是正常写法。
+    判据是「有没有任何期望值来自实现之外」，不是「有没有出现同一函数」。
+  - **同一测试里常有绝对值断言与参考断言共存**（本仓库 `kernel/sql/recent_index_test.go`）：
+    先读全部断言，再下「弱」还是「无效」的结论。
+  - **覆盖率与文件数都不能当证据**。ThoughtWorks 雷达的原话是
+    「高覆盖率会掩盖**逻辑空洞**的测试」——要看的是「改坏实现后测试会不会红」。
+  - 门禁结论**不得**用工作流文件名或 `on:` 是否存在来推断，必须看**限定条件**。
+
 
 ---
 

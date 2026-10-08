@@ -59,8 +59,10 @@ import importlib.util
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
@@ -74,6 +76,7 @@ SCAN_PARITY = os.path.join(HERE, "scan_doc_parity.py")
 SCAN_I18N = os.path.join(HERE, "scan_i18n_text_expansion.py")
 SCAN_A11Y = os.path.join(HERE, "scan_a11y_antipatterns.py")
 SCAN_FOCUS = os.path.join(HERE, "scan_focus_coverage.py")
+SCAN_TQ = os.path.join(HERE, "scan_test_quality.py")
 EVIDENCE = os.path.join(SKILL_DIR, "references", "evidence.md")
 
 FAILURES = []
@@ -120,10 +123,12 @@ for script, name in ((SCAN_DUP, "scan_duplicated_literals"),
                      (SCAN_PARITY, "scan_doc_parity"),
                      (SCAN_I18N, "scan_i18n_text_expansion"),
                      (SCAN_A11Y, "scan_a11y_antipatterns"),
-                     (SCAN_FOCUS, "scan_focus_coverage")):
+                     (SCAN_FOCUS, "scan_focus_coverage"),
+                     (SCAN_TQ, "scan_test_quality")):
     flag = "--docs" if script == SCAN_PARITY else (
         "--langs" if script == SCAN_I18N else (
-            "--styles" if script == SCAN_FOCUS else "--root"))
+            "--styles" if script == SCAN_FOCUS else (
+                "--repo" if script == SCAN_TQ else "--root")))
     argv = [flag, missing]
     if script == SCAN_FOCUS:
         # 该扫描器 `--root` 与 `--styles` 都是必填；只给一个会先触发 argparse
@@ -749,6 +754,308 @@ if repo:
               % os.path.splitdrive(os.path.abspath(repo))[0])
 else:
     print("  SKIP  未提供目标仓库")
+def build_tq_fixture(helper_asserts=True, with_pr_workflow=False):
+    """造一个最小仓库夹具：kernel/ + app/src/ + .github/workflows/。
+
+    `helper_asserts=False` 时把**断言 helper 换成不承重的形式**（用 throw 而非
+    assert）——用来证明「helper 识别」是承重的：此时同一份调用必须被报出来。
+    两组共用一个模板、只改一个变量，才能证明差异来自那个变量。
+    """
+    root = tempfile.mkdtemp(prefix="tq-fixture-")
+
+    def write(rel, text):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        io.open(path, "w", encoding="utf-8", newline="\n").write(text)
+
+    write("kernel/pkg/helper_test.go", """package pkg
+
+import "testing"
+
+// 泛型 + 多行签名：断言只在这里出现一次。
+func mustEqual[T comparable](t *testing.T, got T, want T) {
+\tif got != want {
+\t\tt.Fatalf("got %v want %v", got, want)
+\t}
+}
+""")
+    write("kernel/pkg/useshelper_test.go", """package pkg
+
+import "testing"
+
+// 本函数内没有任何 t.Error*：断言全在被调用的 helper 里。
+// 不认 helper 就会把它误报成「无断言」。
+func TestUsesHelper(t *testing.T) {
+\tmustEqual(t, compute("a"), compute("a"))
+}
+""")
+    write("kernel/pkg/noassert_test.go", """package pkg
+
+import "testing"
+
+// 真·无断言：既没有断言构造，也不调用任何断言 helper。
+func TestNoAssertion(t *testing.T) {
+\tcompute("x")
+}
+""")
+    write("kernel/pkg/ported_test.go", """// 移植自 https://example.invalid/upstream 的 foo_test.go（提交 deadbeef），
+// 按 Apache License 2.0 使用，许可证全文见同目录 LICENSE。
+
+package pkg
+
+import "testing"
+
+func TestPortedNoAssertion(t *testing.T) {
+\tcompute("y")
+}
+""")
+    write("kernel/pkg/oracle_test.go", """package pkg
+
+import "testing"
+
+// 两个操作数都由同一个函数产生 → [repeat] 候选。
+func TestSameProducer(t *testing.T) {
+\twant := compute("a")
+\tgot := compute("b")
+\tif got != want {
+\t\tt.Errorf("changed")
+\t}
+}
+
+// 期望值是字面量 → 不是自我参照候选。
+func TestLiteralExpectation(t *testing.T) {
+\tif compute("a") != "5" {
+\t\tt.Errorf("literal")
+\t}
+}
+""")
+    write("kernel/pkg/prosemention_test.go", """package pkg
+
+import "testing"
+
+// 这里只是在注释里提到 legacy 格式，且出现了 []byte{ —— 不构成夹具候选。
+func TestMentionOnly(t *testing.T) {
+\tblob := []byte{1, 2, 3}
+\tif len(blob) != 3 {
+\t\tt.Fatal("bad")
+\t}
+}
+""")
+    write("kernel/pkg/legacybuild_test.go", """package pkg
+
+import (
+\t"bytes"
+\t"testing"
+)
+
+func legacyFixture(marker byte) []byte {
+\treturn bytes.Repeat([]byte{marker}, 4)
+}
+
+func TestLegacyFixture(t *testing.T) {
+\tif len(legacyFixture(1)) != 4 {
+\t\tt.Fatal("bad")
+\t}
+}
+""")
+    write("kernel/pkg/captured_test.go", """package pkg
+
+import (
+\t"os"
+\t"testing"
+)
+
+func legacyCaptured(t *testing.T) []byte {
+\tdata, err := os.ReadFile("testdata/legacy.bin")
+\tif err != nil {
+\t\tt.Fatal(err)
+\t}
+\treturn data
+}
+""")
+    write("kernel/pkg/callorder_test.go", """package pkg
+
+import "testing"
+
+func TestCallOrder(t *testing.T) {
+\tvar wantCalls []string
+\tif len(wantCalls) != 0 {
+\t\tt.Fatal("bad")
+\t}
+}
+""")
+    write("kernel/pkg/bench_test.go", """package pkg
+
+import "testing"
+
+// Benchmark 本就不该有断言：把它算进「无断言」会把候选量抬高一整倍。
+func BenchmarkCompute(b *testing.B) {
+\tfor i := 0; i < b.N; i++ {
+\t\tcompute("x")
+\t}
+}
+""")
+    write("kernel/pkg/skip_test.go", """package pkg
+
+import "testing"
+
+// 只跳过的不算测试：它既没验证也没执行。
+func TestSkipped(t *testing.T) {
+\tt.Skip("needs a real workspace")
+}
+""")
+    # JS 分成两个文件：一个只用 helper（判「有没有被认出来」），一个真无断言。
+    # 写在同一个文件里时，"文件是否出现在输出里" 无法区分两者——
+    # 实测那条断言因此不承重（把 helper 识别改成恒真/恒假都不会让它失败）。
+    helper_body = ("assert.equal(target, expected);" if helper_asserts
+                   else 'throw new Error("mismatch");')
+    write("app/src/withhelper.test.ts", """import {test} from "node:test";
+import * as assert from "node:assert/strict";
+
+const checkTarget = (target: string, expected: string) => {
+    %s
+};
+
+test("uses arrow helper", () => {
+    checkTarget("a", "a");
+});
+""" % helper_body)
+    write("app/src/bare.test.ts", """import {test} from "node:test";
+
+test("no assertion at all", () => {
+    parseTarget("c");
+});
+""")
+    # EXCLUDE_DIR_NAMES 里的目录不得被收集
+    write("app/src/node_modules/ignored.test.js", """const {test} = require("node:test");
+
+test("should never be collected", () => {
+    parseTarget("d");
+});
+""")
+    write(".github/workflows/tagonly.yml", """name: CD
+
+on:
+  push:
+    tags:
+      - '*-rc*'
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./...
+""")
+    if with_pr_workflow:
+        write(".github/workflows/pullrequest.yml", """name: CI
+
+on:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm test
+""")
+    return root
+
+
+print()
+print("[12] scan_test_quality：四类判定都不得退化（含承重的双向用例）")
+TQ_A = build_tq_fixture(helper_asserts=True, with_pr_workflow=False)
+TQ_B = build_tq_fixture(helper_asserts=False, with_pr_workflow=True)
+
+# --- 12.1 入口与错误契约 -----------------------------------------------------
+code, out, err = run(SCAN_TQ, "--repo", os.path.join(HERE, "___no_such_dir___"))
+check(code == 2, "扫描根不存在时退出码为 2（实际 %d）" % code)
+check("no such directory" in err, "在 stderr 带 no such directory 标记", repr(err[:120]))
+check("Traceback" not in err, "是主动报错而非崩溃", repr(err[:160]))
+
+code, out, err = run(SCAN_TQ, "--repo", tempfile.mkdtemp(prefix="tq-empty-"))
+check(code == 2, "无测试文件时退出码为 2（实际 %d）" % code,
+      "零发现与没扫到在输出上无法区分，故必须报错")
+check("no test files" in err, "在 stderr 带 no test files 标记", repr(err[:120]))
+
+# --- 12.2 门禁强度：tag-only 与 PR 级必须能区分 ------------------------------
+code, out, err = run(SCAN_TQ, "--repo", TQ_A, "--section", "gate")
+check(code == 0, "运行成功（实际 %d）" % code, repr(err[:160]))
+check("只有 tag" in out, "`push: tags:` 被判为 tag 级门禁",
+      "把它当成分支门禁会得出「测试有 CI」的反向结论")
+check("有 PR 级门禁" not in out, "tag-only 不得被判成 PR 级")
+check("tags" in out, "报出了限定条件 tags")
+code, out, err = run(SCAN_TQ, "--repo", TQ_B, "--section", "gate")
+check("有 PR 级门禁" in out, "存在 pull_request 工作流时判为 PR 级", repr(out[:200]))
+
+# --- 12.3 判定力：断言 helper 必须被认（承重） --------------------------------
+code, out, err = run(SCAN_TQ, "--repo", TQ_A, "--section", "assert")
+check(code == 0, "运行成功（实际 %d）" % code, repr(err[:160]))
+check("noassert_test.go" in out, "真·无断言测试被报出")
+check("useshelper_test.go" not in out,
+      "断言在泛型 helper 里时不被误报",
+      "泛型签名（名后是 [T comparable]）漏认会把整包误报")
+check("withhelper.test.ts" not in out,
+      "断言在箭头 helper 里时不被误报")
+check("bare.test.ts" in out, "真无断言的 TS 测试被报出")
+check("bench_test.go" not in out and "skip_test.go" not in out,
+      "Benchmark 与 skip-only 不参与无断言统计")
+check("ignored.test.js" not in out,
+      "被排除目录（node_modules）下的测试文件不参与统计")
+code, out, err = run(SCAN_TQ, "--repo", TQ_B, "--section", "assert")
+check("withhelper.test.ts" in out, "箭头 helper 不该断言时同一调用被报出",
+      "helper 识别若恒真（无条件认所有箭头函数），这条会失败")
+
+# --- 12.4 移植子树排除（双向） ----------------------------------------------
+code, out, err = run(SCAN_TQ, "--repo", TQ_A, "--section", "assert")
+check("ported_test.go" not in out, "移植文件被默认排除")
+code, out, err = run(SCAN_TQ, "--repo", TQ_A, "--section", "assert",
+                     "--include-ported")
+check("ported_test.go" in out, "--include-ported 时移植文件重新纳入")
+
+# --- 12.5 判定器：同一产生函数 vs 字面量期望 ---------------------------------
+code, out, err = run(SCAN_TQ, "--repo", TQ_A, "--section", "oracle")
+m = re.search(r"oracle_test\.go\s*\((\d+) 条\)", out)
+check(m is not None, "报出 oracle_test.go 的候选数", repr(out[:300]))
+if m:
+    check(m.group(1) == "1",
+          "同一产生函数报出 1 条、字面量期望不报（实际 %s）" % m.group(1),
+          "两侧都是函数调用才是候选；字面量期望被一起报出说明过滤失效")
+check("[repeat]" in out, "带 [repeat] 标记")
+
+# --- 12.6 夹具外部性：三种形态必须分开 ---------------------------------------
+code, out, err = run(SCAN_TQ, "--repo", TQ_A, "--section", "fixture")
+check("legacybuild_test.go" in out, "自建旧格式夹具被报出")
+check("prosemention_test.go" not in out,
+      "只在注释里提到 legacy 不被报出",
+      "缺少 FIXTURE_SITE 条件时，任何提到旧版本的契约测试都会入选")
+check("captured_test.go" not in out, "读 testdata 的夹具不被报出")
+
+# --- 12.7 结构绑定 ----------------------------------------------------------
+code, out, err = run(SCAN_TQ, "--repo", TQ_A, "--section", "binding")
+check("callorder_test.go" in out, "断言内部调用序列被报出")
+
+# --- 12.8 异盘 cwd 不得崩溃、输出不得用绝对路径 ------------------------------
+fixture_drive = os.path.splitdrive(TQ_A)[0].lower()
+alt = next((d for d in ("D:\\", "E:\\", "F:\\", "G:\\")
+            if os.path.isdir(d) and os.path.splitdrive(d)[0].lower() != fixture_drive),
+           None)
+if alt:
+    code, out, err = run(SCAN_TQ, "--repo", TQ_A, cwd=alt)
+    check("Traceback" not in err and "relpath" not in err,
+          "在异盘 cwd 下不抛 relpath 异常", repr(err[:200]))
+    check(code == 0, "在异盘 cwd 下退出码为 0（实际 %d）" % code, repr(err[:200]))
+    # 断言「列出的文件路径是相对路径」而不是「输出里不出现扫描根」：
+    # 报告头部有意回显扫描根（便于取证留痕）。判据与第 10 组一致——看有没有
+    # **以盘符开头的行**，那才是路径泄漏。
+    leak = [l for l in out.split("\n") if re.match(r"\s*[A-Za-z]:[/\\]", l)]
+    check(not leak, "列出的文件路径以扫描根为基准而非绝对路径",
+          "绝对路径泄漏：%s" % repr(leak[:2]))
+else:
+    print("  SKIP  未找到与夹具不同盘的目录，异盘用例不适用")
+
+shutil.rmtree(TQ_A, ignore_errors=True)
+shutil.rmtree(TQ_B, ignore_errors=True)
 
 print()
 if FAILURES:
