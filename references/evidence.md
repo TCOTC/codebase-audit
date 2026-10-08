@@ -3278,6 +3278,65 @@ CSS 侧：自研 `:has()` **0 处**（唯一命中在 PDF.js 移植），`transi
 **误报表 +3**：每帧 `requestAnimationFrame` 自轮询、`backdrop-filter`、全局 `mouseover`/`mousemove`
 处理器里的 DOM 查询与布局读取（详见 `known-false-positives.md`，本条的第 1 条同时升级了「必须逐条验触发频率」这一检查法）。
 
+## 第四十七轮（2026-10-08）：差分审查 `bbef0e1f8b..HEAD`（35 提交 / 200 文件 / +5078 −2111）
+
+用户先问范围，选定**差分审查**（skill 的第 2 步：范围不明必须先问）。基线 `HEAD == origin/dev == d07c4719a8`，
+`bbef0e1f8b` 是 HEAD 的祖先（是前进不是回退）；**全程只读**。这 35 个提交是维护者对**多个并行审计会话**所提
+issue 的修复（#20226–#20266）＋若干自带提交（`d07c4719a8` 无 issue 链接、`7525a4d6bd` 无链接）。
+
+**方法（按 skill 差分审查流程）**：① `scan_regression_index.py --git <repo> --rev bbef0e1f8b` → 命中 37 个已报文件
+（`kernel/av/value.go` 7 处、`kernel/sql/av.go` 4 处、`kernel/model/search.go` 4 处…）；② 按**改动性质**而非文件分类，
+把 35 个提交分为「删除/重构」（8 个）、「索引与查询」（8 个）、「正则/常量模式复用」（2 个）、「搜索替换」（4 个）、
+「新特性」（3 个）；③ 三类必查逐项执行。**只有「删除型」与「同族改进型」出了产出**。
+
+**主报告 1 条（轨迹 A，中）**：`replaceTypes` 的 25 个分支里**只有 `text` 做大小写折叠**。
+`Conf.Search.CaseSensitive` 默认 `false`（`kernel/conf/search.go:103`），而 `replaceCaseInsensitive` 只被
+`replaceTextNode`（`ast.NodeText`）调用；`replaceNodeTokens`（`imgSrc`/`imgText`/`imgTitle`/`codeBlock`/
+`mathBlock`/`htmlBlock`）、`replaceEscapedTextMarkContent`（`code`/`blockRef`/`fileAnnotationRef`/`em`/`strong`/…）
+与 `docTitle`/`tag`/`aTitle`/`aHref`/`inlineMath`/`inlineMemo` 全部是精确 `Contains`。
+→ 忽略大小写搜索时，「全部替换」只改正文文本。**新判据 D1q + 模式 P49**。
+
+**主报告 1 条（轨迹 B，低）**：删除型提交 `b8a926b6ef`（#20231）删掉 `agent.SaveSession`，
+`kernel/api/agent.go:465` 的注释仍在引用它。`git grep -w SaveSession HEAD -- kernel/` 在全内核只命中这一处注释。
+
+**观察项（未证实可达，不立论）**：`Transaction.completion` 的完成信号在「同一 `*Transaction` 既入队又被同步执行」
+时会 `close` 两次（panic）或让旧通道永不关闭（挂起）——但维护者为该机制补了 300 行测试，覆盖
+「queue / sync / sync-notify × empty / invalid / panic / begin-error」与「重复同步执行」，我没有构造出可达路径。
+
+**七项已核对为干净（勿重复投入，含新增的机械化检查法）**：
+1. **删除型 8 个提交**：把 6 个提交里被删的 **96 个符号**逐个 `git grep -w <名> HEAD -- kernel/ app/ scripts/`，
+   只 3 类命中且全部合法——测试里**故意**保留的 legacy 参照（`rpc_legacy_test.go`）、本地重建的同名 helper
+   （`formatTodoResult`）、以及上面那条注释。**`//go:build mobile` 文件（`kernel/mobile`、`kernel/harmony`）零命中**
+   —— 这是删除型提交最容易漏的编译期盲区，必须单独说明
+2. **`b581e3dfae`(#20230) Docker 修复正确**：`CMD ["/opt/siyuan/kernel","serve"]` → `CMD ["serve"]`，
+   与 `kernel/entrypoint.sh:52` 的 `${ARGS}` 追加语义对上（原写法让内核路径在 argv 里出现两次）
+3. **模板路径校验已收敛且加固**：`model.ResolveTemplatePath`/`ReadTemplateFile`（`kernel/model/template_path.go`，
+   `os.OpenRoot` + `os.Root`）取代 CLI/MCP 两份本地实现；`rel == ".."`/`".."+sep 判定接受了 `..foo.md`（#20237），
+   且 `RemoveTemplate` 走 `root.RemoveAll`（#19453 的软链越界已封）
+4. **正则/常量模式复用（#20243/#20245/#20256/#20246）逐条比对语义等价**：`regexp.MustCompile` 提升为包级变量、
+   正则交替 `\r\n|\r|\n|…` 换成 `strings.NewReplacer`（`NewReplacer` 同为首个匹配优先，与交替的 leftmost 语义一致）、
+   `errors.New(fmt.Sprintf(f,a))` → `fmt.Errorf(f,a)`（参数齐全时等价）
+5. **图/标签索引重构（#20247/#20248）语义保真**：`tagNodeIn` 线性查表 → `map`、双重循环 → `map[blockID][]span`，
+   块序/标签序/重复连线全部保持；`Partial index` 的谓词用 `instr(lower(type),'tag')>0`（**确定性函数**，
+   不受 `PRAGMA case_sensitive_like` 影响），查询侧再 AND 回 `type LIKE '%tag%'` 以保持 `case_sensitive_like=ON` 下的语义
+6. **5 个新索引的注册点三处齐全**（`initDatabase` 重建分支 / `initDBTables` / `initEncryptedDBTables`），
+   含加密笔记本的每个 box db —— 这是索引类改动的标准漏改位
+7. **i18n 与契约同步**：`python scripts/check-lang-keys.py` → 22 文件 / 3161 键 / 0 缺 / 占位符兼容；
+   本轮唯一新增键 `slashMenuFrequent` 在 22 种语言**均为真实译文**（非英文复制）；
+   `kernel/apicontract/search_query.go` 只加注释，`app/src/types/api/index.d.ts`/`schema.json` 无需重生成
+
+**新增的两个工具坑**：
+- **终端会把制表符渲染成空格**：`git grep` 输出的行首缩进在捕获时 `\t` 被显示成 1 个空格，
+  据此怀疑「三个语言文件用空格缩进」——用 Python `repr()` 读原始字节才证明 22 个文件全是 `\t`。
+  **判定缩进/空白类别必须读字节，不能读终端文本**
+- **PowerShell 下 `python -c "..."` 内嵌复杂表达式会被拆解成 PowerShell 语法**：含 `|`、`"`、`\\(` 的脚本一律
+  写文件再 `python <file>`；本轮两次为此浪费往返
+
+**skill 仓库维护顺带修一处结构缺陷**：`references/patterns.md` 里 **P48 被插在 P47 正文中间**
+（第四十四轮写入时的锚点问题），导致 P47 的「方法限制/修法方向」两段读起来像属于 P48。已把 P48 整块移到 P47 之后
+（纯移动，内容零改动），再把 P49 追加在末尾。自检的 7 组**都抓不到这类跨节错位**（[7] 只查 P 编号唯一与递增），
+如需设防应加「同一 `##`/`###` 标题下不得出现下一个同级标题再回到上一节的正文」的检查。
+
 ## 如何更新本文
 
 每轮审计后追加：
