@@ -1936,3 +1936,71 @@ AV 定义…）；② 逐类问「目标已存在时它做什么」，把答案�
 `(零值标志, 关键键, ID)` 三元组，或先把零值项整段排到首/尾再在同层内用单一键），
 不要在同一比较器里按分支切换比较键。**修法陷阱**：直接删掉零值分支会退回 #14686 之前的行为
 （零值项与有值项混排），那不是修复。
+
+### P61 挂起时长被当作「用户空闲」→ 唤醒后立刻跑重活（墙钟判定 vs 单调时钟计时）
+
+**判据**：E2（挂起是宿主环境值）＋ E5（对运行期语义的假设）＋ C（状态：空闲语义被污染）。
+
+**形态**：长驻进程内并存两条时间线。① **计时/调度**用单调时钟（Go 的 `time.Now()` 带单调读数、
+`time.NewTicker`、`net.Conn.SetReadDeadline`、Chromium 的 `TimeTicks`）：挂起期间不前进，
+唤醒后定时器按「剩余清醒时长」触发且**不补跑**；② **空闲/超时判定**若把时间戳降级成墙钟
+（`UnixNano()`、`time.Unix(0, ns)`、`Date.now()`），挂起期间照常前进 ⇒ 唤醒瞬间「已空闲 8 小时」为真。
+凡把墙钟空闲用于**抑制打扰**（「等用户走开再做重活」）的守卫都会被挂起污染；
+反向用于**安全**（闲置锁定、会话过期）时反而是正确语义。
+
+**为何出现**：写守卫的人关心的是「用户有没有在用」，能拿到的却只有「上一次活动距今多久」。
+单调时钟给不出「跨挂起」的答案，墙钟给不出「用户是否在座」的答案——挂起正好落在两者的夹角里。
+
+**检查法**：
+1. grep 时间戳载体（`UnixNano()`、`Unix()`、`time.Unix(`、`Date.now()`）与 `time.Since(`/`Sub(`/`now -` 的组合，
+   对每个 **「空闲 / 闲置 / 超时」语义的消费点**问：挂起算不算空闲？这是本意吗？
+2. 对每个定时器问：它是单调时钟还是墙钟？唤醒后是立刻补跑、延后、还是被夹在「计划的绝对时刻」里？
+3. 找宿主的恢复信号是否已存在（Electron `powerMonitor.on("resume")`、原生 `onResume`、Android `doze`），
+   判断「恢复到刷新活动时间」这一步有没有人做。
+
+**本仓库实例（第五十九轮）**：`kernel/util/websocket.go:724` 的 `IsIdle` 是
+`time.Since(time.Unix(0, lastActivityNs.Load()))` —— `time.Unix` 返回的时间**没有单调读数**，
+`time.Since` 因此退回墙钟（Go 文档），而 `kernel/model/index_fix.go:120/136` 用它当
+「用户空闲才跑索引订正」的闸门（`idleFixThreshold = 7min`，注释明写意图是「避免打扰用户」）
+⇒ 唤醒后 1 分钟内（cron `every(1*time.Minute, AutoFixIndex)`）必然满足，紧接着
+`fixBlockTreeByFileSys` + `debug.FreeOSMemory()` + 状态栏进度文案。**同族对照**：
+`kernel/model/crypto.go:2800` 的 `AutoLockIdleEncryptedBoxesJob` 同样用 `time.Now().UnixNano()`，
+但「睡够就该锁」正是该功能的本意 ⇒ **同一口径在两处一错一对，判据是「空闲被用来做什么」，不是口径本身**。
+
+**修法陷阱**：不要简单把 `IsIdle` 换成单调时钟——那会让「用户合盖离开半小时」也不再触发闲置类逻辑。
+正确方向是让宿主的恢复信号刷新一次活动时间（本仓库 `util.RefreshActivity()` 已存在，由
+`model.Activity` 中间件在 `/api/transactions*` 上调用），或为闲置判定单独引入「挂起不计入」的口径。
+
+### P62 宿主侧请求的认证材料与内核白名单不同族 → 只有「设了锁屏密码」的用户静默失败
+
+**判据**：D1（同族调用点不对称）＋ E2（「本机=免鉴权」的隐式假设）＋ B（同一意图的多份实现）。
+
+**形态**：内核为「没有浏览器会话的宿主请求」维护一份**本机免认证白名单**
+（`kernel/model/session.go` 的 `strings.HasPrefix(c.Request.RequestURI, ...)` 段；带
+`if util.IsMobileContainer()` 条件的条目表示「只在移动端免认证」）。宿主（Electron 主进程、
+原生桥接）新增一个内核调用时，若该端点不在白名单里，就必须自己带凭据（Cookie 或 `Authorization`）。
+两种常见错法：① 显式 `credentials: "omit"`；② 以为「localhost 就是免鉴权」。
+症状**全是静默**：调用方不读响应、日志在请求**之前**就写好、失败也不重试，于是只有
+「设了锁屏密码 / 启用 OIDC」的用户走这条路径时才失效——无密码用户完全正常，
+所以功能「看起来是通的」。
+
+**检查法**：
+1. 列出所有宿主侧发起的内核请求（Electron 的 `net.fetch` / `session.fetch` / `net.fetch`、
+   移动端 WebView 的 `fetch`、原生桥接），逐条查其**授权要求**（`apicontract` 的
+   `AuthenticatedAccess` 等）与**白名单是否覆盖桌面**。
+2. 对这些请求逐条问三件事：带 Cookie 吗？带 Token 吗？响应读了吗（失败会不会留痕）？
+3. 交叉对照同族里已经写对的实现——本仓库 `app/electron/notebookSystemLock.js:22-34`
+   为同一目的读 `conf.json` 的 `api.token` / `accessAuthCode` 显式加 `Authorization` 头。
+
+**本仓库实例（第五十九轮，已实测）**：`app/electron/main.js:4446` 的
+`credentials: item.ownsKernel ? "omit" : "include"` 让**本机工作空间**唤醒后的
+`POST /api/sync/performSync` 不带任何凭据，而该端点（`kernel/apicontract/contracts.go:829`）
+要求 `AuthenticatedAccess|AdminAccess|WritableAccess`，其白名单只对 `util.IsMobileContainer()`
+放行（`kernel/model/session.go:303`）⇒ 设了锁屏密码或启用 OIDC 的工作空间在系统唤醒后同步恒 401。
+改动来源 `d64e5e079d`（远程内核 #18343）把原先默认带 Cookie 的 `net.fetch(...)` 换成
+`session.defaultSession.fetch(..., {credentials: "omit"})`。
+
+**取证方法（可复用，成本很低）**：**用本机 Electron 起一个回环 echo 服务端**，对同一 URL 依次跑
+`credentials: "omit"` / `"include"` / 不传 / `net.fetch(...)` 四组，打印服务端收到的 `Cookie` 头。
+比读文档可靠——Electron 文档**没有**写 `net.fetch` 的 Cookie 默认值，而实测默认等价于 `include`
+（`ses.fetch` 同理），因此「换成 `omit`」这一改动的后果无法从文档推出，只能实测。

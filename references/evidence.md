@@ -4056,6 +4056,86 @@ riff 的 `gulu.Str.Contains` 导致 O(C×N)（**未证实**，我用自定义牌
 - Obsidian 导入只删自己的临时目录（`import_obsidian.go:1637`/`2485`，后者带 `IsSubPath` 边界），
   重名目标笔记本用 `availableObsidianNotebookName` 追加 `(2)` 规避 ⇒ 不覆盖用户数据。
 
+## 第五十九轮（2026-10-10）：桌面端系统休眠 / 唤醒生命周期定向审计（新增 P61、P62；1 条高 + 2 条中，未提 issue）
+
+**范围**：用户给定情境「开着思源休眠电脑，然后打开电脑」——即宿主生命周期事件（suspend / resume /
+lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核三层时的行为。这是一条此前**零覆盖**的
+主题线：机械扫描与既有判据都能命中的位置很少，证据主要来自「同一份电源事件的三个消费者」之间的不对称。
+
+**基线**：`dev` @ `7f911d3212`（工作树干净；`git rev-list --count HEAD..origin/dev` = 1，
+落后的是 `faf07a2a9e`「表格与页签标题方向键导航」，与主题无关）。**取证基线另有一条**：本机安装版
+`3.8.7-alpha.7` 的 `~/.config/siyuan/app.log`、工作空间 `D:\Admin\Desktop\测试空间\temp\siyuan.log`，
+以及用 `app/node_modules/electron`（**44.7.0**，与 `app/package.json` 一致）现场跑的对照实验。
+
+**机械扫描**：`scan_duplicated_literals.py`（1950 文件 / **324 条**，头部全为已知噪声类：`assets/`、
+`/stage/loading-pure.svg`、`/api/block/getDocInfo`、`INPUT`、`separator_N`、`SPAN`、`_blank`）；
+`scan_unescaped_html.py`（1050 文件 / **223 条**候选，涉及 89 文件）。两者与本主题无交集，未逐条回读。
+
+### A. 本轮发现（3 条，均未提 issue——用户只要求审计）
+
+- **判据 D1 / E2 / B（高，机制已实测；→ 模式 P62）**：`app/electron/main.js:4442-4452` 的唤醒同步
+  `credentials: item.ownsKernel ? "omit" : "include"` 使**本机工作空间**不带任何凭据，而
+  `POST /api/sync/performSync`（`kernel/apicontract/contracts.go:829` = `AuthenticatedAccess|AdminAccess|WritableAccess`）
+  的本机免认证白名单只对 `util.IsMobileContainer()` 放行（`kernel/model/session.go:303`）
+  ⇒ **设了锁屏密码或启用 OIDC 的工作空间，系统唤醒后的自动同步恒 401**，且：
+  调用方不读响应（`.fetch(...)` 不 await、不 catch）、日志在请求**之前**写好
+  （`main.js:4445` 无条件写 `sync after system resume [...]`）、失败无重试。
+  **实测（Electron 44.7.0，回环 echo 服务端）**：`credentials: "omit"` 到达服务端的请求
+  **无 `Cookie` 头**；`"include"`、不传、以及 `net.fetch(...)`(旧实现) **都带 `Cookie`**；
+  `Origin` 为空、`Sec-Fetch-Site: none`（与内核 `isLocalHostRequestAllowed`/`IsCrossSiteFetchSite` 的放行条件一致）。
+  **改动来源** `d64e5e079d`（#18343 远程内核）把 `net.fetch(server + "/api/sync/performSync", {method:"POST"})`
+  换成 `session.defaultSession.fetch(..., {credentials: ...})` ⇒ 这是**回归**，不是原生缺陷。
+  影响上限由周期兜底决定：无数据变更时 `syncSameCount` 指数退避被钳到 **8 分钟**
+  （`kernel/model/repository.go:2552-2556`）⇒ 唤醒后最多晚 ~8 分钟才同步，用户看到的是「昨晚手机上的改动还没来」。
+- **判据 E2 / E5 / C（中；→ 模式 P61）**：`kernel/util/websocket.go:724` 的 `IsIdle` 是
+  `time.Since(time.Unix(0, lastActivityNs.Load()))`——`time.Unix` 返回的时间**没有单调读数**，
+  `time.Since` 因此退回墙钟（Go 文档语义），于是「休眠 8 小时」在唤醒瞬间被读成「用户空闲 8 小时」，
+  而它的用途是 `kernel/model/index_fix.go:120/136` 的「避免打扰用户」闸门
+  （`idleFixThreshold = 7min`）⇒ 唤醒后 1 分钟内（`cron.go:57` 的 `every(1*time.Minute, AutoFixIndex)`）
+  开始 `removeDuplicateDatabaseIndex` / `fixBlockTreeByFileSys` / `debug.FreeOSMemory()` 并推状态栏进度。
+  **反面对照**（同族同口径但语义正确）：`kernel/model/crypto.go:2790-2813` 的
+  `AutoLockIdleEncryptedBoxesJob` 用 `time.Now().UnixNano()`，同样计入挂起——但「睡够就该锁」正是本意。
+- **判据 E5 / D1（中，远程内核与浏览器访问）**：网络层失败被无条件呈现为**内核崩溃**。
+  `app/src/util/fetch.ts:115-118` 对 `/api/transactions` 的 `Failed to fetch` 直接调 `kernelError()`；
+  `app/src/layout/Model.ts:129-133` 在主 WS `onerror` + `readyState === 3` 时同样调它；
+  而 `app/src/util/kernelFault.ts:38-53` 的对话框是 `disableClose: true`、文案断言内核已退出并给出
+  「检查杀毒软件」等本地内核排查建议。唤醒初期网络尚未就绪是**常态**（本机 app.log 10-08 12:22:03
+  连续三条 `network is offline`），而唤醒处理最多只重试 7 秒（`main.js:4424-4440`）且只写日志
+  ⇒ 远程内核/浏览器用户在唤醒后继续编辑时可能拿到一个无法关闭的「内核已退出」对话框，
+  实际只是网络未就绪（本地内核走环回，不受影响）。
+
+### B. 方法论增量
+
+1. **「生命周期事件」要按「事件的每个消费者」列表，而不是按代码位置**：本轮同一份电源事件有三个消费者
+   ——主进程（同步 + 加密笔记本锁重试）、渲染进程（WS 3 秒重连）、内核（cron 与墙钟空闲判定），
+   缺陷都出现在**三者对「刚恢复」这件事的假设不一致**上（P62 是主进程少带了凭据；P61 是内核把挂起当空闲）。
+   检查动作：把 `suspend`/`resume`/`lock-screen`/`unlock-screen` 各自的消费者列出，逐条问「它假设了什么是真的」。
+2. **「本机请求」不等于「免认证请求」**（P62）：判据是内核白名单那一行**有没有平台条件**
+   （`if util.IsMobileContainer()` 即「桌面不免认证」），不是 API 名或 URL 形态。
+3. **宿主侧凭据语义只能实测，不能读文档**：Electron 文档未写 `net.fetch`/`ses.fetch` 的 Cookie 默认值；
+   用本机 Electron 起回环 echo 服务端跑四组对照（`omit`/`include`/不传/`net.fetch`）即可确证
+   「默认带 Cookie、`omit` 不带」，成本几分钟。
+4. **运行中的日志是「休眠/唤醒」主题最省力的现场证据**：`~/.config/siyuan/app.log` 里
+   `system suspend` / `system resume` / `sync after system resume [...]` / `local kernel request failed {...}`
+   都是同一主题的现成埋点；本轮据此确认了「唤醒瞬间 WS 握手失败 4–5 次后靠 3 秒重试恢复」，
+   并顺带确认了 `net.isOnline()` 在唤醒初期连续为假。
+5. **「墙钟 vs 单调」要一次问两个方向**：计时（延后 / 不补跑）与空闲（被污染）是两个不同的结论，
+   同一个仓库里可能一半正确一半错误——判据是「这个时间量被用来做什么」。
+
+### C. 已排除（勿重报，除非有新证据）
+
+- `app/electron/main.js:4466` 的 `BrowserWindow.getAllWindows()` 未过滤 `isDestroyed()`：
+  该集合本身不含已销毁窗口，同族过滤是因为它们遍历自维护列表 ⇒ 已写入误报表。
+- `app/electron/main.js:4416` 的 `powerMonitor.on("suspend")` 只写日志、不锁加密笔记本：
+  加锁挂在 `lock-screen` 上是 `encryptedNotebookFollowSystemLock`（跟随**锁屏**）的定义范围，
+  「睡眠但不锁屏」不锁属设计；且内核侧 `AutoLockMinutes` 用墙钟，睡够即锁，属另一条正确路径。
+- Go 定时器在挂起期间不前进（`cron.every`、`syncPlanTime`）：Go 既定语义 + 宿主的 `resume` 显式触发同步
+  + 周期兜底 ≤ 8 分钟 ⇒ 已写入误报表。
+- `notebookSystemLock.js` 的 `pending` 在失败后保留并在每次 unlock/resume 重试：注释明写该意图，
+  且 `retry()` 会清理已不存在的本地工作空间 ⇒ 设计如此。
+- `app/src/config/tabs/cloudUser.ts:50` 的 `now() - state.attemptedAt < 60000` 类墙钟节流：唤醒后必然
+  过期 ⇒ 只影响一次刷新频率，无可观测后果。
+
 ## 如何更新本文
 
 每轮审计后追加：
