@@ -4136,6 +4136,116 @@ lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核�
 - `app/src/config/tabs/cloudUser.ts:50` 的 `now() - state.attemptedAt < 60000` 类墙钟节流：唤醒后必然
   过期 ⇒ 只影响一次刷新频率，无可观测后果。
 
+## 第六十轮（2026-10-10）：本地数据安全定向审计（续）——同一功能的「失败处理」不对称（#20409–#20411）+ 一次同族改进漏改两处
+
+**范围**：延续第五十七 / 五十八轮的口径（用户原文：「审计本地数据安全问题（不考虑外部攻击、XSS 之类的问题，
+只考虑本地功能本身对数据的影响）」）。基线 `dev` @ **`7f911d3212`**（工作树干净，`HEAD == origin/dev`，0/0）——
+**与第五十九轮是同一基线**。机械扫描：`scan_duplicated_literals.py --min-files 4 --root kernel --root app/src`
+（1950 文件 / **324 条**，与第五十七、第五十九轮同值）逐条回读全为已知噪声（`assets/`、
+`/stage/loading-pure.svg`、`/api/block/getDocInfo`、`conf.json`、`input`/`span`…）；判据 F 按用户口径未纳入。
+**脚本新增产出 0**，三条发现全部来自定向语义核查 + 两路只读子代理侦察。
+
+**已提 issue**（标题英文、正文中文，均逐字段 base64 回读一致）：
+#20409（无法读取的 `.sy` 被当作损坏移出笔记本）、#20410（导出 `.sy.zip` 复用残留暂存目录）、
+#20411（导入 `.sy.zip` 时数据库定义拷贝失败被吞掉）。
+
+### A. 本轮发现
+
+- **判据 D3 第四形态 / 模式 P63（中高）— #20409**：`kernel/model/file.go:165-181` 的 `Box.docIAL`
+  在 `filesys.DocIAL` 返回空 map 时只豁免两种原因——`os.ErrNotExist`（`:167-170`，注释「不将不存在的文件
+  视为损坏」）与加密笔记本解密失败（`:171-177`，注释「否则文件会被 `moveCorruptedData` 移走导致数据丢失」）
+  ——其余一律 `moveCorruptedData`（`:180`）；而 `kernel/filesys/tree.go:442-448` 在 `os.Open` 失败时
+  只记日志后 `return nil`，**打开失败与解析失败在返回值上不可区分**。
+  可达入口：`ListDocTree`（`:538` 目录分支 / `:576` 文件分支）、`pinned_docs.go:128/195`、
+  `ResolveDocTreeSortMode`（`:451-457`，其存在性预检只挡 `os.ErrNotExist`）。
+  后果：文档**存在但打不开**（共享冲突、同步客户端/杀软占用、EMFILE、权限变化）时，该文档连其子树
+  从文档树与搜索消失，`.sy` 被移到 `<工作空间>/corrupted/<ts>/<boxID>/`，**无任何提示**；
+  且 `moveCorruptedData` 先 `Copy` 再 `Remove`，读失败那一刻之后文件恢复可读即移动成功。
+  **权威侧（同一原则在本仓已出现三处，只有「第三种读失败原因」无人认领）**：同函数的两处豁免注释、
+  `kernel/model/index_fix.go:206-209`（未解锁加密笔记本跳过，注释「避免密文被当损坏移走」）、
+  `readDocIAL` / `LoadTreeByData` 的 fail-closed、`file.go:451-453` 注释「仅探测确实存在的文档，
+  避免将同步中的临时缺失误判为损坏数据」。
+  **测试盲区**：`file_corrupted_test.go` 只覆盖「文件不存在」（`TestDocIALMissingFileIsNotCorruption`）
+  与「能打开但 JSON 截断」（`TestDocIALCorruptedFileRemainsRecoverable`），**没有「存在但打不开」**。
+- **模式 P64 / 判据 D1s（中）— #20410**：`exportSYZip`（`export.go:2631-3010`）的暂存目录名确定性
+  （`normalExportTempName(baseFolderName)`，`baseFolderName` 为笔记本名或文档标题）、写入前**不** `RemoveAll`、
+  只在**成功路径**末尾 `:3006` 清理；中途失败分支（`:2839` 资源复制、`:2907` `exportAv`、
+  `:2931` `readSortConfMap`、`:2984`/`:2998`/`:3004` zip）只 `return` ⇒ 残留的
+  `.sy`/`assets`/`storage/av`/`.siyuan/sort.json` 被**下一次导出**打进包，导入后已删除的文档复活，
+  同名笔记本与同名文档还会共用同一物理目录。
+  同族对照（同一约定里唯一例外）：Markdown 导出 `:4547` 先 `RemoveAll` 再 `MkdirAll`；
+  `ExportResources`（`:884-890`）随机目录 + `defer`；`ExportData`（`:774-780`）名字带秒级时间。
+  缓解：`working.go:368` 启动时清 `TempDir/export` ⇒ 不跨重启。
+- **P59 第二形态 / D1i 第三形态（中低）— #20411**：`importSY0`（`import.go:796-806`）普通笔记本分支
+  `filelock.Copy(storageAvDir, targetStorageAvDir)` 失败只记日志、**导入仍报成功**；同一 `if` 的 `else`
+  （加密笔记本）分支失败即 `return`。下游 `mirror`/`relation` 路由依赖这批文件（紧随的注释自陈）。
+  后果：导入成功但文档里的数据库是空表 / 「未命名数据库」。
+- **P49 第一形态的新实例（低，未提 issue）**：`b84fd26e92`（PR #20355，**当日提交**「Ignore macOS metadata
+  when detecting empty directories」）引入 `util.IsEmptyDir`/`RemoveEmptyDir` 并改了 5 个文件
+  （`box.go` 两处、`clipboard.go`、`heading.go`、`plugin_storage.go`、`repository.go`、`bazaar/installed.go`），
+  **漏了 `kernel/model/file.go:2197-2203`（`removeDoc` 删完最后一篇子文档后清父目录）与
+  `kernel/model/transaction.go:3138-3143`（`cleanupRestoredCreatedDocs`）**——两处仍是
+  `os.ReadDir` + `1 > len(others)`（macOS 下只剩 `.DS_Store` 的父目录因此不被清理）。
+  判定依据：`git show b84fd26e92 --name-only` 不含这两个文件 + 全仓 grep 新旧两个 helper。
+
+### B. 编号避让与流程
+
+- 第五十九轮（同日、休眠/唤醒主题）已占用 P61 / P62，本轮新增模式从 **P63** 起；
+  第五十九轮选择「未提 issue」，而本轮沿用了第五十七/五十八轮（同一用户请求）的上报做法。
+- 建 issue 前用 `gh api -X GET search/issues`（覆盖 open + closed）跑了 4 组关键词
+  （`corrupted document moved` / `moveCorruptedData` / `docIAL` / `sy.zip export temp` /
+  `import database empty sy.zip` / `database history rollback storage/av`），
+  命中项逐个读标题与正文：#17489（运行时异常状态）、#19336（陈旧路径重建父文档）、
+  #20175（批量 issue，其第 2/3 条讲「清理未引用数据库 / 删除笔记本后从历史回滚」，机制不同）、
+  #18824（CLI `--output`）——均不覆盖本轮三条。
+
+### C. 已排除（勿重报，除非有新证据）
+
+- 「删除文档会删掉被其它文档引用的资源」：不成立（`removeDoc` 不删资源，只提升副本
+  `copyDocAssetsToDataAssets` → `copyAssetsToDataAssets`，且在 `box.Remove` 之前；跨目录引用由
+  `getAssetAbsPath` 后缀回退解析）。`isSkipFile` 只影响「哪些目录被登记为 assets 根」，
+  被登记根的整棵子树仍整体 `Copy` ⇒ 只在 `data/<box>/{dist,node_modules,target,.x}/assets/**`
+  形状下才漏提升，未取证。
+- 「`RemoveBox` 先 `unindex` 再删目录 ⇒ 数据丢失」：不成立（`unindex` 只清块树与索引队列，
+  不从 `Conf` 摘除笔记本；`unmount0` 只置 `Closed=true`；重开或重启即全量重建）⇒ 已写入误报表。
+- 「跨笔记本移动时目标已存在同 ID 文档会被无备份覆盖」：**机制成立**（`file.go:1925-1928`
+  无备份 `filelock.Remove(absToPath)` 递归删目标子文档目录；`:1951-1953` 的 `filelock.Rename`
+  在 Windows 上 `MOVEFILE_REPLACE_EXISTING` 静默覆盖 `.sy`），但**可达性未取证**
+  （需要两个笔记本存在同一文档 ID）⇒ 附录观察项。
+- 「`generateAvHistoryInTree`（`history.go:1210-1224`）吞掉 AV 快照拷贝错误 ⇒ 回滚报成功但数据库未回滚」：
+  代码事实成立（对照 `backupBoundAttributeViewHistory` 返回 error），但「历史缺 AV 快照」在本仓是
+  **被显式容忍的合法状态**（`attribute_view_block_history.go:221-227` 注释），且 #20175 第 2/3 条
+  已覆盖「历史缺 `storage/av` ⇒ 数据库回不来」这一**现象**，故本轮不另立条目。
+- 「`clearOutdatedHistoryDir` 用 `time.Parse`（UTC）解析按本地时间命名的目录」：只会让删除**更早**发生
+  （≤ 时区偏移，相对默认 30 天保留期可忽略），主判据是 `dirInfo.ModTime()`；不报。
+- 「`repo checkout` 会删本地新文件」：属 checkout 的预期语义（先 `repo.Index("Backup before checkout")`，
+  dejavu 只删「本地遍历到且不在目标索引」的文件，忽略规则命中的不入 `removes`），并有部分失败的回归测试。
+- 「`RemoveTagSnapshot` / `RemoveCloudRepoTag` 只删 ref 不删数据」：前端文案即契约
+  （`repoRemoveTagsTip`），dejavu `Purge` 把 `refs/` 引用的索引计入保留集。
+- 「`clearStagedSYImports` 跳过被重命名为 `<token>-importing.zip` 的暂存包」：危害被
+  `clearWorkspaceTemp`（`conf.go:1576`）兜住，残留窗口仅限本次运行，属清理不彻底而非数据安全。
+- 「`ImportData` / `importZipMd` 的解压目录 = zip 路径去扩展名」：zip 固定在 `<TempDir>/import/<秒级时间戳>.zip`，
+  解压目录落在 temp 内；`importSY0` 另行加随机后缀，说明作者已知碰撞风险。
+
+### D. 方法论增量
+
+1. **「失败处理」是与「目标已存在」并列的一类相邻子路径差异**（P59 第二形态）。
+   第五十八轮问的是「同名冲突时做什么」，本轮问的是「同一类失败时是否返回」——
+   两者都是**把并列分支的答案排成一列**即可发现，而且都有「同族已有返回 error 的实现」作为权威侧。
+2. **子代理侦察前必须给「已知并已上报」清单 + 强制反证要求**：本轮两路子代理共 8 条候选 / 17 条排除，
+   采纳 3 条进主报告、1 条降为观察项、4 条被排除。「失败处理不对称」与「同族守卫只覆盖部分失败原因」
+   是它们的最高产出，与第五十八轮的结论一致。
+3. **同一个「读失败」信号被折叠成多种语义时，逐个原因问「作者为它准备了豁免吗」**：
+   本轮 `DocIAL` 返回空 map 同时表示「不存在」「打不开」「解析失败」，作者只给前两种加了豁免
+   （且第二处的注释就写着「移走导致数据丢失」），第三种直接命中破坏性分支。
+   检查法：找到折叠点 → 列出该信号的全部产生原因 → 列出全部豁免 → 取差集。
+4. **同一次「小改进」要核 `--name-only`**：`b84fd26e92` 改了 5 个文件、漏了 2 处，
+   而这两处（删文档、模板回滚清理）都是当前最活跃的路径。只读函数名与注释看不出漏改，
+   但 `git show <sha> --name-only` 与全仓 grep 新旧 helper 两步即可定位。
+5. **同一基线可以连续两轮**（本轮与第五十九轮共用 `7f911d3212`）：基线相同不代表发现重复，
+   但**必须重读当轮的「已排除清单」**——本轮的 4 条候选中有 2 条正是被前几轮的排除清单拦下的
+   （第五十七轮的 fail-open 同族、第五十八轮的相邻子路径），另 2 条来自全新的子代理方向。
+
 ## 如何更新本文
 
 每轮审计后追加：
