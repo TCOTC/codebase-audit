@@ -1562,6 +1562,27 @@ exec su-exec "${UID}:${GID}" /opt/app/kernel --workspace="${WS}" ${ARGS}   # ARG
 **修法方向**：把语义收敛到单一 helper（本例是让所有分支复用同一个「按需折叠 + 字面量替换」helper），
 而不是在 24 处各补一遍。
 
+**第二形态：被漏掉的是「对外表面」而不是「函数副本」（第五十四轮）**。同族的边界不必是同一文件里的若干函数，
+也可以是**同一能力的多个对外入口**——REST 接口、MCP 工具、CLI 子命令、SDK。此时改进者只修自己碰到的那一个，
+其余入口停在旧语义，而**编译器与测试都不会比较两个入口的对外行为**。
+
+- **实例**：「SQL 查询在未显式写 LIMIT 时按默认值截断，且截断对调用者不可见」这条语义有三个对外表面。
+  `1e9580315e`（#19108，2026-09-03）修了 MCP（`kernel/mcp/tools/sql.go` 加 `possiblyTruncated` 与逐结果提示），
+  `f97b7be20b`（#19337，2026-09-12）修了 REST `/api/query/sql`（响应加 `queryLimit.{limit,truncated}`）。
+  **CLI `siyuan sql` 是第三处**：`kernel/cli/cmd/sql.go:48` 仍是 `sql.Query(stmt, limit)`，
+  `printSQLResult`（`:90` 打印 `%d row(s)`）与 `-f json` 分支都不显示截断。CLI 于 `ade459cf08`（2026-05-14）加入，
+  早于两个 issue ⇒ 既存缺陷。
+- **决定性证据是 issue 正文自己列的清单**：#19108 与 #19337 的「相关源码」都只写 MCP 与 REST，
+  而 #19337 的诉求原文正是「调用方（脚本、SDK、AI Agent）会把 64 行当成全部结果…静默漏数据」——
+  CLI 的调用方形态与之完全一致，却被两轮漏掉。**这说明「同族清单」要自己从能力反推**，
+  不能沿用别人给出的「相关源码」。
+- **附带形态：同一参数在多个表面上语义不同步**。#19108 把 MCP 描述成「default to at most N rows」（承认显式 LIMIT 优先），
+  而 CLI 的帮助与四语用户指南写「Maximum rows to return」（隐含硬上限）——而实现里语句自带 LIMIT 时
+  `--limit` 完全不参与（`kernel/sql/block_query.go:419`／`:446-455` 只在无 LIMIT 时注入；`:548` 保留自带 LIMIT；
+  `:499` 的截断要求 `info != nil`，CLI 走 `info == nil`）。**同一参数在多个表面的措辞不一致，本身就是清单未收口的信号**。
+- **检查法**：③ 之前先做一步——**从能力名反推全部对外表面**（本仓库 SQL 查询 = REST `/api/query/sql` +
+  MCP `sql` 工具 + CLI `siyuan sql`），再逐个问「它是否实现了这条语义」。
+
 ### P50 自我参照判定器（期望值由被测实现自己产生）
 
 **判据**：J1（判定器在实现内部）＋ G1（两实现之间无一致性断言）＋ A（单一真源指向了被审计对象本身）。

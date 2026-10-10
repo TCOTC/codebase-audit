@@ -3805,6 +3805,58 @@ riff 的 `gulu.Str.Contains` 导致 O(C×N)（**未证实**，我用自定义牌
 - **`/api/query/sql` 默认只返回 64 行**：忘了写 `limit` 会把「只有 64 条」误当成全部语料
   （本轮因此让一组对照实验的分母变成 64，白跑一轮）。
 
+## 第五十四轮（2026-10-10）：单文件随机审计（`kernel/cli/cmd/sql.go`）+ 静态限额语义
+
+**范围**：用户要求「随机挑一个内核代码文件，仅针对这个文件进行审计」。868 个非测试 Go 文件随机命中
+`kernel/cli/cmd/sql.go`（97 行）。机械筛选 `scan_duplicated_literals.py --root kernel/cli/cmd --min-files 2`
+（25 文件 / 2 条 P3 命中）在该文件**零命中**。基线 `dev` @ `51699fa537`（工作树原先落后 `origin/dev` 7 个提交，
+已 `--ff-only` 同步；同步进来的 7 个提交与该文件无关）。
+
+### A. 本轮发现（1 条，已提 issue #20376）
+
+- **判据 D1q / P49 第二形态**：`siyuan sql` 静默截断。`kernel/cli/cmd/sql.go:48` 调 `sql.Query(stmt, limit)`
+  （默认 100），`printSQLResult`（`:64-91`，`:90` 打印 `%d row(s)`）与 `-f json`（`:55`）都不显示截断标记。
+  **权威侧两次承认过同一约定，而 CLI 两次都未被列入**：#19108（`1e9580315e`，2026-09-03）修 MCP、
+  #19337（`f97b7be20b`，2026-09-12）修 REST `/api/query/sql`（响应加 `queryLimit.{limit,truncated}`）；
+  两个 issue 的「相关源码」都只列 MCP 与 REST。CLI 由 `ade459cf08`（2026-05-14）加入 → **既存缺陷**。
+  CLI 的默认值已在 `--limit` 帮助与四语用户指南（`Maximum rows to return, default 100`）写明，
+  故严重度低于两个先例（那两处当时连默认值都没写）——报告里已如实标注。
+- **附带两条 `--limit` 语义问题**（并入同一 issue）：① 语句自带 LIMIT 时 `--limit` 完全不参与
+  （`kernel/sql/block_query.go:419`／`:446-455` 只在无 LIMIT 时注入；`:548 getLimitClause` 保留自带 LIMIT；
+  `:499` 的截断要求 `info != nil`，而 CLI 走 `info == nil`）→ `LIMIT 5000 --limit 10` 返回 5000 行；
+  ② raw 回退路径 off-by-one：`:592` 的 `noLimit := !containsLimitClause(stmt)` 与
+  `:619` 的 `if noLimit && (limit < count || (info != nil && limit == count))` 使 `info == nil` 时在
+  `count == limit+1` 才断 → 返回 **limit+1** 行（`info != nil` 的 REST 分支正好 limit 行）。
+  触发面已由 **#18413**（`ae6099427e`，`LIKE … ESCAPE '\'` 触发 rqlite 的 `BinaryExpr.String()` panic
+  → `:455` 回退到 raw 路径）证实为真实插件场景。**副作用**：MCP 的
+  `possiblyTruncated = len(rows) == sqlQueryDefaultLimit` 在 101 行时为 false → **#19108 刚加的截断提示
+  在这条路径上失效**（同一函数另一分支用 `>`，两分支判据本来就不一致）。
+
+### B. 方法论增量
+
+1. **D1q 的清单口径必须自己建**：同族的边界是「同一能力的**全部对外表面**」，不是 issue 里列举的那几处。
+   两个先例 issue 都没列 CLI，而 #19337 自陈的危害（脚本 / SDK / AI Agent 把截断结果当全集）与 CLI 完全同形。
+   **「同族的枚举清单」要从能力反推**（SQL 查询有 REST / MCP / CLI 三个对外入口）。
+2. **截断 / 上限判据用 `>= limit` 而非 `== limit`**：`len(rows) == limit` 会被 off-by-one 静默击败
+   （本条同时是 #19108 的潜在缺口）。D4 的「有界集合裁剪端与消费端同端」在限额场景的形态即「切在哪一行」。
+3. **只读审计下的诚实定性**：本文件无法实测（`AGENTS.md` 禁止编译内核二进制，CLI 还需可执行文件 + 工作空间），
+   三条结论均为「代码可证、未实测」（置信度中），报告里显式写了取证基线与升到「已实测」的最小代价。
+
+### C. 已排除（勿重报）
+
+- `kernel/cli/cmd/sql.go:55` 的 `json.MarshalIndent` 错误被丢弃：同族 `cli/cmd` 45 处同类调用里 43 处同写法
+  （仅 `block.go:324`、`database.go:385` 检查），属家族惯例；其可达性未取证 → 观察项。
+- `kernel/cli/cmd/sql.go:34` 的 `cobra.MinimumNArgs(1)` 使多余参数被静默忽略：同族 `fileFindCmd`
+  （`kernel/cli/cmd/file.go:341`）同形 → 观察项。
+- 本文件全域无测试（`kernel/cli/cmd/display_test.go` 覆盖的是 `resolvePath`/`truncate` 等别的显示函数）。
+  按判据 J「测试少不构成缺陷」，只记为「使本轮结论无法获得测试侧交叉验证」。
+- `"json"`/`"table"` 字面量在 `cli/cmd` 重复约 45 处且无常量：`switch` 有 `default: table` 兜底、
+  当前零漂移 → 「可以更好」，挑战门拦下（不做轨迹 B 立论）。
+- `printSQLResult` 只按 `rows[0]` 推导列名：`sql.Query` 的每条记录都用同一份 `rows.Columns()` 构造，
+  行间键集合恒等 → 不成立。
+- `file grep` 的 `--limit` 也不报截断：其默认是「0 或负数表示不限」（用户不主动设置就不会截断），
+  与 `sql` 的「静默施加默认上限」不是同一形态 → 不并入。
+
 ## 如何更新本文
 
 每轮审计后追加：
