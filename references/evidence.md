@@ -3857,6 +3857,57 @@ riff 的 `gulu.Str.Contains` 导致 O(C×N)（**未证实**，我用自定义牌
 - `file grep` 的 `--limit` 也不报截断：其默认是「0 或负数表示不限」（用户不主动设置就不会截断），
   与 `sql` 的「静默施加默认上限」不是同一形态 → 不并入。
 
+## 第五十五轮（2026-10-10）：单文件随机审计（`kernel/util/font_platform_linux.go`）+ 固定超时的收口
+
+**范围**：用户要求「随机挑一个内核代码文件，仅针对这个文件进行审计」。883 个非测试 Go 文件
+（`heif/internal/**` 已按范围边界排除）随机命中 `kernel/util/font_platform_linux.go`（46 行，
+`//go:build linux && !android`）。机械筛选 `scan_duplicated_literals.py --root kernel/util --min-files 2`
+（95 文件 / 46 条）在该文件与其 `fc-list`/`fontconfig` 相关符号上**零命中**（扫描根存在，已自证非「没扫到」）；
+纯 Go 无 HTML 插值，判据 F 不适用。基线 `dev` @ `51699fa537`，`git rev-list --count HEAD..origin/dev` = 0；
+该文件唯一提交 `b401f300f9`（2026-08-18，对应 #18808），与产物时间戳均已核对。
+
+### A. 本轮发现（1 条，已提 issue #20378）
+
+- **判据 E5 / 模式 P55 第二形态**：`loadPlatformFonts` 的 10 秒超时不能约束返回。
+  `kernel/util/font_platform_linux.go:34-43` 只设了 `context.WithTimeout(context.Background(), 10*time.Second)`，
+  **没有 `cmd.WaitDelay`**；`:37` 的 `Output()` 要等 stdout 管道读到 EOF，而 `ctx` 到期只终止直接子进程。
+  被终止的进程若留下继承 stdout 的后代（`PATH` 上的 `fc-list` 包装器），管道不关闭 ⇒ 函数不返回。
+  **放大点**：`kernel/util/font.go:43-51` 的 `LoadSysFonts` 全程持有 `sysFontsLock`，
+  所以这不是「一次调用慢」而是「同进程内后续所有字体枚举一起卡死」。入口 `kernel/api/system.go:968-971`
+  的 `getSysFonts`（业务表现：设置 - 外观 的字体列表一直加载不出来）。
+  **机制级复现**（把 `:34-37` 的调用形态原样复制到独立程序、超时缩为 3 s、`PATH` 上放一个
+  「派生继承 stdout 的后代并长睡」的假 `fc-list`）：不设 `WaitDelay` → 3 s 超时后 **20 s 仍未返回**；
+  设 `WaitDelay = 2s` → **5.0 s 返回**并打印 `load Fontconfig fonts timed out`。
+  **附一条诊断障碍**：`:38-43` 把超时判断放在 `nil != err` 之后，卡住期间日志里没有任何提示。
+  权威依据：Go 标准库 `src/os/exec/exec.go:288-292` 对 `WaitDelay` 的定义原文
+  （*"a child process that exits but leaves its I/O pipes unclosed"*）；**全仓 `grep WaitDelay` 为 0 处**。
+  **挑战门**：反方论据「stock `fc-list` 不 fork」经核实为真 → 明确收窄触发条件（只在 PATH 上是包装器时触发），
+  不写成高危；但该论据只覆盖「普通操作」，不覆盖「PATH 上是包装器」这一合法输入，不足以免报。
+
+### B. 方法论增量
+
+1. **E5 新增第 ③ 项**：「固定超时不能约束返回」。它与「固定睡眠」（P55 第一形态）、
+   「声称的优化与实现不符」（P56）同属「等待 / 优化的依据不是真实信号」，区别是**等待发生在标准库内部**，
+   代码里看不到 `Sleep`，只能靠 `WaitDelay` 是否存在来判定。判严重度时要看**调用点是否持全局锁 / 单例缓存**
+   ——同仓库 `ocr.go`、`lute_clipboard_math.go` 同样无 `WaitDelay` 却不持锁，后果量级不同。
+2. **「同族少一行」必须回读被调函数在各平台的实现**：本文件缺 `gulu.CmdAttr(cmd)` 而两个同族 shell-out 都有，
+   形状上是典型 D1；读完依赖才发现 `CmdAttr` 在 `!windows` 上是空函数 ⇒ 完全等价。
+   这与「同族差异先判权威侧」是同一类前置动作。
+
+### C. 已排除（勿重报）
+
+- `gulu.CmdAttr` 缺失（见上，已写入误报表）。
+- `Font.Family` 取非本地化名、`DisplayName` 取本地化名：与 `font_platform_windows.go`、`font_platform_darwin.go`
+  逐一比对后三端语义一致 → 不是漂移。
+- 日志丢失 `fc-list` 的 stderr（`*exec.ExitError` 的 `Error()` 只说 `exit status 1`）：同族 `ocr.go`、
+  `pandoc.go` 同写法，项目内无约定可作权威依据 → 「可以更好」，不报。
+- build tag 完备性（`linux && !android` / `(!darwin && !windows && !linux) || ios || android` /
+  `darwin && !ios` / `windows && !ios`）逐 GOOS 枚举无重叠无缺口 → 无问题。
+- 主题外两条：`kernel/api/system.go:969` 的 `getSysFonts` 首句 `ret` 赋值被 `:971` 无条件覆盖
+  （`kernel/api/*.go` 同类写法共 3 处，影响面未查清）；`util.Lang` 的生产写点含运行期路径
+  `kernel/api/setting.go:716`，而 `font_platform_linux.go:46`、`font.go:46/52`、`fontconfig.go:132`
+  以普通全局字符串无同步读它（未跑 `-race`，且属全仓共享模式），**只登记为附录观察项**。
+
 ## 如何更新本文
 
 每轮审计后追加：

@@ -1764,6 +1764,31 @@ test state, not interactions）；手写模块表改成真实加载（本仓库�
 **修法陷阱**：把 50 ms 调小只是把正确性风险推迟；必须换成真实完成信号（登记完成句柄或条件变量），
 并保留「队列排空」等待。
 
+**第二形态：固定超时没有收口（`Context` 到期 ≠ `Wait` 返回）**（判据 E5；本仓库实例 #20378）
+
+**形态**：给 `exec.CommandContext` 设了超时就认为「最多等这么久」。但 `ctx` 到期时 `exec` 只对
+**直接子进程**调用 `Cancel`（默认 `Kill`），而 `Output()`/`CombinedOutput()` 还要等 stdout/stderr
+管道读到 EOF。若被终止的进程留下了**继承该管道的后代**，管道不关闭，`Wait` 就一直阻塞——
+超时形同不存在。它与第一形态的共性是「等待条件不是真实完成信号」，区别是这里的等待发生在
+标准库内部，代码里连 `Sleep` 都看不到，**只能靠 `WaitDelay` 是否存在来判定**。
+
+**本仓库实例（第五十五轮）**：`kernel/util/font_platform_linux.go:34-43`（10 秒超时、无 `WaitDelay`，
+且超时判断位于 `nil != err` 之后，卡住期间没有任何日志）。放大点在 `kernel/util/font.go:43-51`：
+`LoadSysFonts` 全程持有 `sysFontsLock` ⇒ 阻塞期间同进程内后续所有字体枚举一起卡住。
+触发面是 `PATH` 上名为 `fc-list` 的包装器（发行版 / 容器 / Nix / Flatpak）在退出前派生持有 stdout 的后代；
+stock `fc-list` 不 fork，所以**普通操作看不到**。机制级复现：把 `:34-37` 的调用形态原样复制到独立程序、
+超时缩为 3 s、`PATH` 上放一个派生继承 stdout 的后代并长睡的假 `fc-list` ⇒ 不设 `WaitDelay`
+**20 s 仍未返回**，设 `WaitDelay = 2s` 则 5.0 s 返回并打印超时。**全仓 `grep WaitDelay` 为 0 处**。
+
+**检查法**：grep `CommandContext`，逐个问 `cmd.WaitDelay` 在哪、`Cancel` 是否覆盖整棵进程树；
+再看调用点是否持有**全局锁 / 单例缓存**（那决定它是「一次慢」还是「全局卡死」）。
+对照面：同仓库 `kernel/util/ocr.go:286`、`kernel/api/lute_clipboard_math.go:330` 同样有超时而无
+`WaitDelay`，但**不持全局锁**，后果量级不同——判严重度时必须看这一点。
+
+**修法**：`cmd.WaitDelay = <与超时同量级的短值>`（标准库 `src/os/exec/exec.go` 的 *"a child process that
+exits but leaves its I/O pipes unclosed"* 正为此而设）。**不要**改成「先 `ctx.Err()` 预检再读」——
+那是 TOCTOU，挡不住已经在读的 `Wait`。
+
 ### P56 声称的写入优化与实际实现不符（全量 copy 冒充差异写）
 
 **判据**：E（隐式假设）＋ H（持久化语义）。
