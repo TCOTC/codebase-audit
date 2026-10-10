@@ -3908,6 +3908,76 @@ riff 的 `gulu.Str.Contains` 导致 O(C×N)（**未证实**，我用自定义牌
   `kernel/api/setting.go:716`，而 `font_platform_linux.go:46`、`font.go:46/52`、`fontconfig.go:132`
   以普通全局字符串无同步读它（未跑 `-race`，且属全仓共享模式），**只登记为附录观察项**。
 
+## 第五十七轮（2026-10-10）：本地数据安全定向审计（未引用清理的 fail-open 同族缺口，已提 #20382）
+
+**范围**：用户要求「审计本地数据安全问题（不考虑外部攻击、XSS，只看本地功能本身对数据的影响）」。
+基线 `dev` @ `0cfd114116`（起步落后 `origin/dev` 1 个提交，工作树干净，按 `AGENTS.md` 规则 fast-forward）。
+机械筛选：重复字面量 `--root kernel --root app/src --min-files 4` = **324 条**（P1 263 / P2 23 / P3 38，
+1940 文件），逐条回读全为历轮已知噪声（`assets/`、`/stage/loading-pure.svg`、`/api/...` 受类型约束路由、
+`image/png`、`/export/`、`conf.json`）；判据 F（未转义插值）按用户口径（排除 XSS）未纳入。
+机械**新增产出 0 条**，发现来自定向语义核查（与第十三、十五、十六、五十四、五十五轮一致）。
+
+### A. 本轮发现（1 条，已提 issue #20382）
+
+- **判据 D1q / P49 第三形态 / B**：`kernel/model/attribute_view.go:161` 的
+  `UnusedAttributeViews(sorted bool) (ret []*UnusedItem)` 在 `:178-181` 对 `loadTree` 失败**静默 `continue`**
+  （fail-open），于是「读不出来的文档」所引用的数据库被算作**未引用**，`RemoveUnusedAttributeViews()`
+  （`:106`）随即删除 `data/storage/av/<id>.json`。触发条件：文档 `Spec > CurrentSpec(5)`
+  （`ErrSpecTooNew`，即用较旧内核打开被较新版本写过的工作空间）、`ValidateTableCellRich` 失败、
+  Spec 非法或 JSON 损坏（`kernel/model/tree.go:150-186` → `kernel/treenode/tree.go:159-188`）。
+- **权威侧（同族已修）**：资源侧 `UnusedAssets`/`RemoveUnusedAssets` 已由 `159d50f336`（#19638/#19639）
+  改成「读不出来即中止整次清理」，并带回归测试 `TestUnusedAssetsAbortUnreadableDocument`
+  （`kernel/model/assets_cleanup_test.go:213`，覆盖 `Spec:"99"` / 非法 Spec / 损坏 JSON 三种输入，
+  断言不删任何文件、不产生清理历史）。数据库侧没有这一改动，签名里也**没有 error**
+  （`UnusedAttributeViews` / `RemoveUnusedAttributeViews` 均无 error 返回），无法表达「扫描不完整」。
+- **一致性缺口已在代码里被承认一半**：`:283` 的注释写明「未引用清理功能在加密笔记本锁定时无法确认引用关系
+  （loadTree 失败）……有误删风险」，但只在**枚举侧**排除加密 AV，**扫描侧**仍旧 `continue`。
+- **恢复路径**：删除前整份拷到 `<工作空间>/history/<时间戳>-clean/storage/av/<id>.json`，
+  可用 `RollbackAttributeViewHistory` 恢复，受「历史保留天数」（默认 30 天）限制 → 严重度中低，非永久丢失。
+- **修法陷阱（两坑，已写进 issue）**：① 不能只把 `continue` 改成返回错误——扫描循环遍历 `Conf.GetBoxes()`
+  **包含锁定的加密笔记本**，其文档必然 `loadTree` 失败；须先照资源侧 `IsEncryptedBox(...) → continue`
+  跳过加密笔记本，再对普通笔记本的读取失败中止。② 两个函数都没有 error 返回，
+  列表端点 `/api/av/getUnusedAttributeViews`、CLI `database unused|clean`、MCP `unused|clean`
+  四个消费点要一起改。
+- **测试盲区（判据 J 侧写）**：`kernel/model/attribute_view_unused_test.go` 覆盖「被文档引用 / 被模板引用 /
+  加密笔记本级 / 已删除」四种情形，**没有「文档读不出来」这一类**，而资源侧正是为此写了专门用例。
+
+### B. 方法论增量
+
+1. **P49 的「同族边界」也可以是同一子系统里的相邻数据类别**。P49 已有两形态（文件内的函数副本、
+   同一能力的多个对外表面）；本轮是第三形态：「未引用资源」与「未引用数据库」是同一次清理功能的两个相邻分页
+   （`app/src/config/assets.ts` 的两个 tab），共享同一 UI 流程与同一语义，改进只落在资源那一侧。
+   **检查法**：找同一界面上并列的清理/迁移动作，逐个问「它是否用了同一套失败处理」，再 `git log -S`
+   看那次改进到底改了谁。
+2. **「可靠的权威集合」这类形容词本身是候选**。#19457 的正文把 `UnusedAttributeViews` 称为
+   「口径匹配的可靠权威集合」——那是**未验证的乐观前提**，而它的失效条件（任何文档读不出来）在资源侧
+   已被实测并修复。**读上一轮 issue 的形容词时，把它当待验断言、不要当既有事实。**
+3. **已提交的日志文件不能当「真实发生」的证据**：本仓库 `kernel/api/logging.log` 里有
+   `tree spec [99] is newer than current spec [5]`，但它来自测试写入（`assets_cleanup_test.go` 用 `Spec:"99"`
+   构造夹具），不是用户端发生。取「某情形是否真实发生」的证据时，先确认该日志是否可能是**测试产物**
+   （本仓 `*_test.go` 与 `logging.log` 同处源码树内）。可达性改由代码事实论证
+   （`CheckSpec` 对 `spec > 5` 返回 `ErrSpecTooNew`）。
+
+### C. 已排除（勿重报，除非有新证据）
+
+- 子代理候选：AV 非事务 setter（`SetAttributeViewGroup` / `syncAttrViewTableColWidth` / 分组折叠等）的
+  「整份读—改—写」丢失更新 —— 未构造出可达的并发路径，观察项。
+- 子代理候选：明文 AV 走 `util.WriteFileByMmap` 原址截断写 —— 与 #20367（`.sy` 整份覆写）、
+  #20372（AV 原址覆写）同族，家族已被既有 issue 覆盖，不重复立论。
+- 同一 fail-open 的另两处**非破坏性**消费点（附录观察项）：`kernel/model/assets.go:2345`
+  （`MissingAssets` 漏报缺失资源）、`kernel/model/search.go:74`（`ListInvalidBlockRefs` 把「读不出来文档」
+  里的块判为不存在 → 误报失效引用，可能诱导用户删掉有效引用）。
+- 子代理候选：忽略集合差异导致其它设备 checkout 删文件（dejavu `sync.go` 只按「云端本轮更新过的
+  `.siyuan/syncignore`」过滤删除）—— 未取证，观察项；需与 `#5497` 家族、#19397 划清边界。
+- `kernel/av/av_fix.go:372-373`：`upgradeSpec1` 的值级修复块被写在 `for _, v := range kv.Values` **内部**，
+  守卫却是 `"" == kv.Key.ID` —— 首次迭代即把 `kv.Key.ID` 置为非空，后续值全部跳过，于是
+  `Relation/Rollup.Contents` 清空、日期/数字 `IsNotEmpty`、表格列 ID 补全只对**每个字段的第一个值**生效。
+  仅 `av.Spec < 1`（远古数据）可达 → 附录观察项。
+- 判为非缺陷：`assets_watcher.go` 的 `HandleAssetsChangeEvent/RemoveEvent` 只更新索引与缩略图，不改文档；
+  `box.go:189` 删除损坏 box conf 前有加密备份判定；`notebook_archive*` 的状态机（`operation.json` +
+  `rollbackNotebookArchive` + 启动 `recoverNotebookArchiveOperations`）与 `settings_reset.go` 的
+  日志/回滚均在中断后可恢复。
+
 ## 如何更新本文
 
 每轮审计后追加：
