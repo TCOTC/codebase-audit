@@ -3978,6 +3978,84 @@ riff 的 `gulu.Str.Contains` 导致 O(C×N)（**未证实**，我用自定义牌
   `rollbackNotebookArchive` + 启动 `recoverNotebookArchiveOperations`）与 `settings_reset.go` 的
   日志/回滚均在中断后可恢复。
 
+## 第五十八轮（2026-10-10）：本地数据安全定向审计（续）——同一功能的相邻子路径方向相反（#20386、#20387）+ 给 #20382 补对照证据
+
+**范围**：延续第五十七轮的主题（用户要求「继续检查其他方面」，口径不变：只看本地功能自身对数据的影响）。
+基线从 `0cfd114116` 前进到 **`b93c6eca4e`**（期间维护者与开发者各推了若干提交，工作树干净，按 `AGENTS.md`
+`--ff-only` 同步）。**同步后先核对第五十七轮引用的文件是否被改动**：
+`kernel/model/attribute_view.go`、`assets.go`、`assets_cleanup_test.go`、`treenode/table_cell_rich.go`
+在两次基线间**无差异** ⇒ #20382 的行号在新基线上依然成立。这一条应固化为动作：
+**跨基线追加上报前，先用 `git diff --stat <旧>..<新> -- <引用文件>` 确认引用未失效。**
+
+**本轮机械扫描**：沿用第五十七轮的重复字面量结果（324 条，全为已知噪声），无增量。
+
+### A. 本轮发现（2 条，均已提 issue）
+
+- **P59（新）/ D1 / B（第五十七轮续，已提 #20386）**：导入 `.sy.zip` 会静默覆盖**同名的自定义表情文件**。
+  `kernel/model/import.go:1082` `filelock.Copy(emojis, dataEmojis)` → `gulu.File.Copy` → 目录分支
+  `copyDir` → `os.MkdirAll(dest)` + 逐文件 `os.Create(dest)`＝**合并 + 截断覆盖**，无内容比对、无改名。
+  导出侧按**原始名**把表情打进包（`kernel/model/export.go:2857-2862` + `assets.go:2546` 的 `/emojis/<名>`），
+  故同名碰撞由思源自己的导出包正常产生。**同一次导入里两个相邻子路径方向相反**：
+  资产走 `storeAssetForBox`（`kernel/model/upload.go:670-693`，注释「导入带有既有 NodeID 的文件时不能覆盖
+  全局同名资源，冲突后强制生成新的资源 ID」），同函数 20 行之前对非法表情名调用 `util.RenameEmojiFile`
+  （`kernel/util/file.go:275-291`，注释「目标已存在时保留两者，不覆盖文件或合并目录」）。
+  后果：目标工作空间里**其它**引用该表情的文档呈现被改，原文件在工作空间消失（只能靠快照找回）。
+- **P60（新）/ D1 / C（已提 #20387）**：闪卡卡片管理列表的排序比较器**不是严格弱序**。
+  `kernel/model/flashcard.go:559-571`：`if due1.IsZero() || due2.IsZero() { 比 ID } ; 比 Due`。
+  独立 Go 探针（只依赖标准库，复刻比较器）实测：`a<b`、`b<c`、`c<a` **同时为真**；
+  三张卡片六种输入排列下 `sort.Slice` 产出 **3 种不同顺序**；随机输入 200 次，输出顺序变化 **131 次**。
+  输入顺序每次调用都不同（`deck.GetBlockIDs()` 是 map 遍历），消费端是**分页切片**（`:578-586`）
+  ⇒ 同一张卡可能出现在两页或不出现在任何一页。零值分支由 #14686 引入，说明「到期时间为零」确实会出现。
+
+### B. 给第五十七轮 #20382 追加的决定性对照证据（已作为评论发出）
+
+`RemoveBox`（删除笔记本）在「有文档读不出来」时是 **fail-closed** 的：`kernel/model/mount.go:381-386`
+在删目录**之前**逐篇 `loadTree` 备份数据库绑定历史，任何一篇读不出来就 `return loadErr`，
+**整次删除中止、笔记本原样保留**。而 `UnusedAttributeViews`（`attribute_view.go:178-181`）在同样输入下
+`continue` 后继续给出「未引用」结论并删除。
+⇒ 本 issue 的性质从「某处实现不够严」变成 **「同一意图的删除操作方向不一致」**，修法也随之明确
+（照 `RemoveBox` 的 fail-closed 语义对齐），不必发明新语义。
+
+### C. 方法论增量
+
+1. **从「同一功能的相邻子路径」找候选，比从「同族实现」更省力**：P59 的来源不是「两个函数长得像」，
+   而是「同一个导入功能里并列的几种对象，对『目标已存在』给了相反答案」。检查动作是把并列类别的答案
+   **排成一列**（资产/表情/模板/AV/插件存储/文档），出现相反答案即成候选。已固化为 P59 的检查法。
+2. **`Copy` 的语义必须先读依赖源码再立论**：`filelock.Copy` → `gulu.File.Copy` → `copyDir`
+   → `os.Create(dest)`（还会先把只读目标 `chmod` 成可写再覆盖）。**「目标存在时会不会失败」是这次判断的承重点**，
+   实测路径是 `filelock@3934251/filelock.go:85` → `gulu@v1.2.3/file.go:254/418`。
+3. **排序类缺陷可以机械化证明，不必论证**：把比较器**原样复刻**进独立小程序（只用标准库，
+   不跑被测工程），穷举输入排列统计输出顺序种类 + 随机输入多次跑统计变化次数。
+   文字论证「不满足传递性」说服力远低于打印出的三项布尔值与顺序集合。已写入 P60。
+4. **跨基线追加上报前先核对引用**（见上「范围」段）：维护者在同一时段也在提交，
+   第五十七轮的基线在几十分钟内就被推进了 5 个提交；`git diff --stat <旧>..<新> -- <引用文件>` 是零成本的自保动作。
+5. **子代理「未发现候选」也要看它的排除清单**：本轮并行子代理对导入/导出/模板/迁移方向给出
+   3 条候选（均为中/低）与 12 条明确排除；其中「`import.go:535` 的 defer 删目录会不会删掉既有笔记本」
+   被排除得有理有据（该 defer 只在 `createNotebook` 分支安装，而该分支的 boxID 必来自 `CreateBox`），
+   这类**排除理由本身可复用**，应随报告登记。
+
+### D. 已排除（勿重报，除非有新证据）
+
+- `import.go:535` 的 `filelock.Remove(DataDir/boxID)`（失败时清理）—— 只在 `createNotebook` 分支安装，
+  该分支 boxID 恒为 `CreateBox` 新生成；传既有 boxID 时 `createNotebook` 恒 false ⇒ 不会删既有笔记本。
+- 导入的块 ID 会**全部重映射**（`import.go:600-640`，保留时间部分 + 新随机值），文件名用新 ID
+  ⇒ 不会覆盖既有文档；`writeImportedTree`（`:1288-1304`）用 `os.WriteFile` + `filelock.Rename` 消费原文件，
+  故 `filelock.Copy(unzipRootPath, targetDir)` 不会把旧名 `.sy` 一并拷入。
+- `util.RandString` 与 lute `randStr` 的字符集一致（都是 `[a-z0-9]`，`ast.NewNodeID` = 14 位数字 +
+  `-` + 7 位；`ast.IsNodeIDPattern` 与之一致）⇒ 不存在「生成的 ID 不合法导致
+  `index_fix.go` 把合法文档当损坏移走」的路径（本轮专门核过字符集与长度）。
+- `ClearTempFiles`（`box.go:899-906`）的清理清单**不含 `queue`**，与 `working.go:366-369` 启动时
+  只删 `repo`/`export`/`clipboard` 一致 ⇒ 待落盘的索引队列不会被清临时文件动作顺手删掉。
+- `conf.go:1578-1628` `clearWorkspaceTemp` 删的是 workspace 级临时/历史遗留物（
+  `blocktree.msgpack`、`queue.wal*` 为 v3.7.0-dev 遗留），`ImportData`/`ImportSY` 的
+  `os.RemoveAll` 目标都在解压临时目录内。
+- 模板（`template_manage.go` 的 `O_EXCL`/Revision/目标存在即拒）、`createDocTree`
+  （`template_doc_tree.go:349-360` 预检 + 单事务）、加密笔记本归档导入
+  （`notebook_archive_import.go:99` 的 `os.Lstat` 要求 not-exist + `O_EXCL` 写入 + rollback）
+  三处**均已防护**，是本轮 P59 之外唯一给出「同名冲突处理一致」的面。
+- Obsidian 导入只删自己的临时目录（`import_obsidian.go:1637`/`2485`，后者带 `IsSubPath` 边界），
+  重名目标笔记本用 `availableObsidianNotebookName` 追加 `(2)` 规避 ⇒ 不覆盖用户数据。
+
 ## 如何更新本文
 
 每轮审计后追加：
