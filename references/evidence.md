@@ -3740,6 +3740,71 @@ pageSize 无关，5 万行 7.4 s、单次分配 11 GB）、PDF 资源索引先�
 **量测方法上的坑**：`?gc=1` 后 `HeapAlloc` 上升**不等于**泄漏——本轮 groupBy 搜索、`getDocInfo`、
 `diffRepoSnapshots` 三处都先升后回落，必须多次调用看单调性，并区分「HeapAlloc 上升（span/缓存）」与「RSS 峰值（瞬时占用）」。
 
+## 第五十三轮（2026-10-10）：IO / 落盘与批量接口的运行时取证（新增 [运行时量测](../references/runtime-measurement.md) + 模式 P54–P58）
+
+**起点**：用户要求「审计 IO 开销」→「`.sy` 有 mmap 了还是整份覆写吗」→ 要求先测再给增量方案；
+随后点名「继续看之前提到但没进一步分析的 `createDocWithMd`」。**基线**：`HEAD == origin/dev` ＝ `dffea446cb`。
+
+### A. 本轮确认的缺陷（7 条 issue，全部已回读校验）
+
+| # | 结论 | 关键证据 |
+| --- | --- | --- |
+| #20367 | `.sy` 每次编辑整份覆写，**未实现** #16956 声称的「只写 diff」 | `kernel/util/mmap.go:37` 全缓冲 `copy`；实测末尾追加只改 362 B、等长覆盖只改 1 B，但每次编辑都整份写、且不合并（10 次连续 = 10 个 mtime）。23 MB 文档单次编辑 0.65–1.05 s，且**耗时与改动量无关**（那段来自全量 JSON 序列化，与写盘量是两个问题） |
+| #20368 | 位标志 `Conf.DataIndexState` 驱动 conf.json 整份重写，且发生在**同步事件处理器**内 | `kernel/model/index.go:527-535`；`eventbus` 用 `Subscribe`（同步）⇒ `Conf.Save()` 内联在索引入队路径；实测占该窗口读的 ~52%、写的 ~25%（15,407 B 写 + 15,407 B 读回），而该标志只在启动读一次 |
+| #20369 | `sort.json` 每次新建文档整份重写 ⇒ **O(N²)** | `kernel/model/file.go:3146/2824/2535`（整份读 + `os.ReadDir` + 整份 fsync 写）；实测 120 篇累计 202,587 B，与 Σ28i ≈ 14N²（=201,600）吻合，相对线性放大 **60×** |
+| #20370 | `FlushTxQueue` 的**固定 50 ms 睡眠**（约 98 处调用） | `kernel/model/transaction.go:60-67`；实测 `/api/system/bootProgress` 1.2 ms vs `setBlockAttrs`（1 次 flush）57.1 ms vs `createDocWithMd`（4 次）256 ms（~200 ms 是睡眠）；来历是 #12896 的宽限期（`29f744c7e0`） |
+| #20371 | 创建文档**无条件**写属性，且该路径无变更检测 | `kernel/model/file.go:1385` + `kernel/model/blockial.go:373`；1 ms 轮询 mtime 实测：无属性写 **1** 次、带属性写 **2** 次（538→558 B） |
+| #20372 | 加密**属性视图**原址覆写 vs 加密 `.sy` 原子替换 | `kernel/av/av.go:1108`（`avBoxID != ""` 也走 mmap）vs `kernel/filesys/tree.go:511-516`（注释自陈需原子替换）。**未复现崩溃**，结论是代码层的 |
+| #20373 | 批量块查询越过 SQLite 变量预算 ⇒ **静默把全部块报成「不存在」** | 见下表；`kernel/sql/block_query.go:1041` + `kernel/sql/encrypted_query.go:92` |
+
+#20373 的阈值实测（冷缓存、入参全是内置牌组里的真实块）：
+
+| 入参 ID 数 | 响应 code | 占位块 / 总数 | 日志 |
+| --- | --- | --- | --- |
+| 32767 | 0 | 0 / 32767 | 无错误 |
+| 33000 | **0** | **33000 / 33000** | `sql query […] failed: too many SQL variables` |
+
+编译值 `SQLITE_MAX_VARIABLE_NUMBER 32766`（`88250/go-sqlite3` amalgamation）。
+对照面：**写侧**按 512 分块（`kernel/sql/upsert.go:72`）、`/api/query/sql` 默认只返回 **64 行**。
+附带放大：单块响应 **11,017 B**（content 5123 + markdown 5123，受 `search.go:3102 maxContent(…,5120)` 限制），
+32767 个 id ⇒ 27.4 MB / 9.4 s；6000 个长块让内核 RSS 567 → **1077 MiB**。
+
+**已否定的方向（勿重报）**：`fromSQLBlocks` 压缩 `nil` 造成下标错位（它对 `nil` 也 append，长度保持）；
+riff 的 `gulu.Str.Contains` 导致 O(C×N)（**未证实**，我用自定义牌组测出的「与规模无关」是无效测量）；
+`FlushTxQueue` 的锁被大查询长期占用（实测慢调用 917 ms 期间另一接口 212–369 ms，对照 203 ms，无明显阻塞）。
+
+### B. 方法论增量
+
+- **新增 [运行时量测](../references/runtime-measurement.md)**（并在 SKILL.md 执行流程第 6 步与参考资源挂接）：
+  仪器盲区表（**mmap 不计入进程 IO 计数**、系统磁盘计数器在 1 KB 文档上也测出 +3.98 MB 因而不可用、
+  修改页列表抓不到回写、尺寸不变的重写必须按整文件大小计）、五步协议
+  （同长度静置基线 → 异步屏障 ≥5.5 s 越过 `SQLFlushInterval=3000ms` → 冷/热缓存 → 分离进程增量写文件 → overlay 变体）、
+  判据陷阱、可复制骨架。
+- **新增模式 P54–P58**：批量多值查询缺参数预算且失败被呈现为「未找到」／固定睡眠充当完成信号／
+  声称的写入优化与实现不符／位标志驱动整份配置重写（在同步事件处理器内）／「读—改—整份写」被逐条调用。
+- **判据增补**：新增 **D1r**（同族一侧有批量参数预算、另一侧完全没有）与 **E5**（对运行期成本或语义的假设未经验证），
+  D4 增补「写入放大」检查点。
+- **误报表 +2 条**：「接口参数没有上限，只是慢一点」（实为静默错误结果）、
+  「把没测出问题当成没问题」（忽略响应码 / 缓存命中 / 语料放错容器）。
+- **脚本决策**：本轮的两个候选（`IN (?,…)` 参数预算、固定睡眠）都因**决定性问题属数据流**
+  （入参是否有界、异步侧有无可等待句柄）而不适合脚本化，只写成模式与检查法；运行时量测器同理不进 `scripts/`。
+
+### C. 工具与流程教训（Windows / PowerShell / Python，可复用）
+
+- **响应码必须断言**：忽略 `code` 让整轮落盘测量落入「静默失败」——目标文件从未被写，而我把
+  「大小不变」解读成「写入很省」。
+- **长时量测脚本要分离进程 + 增量写文件**：`python -u x.py | Out-String` 会缓冲全部输出，
+  而终端清理会给进程发 `SIGTERM`（日志 `process.go:36: received os signal [terminated]`）⇒ 什么都拿不到；
+  改为 `Start-Process python -ArgumentList '-u',…` 且脚本内每组 `write+flush` 后，被中断也保住了部分数据。
+- **PowerShell 会吞掉/改写内联脚本**：`python -c "…select count(*)…"` 里的 `(*)` 被当成命令；
+  含中文的 `.ps1` 无 BOM 时按 ANSI 解码报「字符串缺少终止符」。一律**写脚本文件**再执行。
+- **控制台编码**：`gh api --jq` 与 Python 输出在默认控制台按 GBK 解码 ⇒ 中文乱码/`UnicodeEncodeError`；
+  回读比对与日志分析一律走 Python `subprocess` 取字节后按 UTF-8 解码，或写 UTF-8 文件再 `read_file`。
+- **`gh api` 写入后逐字段回读**（`.title` / `.body` 分开取）并用 `--input <JSON 文件>` 提交非 ASCII 载荷，
+  提交后删除临时载荷；本轮 7 条 issue 全部 `equal=True`。
+- **`/api/query/sql` 默认只返回 64 行**：忘了写 `limit` 会把「只有 64 条」误当成全部语料
+  （本轮因此让一组对照实验的分母变成 64，白跑一轮）。
+
 ## 如何更新本文
 
 每轮审计后追加：
