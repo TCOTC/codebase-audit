@@ -4246,11 +4246,14 @@ lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核�
    但**必须重读当轮的「已排除清单」**——本轮的 4 条候选中有 2 条正是被前几轮的排除清单拦下的
    （第五十七轮的 fail-open 同族、第五十八轮的相邻子路径），另 2 条来自全新的子代理方向。
 
-## 第六十一轮（2026-10-10）：休眠/唤醒主题验证轮 + 剩余面收口（无修复提交可验证；更正上一轮一条严重度；1 条同族第二实例）
+## 第六十二轮（2026-10-10）：休眠/唤醒主题验证轮 + 剩余面收口（无修复提交可验证；更正上一轮一条严重度；1 条同族第二实例）
 
-> 编号说明：本轮最初写成「第六十轮」，与同日的并行会话（本地数据安全，`#20409–#20411`）撞号；
-> 按其提交先落地的时间顺序本轮改为第六十一轮。**这个坑自检查不出来**（现有语料里「第 X（续）」
-> 这种合法的同号续篇很多，任何按号去重的规则都会误报），故改为把「取号纪律」写进 `contributing.md`。
+> 编号说明：本轮先写成「第六十轮」，与同日并行会话（本地数据安全，`#20409–#20414`）撞号；
+> 改「第六十一轮」后**再次撞号**（对侧已在其 `patterns.md` 的 P49 第四形态里引用了「第六十一轮」，
+> 且其 changelog 行也已标为第六十一轮），故本轮取**第六十二轮**（对侧最终为第六十三轮），
+> 并把 changelog 中两行的顺序调整为先对侧后本轮。
+> **这个坑自检查不出来**（现有语料里「第 X（续）」这种合法的同号续篇很多，任何按号去重的规则都会误报），
+> 故把「取号纪律」写进 `contributing.md` 第 11 条。
 
 > 编号说明：本轮最初写成「第六十轮」，与同日的并行会话（本地数据安全，`#20409–#20411`）撞号；
 > 按其提交先落地的时间顺序，本轮改为第六十一轮。**同类撞号此前已发生多次**（见 `changelog.md` 第 8 条），
@@ -4308,6 +4311,146 @@ lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核�
 - **`layout/Wnd.ts:993` 的 `model.send("closews", {})` 恒为 no-op**：紧随 `model.destroy()`
   （`:992`）使 `socketDisposed` 为真；同族 `destroy.ts` 的顺序才是可用的。因客户端 `close()` 已发 FIN、
   内核读错误即回收会话，**无用户可见后果**（属轨迹 B：读者会以为已通知内核）。
+
+### E. 验证与上报（用户要求「确认后再提 issue」）
+
+**A 段第 1 条已做端到端验证并上报（#20416）**，验证手段与方法论见下。
+
+**① 内核中间件探针（临时同包测试，跑完即删）**：`Conf.AccessAuthCode` 非空时，
+`POST /api/sync/performSync` 无凭据 → `401 {"code":-1,"msg":"Auth failed [session]"}`；
+带 `Basic <workspaceName>:<code>` / `Token <api.token>` → 204；白名单 `POST /api/system/exit` 无凭据 → 204；
+同请求在 `util.Container = util.ContainerAndroid` 下 → 204（证明差异来自白名单的平台条件）。
+仅 OIDC（`AccessAuthCode=""`、`Api.Token=""`、`OIDC{Enabled:true}`）时两个端点无凭据同样 401。
+
+**② 真实内核端到端（比三层推断成本更低，建议固化为标准手段）**：用**官方安装版内核二进制**
+（`…/SiYuan/resources/kernel/SiYuan-Kernel.exe serve --port <随机> --wd <resources> --workspace <临时工作空间>`，
+`%TEMP%` 下新建工作空间）启动，轮询 `bootProgress` 至 100 后：`setAccessAuthCode` 设为非空 → 200；
+随后与 Electron `omit` **完全同形**的请求（无 Cookie / 无 Authorization / 无 Origin / 无 Sec-Fetch-*）：
+
+| 请求 | 结果 |
+|---|---|
+| `POST /api/sync/performSync` 无凭据 | **401** `Auth failed [session]` |
+| 同 + `Basic <name>:<code>` | 200 `code=0` |
+| 同 + `Token <api.token>` | 200 `code=0` |
+| 白名单 `POST /api/system/getNetwork` 无凭据 | 200 `code=0` |
+| `POST /api/notebook/lockEncryptedNotebooksOnSystemLock` 无凭据 | **401** `Auth failed [session]` |
+
+**③ 影响面校正（此前写得太粗）**：`performSync` 走 `kernel/api/sync.go:425` 的 `model.SyncData(true)`
+即 `byHand = true` ⇒ 它是**唯一能绕过** `kernel/model/sync.go:421`（`7 < autoSyncErrCount` 推迟
+64 分钟）并重置 `autoSyncErrCount` 的路径；失效后用户只剩内核周期同步（失败后 5 分钟重试，
+连续 8 次以上拉长到 64 分钟）。所以后果是**延迟数分钟**而非永久丢同步，
+且编辑会经 `IncSync()`（`transaction.go:3052`）把计划重置为 `Conf.Sync.Interval`（默认 30s）。
+
+**④ 已上报**：#20416（唤醒同步 401）、#20417（仅 OIDC + 清空 token 时加密笔记本不随系统锁屏锁定）。
+两处都已按 AGENTS.md 的 UTF-8 payload 流程创建并逐字段回读（title/body 完全一致），临时 payload 已删除。
+去重检索 11 组关键词（open + closed）无同类报告；`#17535` 是 AutoFixIndex 的驱动需求（下条要用到）。
+
+### F. 两条**撤回**（机制确定但不构成值得上报的缺陷）
+
+- **A 段第 2 条（`IsIdle` 把挂起时长当空闲）→ 撤回为观察项**。机制已实测：临时同包测试打印出
+  `time.Now()` 带 `m=+0.316…`、`time.Now().Add(-8h)` 带 `m=-28799…`、而 `time.Unix(0, ns)` **没有 `m=`**
+  （即 `time.Since` 退回墙钟，Go 文档语义），且把 `lastActivityNs` 置为 8 小时前后
+  `IsIdle(7*time.Minute) == true`。**但「这是不是缺陷」没有权威依据**：其驱动需求 #17535 的原文是
+  「checkIndex 不应该仅在同步后执行 / 用户不使用同步功能就不修复索引问题」，**只要求「最终会跑」**；
+  而「睡够 8 小时没人打字」在字面上确实是空闲（同族 `AutoLockIdleEncryptedBoxesJob` 正是刻意这么用）。
+  ⇒ **教训：当「预期表现」的唯一依据是代码注释（且该注释是在描述实现）时，不足以支撑上报**——
+  注释说「用户空闲才触发」，需求只说「要能触发」，两者指向不同口径。挑战门第二轮据此 DOWNGRADED。
+- **A 段第 3 条（网络故障 → 假「内核已退出」对话框）→ 不上报**。机制已由平台行为坐实
+  （渲染进程握手失败时 `onerror.readyState` 恒为 3、`err.target.url` 完整 ⇒ `Model.ts:129-133` 两条守卫都成立），
+  但本机场景下它**约 3 秒后被下一次重连销毁**（`Model.ts:88-96`），属一次闪屏；
+  真正会持续的是浏览器 / 远程内核模式（重连依赖同一网络），而该路径**本轮未验证**。
+  按「只有能确定值得修的才上报」收口，留作观察项。
+
+## 第六十三轮（2026-10-10）：本地数据安全定向审计（续）+ 上轮三条修复的验证（#20412–#20415）
+
+**范围**：延续第五十七 / 五十八 / 六十轮的口径（只审本地功能本身对数据的影响）。基线 `dev` @ **`dc14ce1ba8`**
+（`HEAD == origin/dev`，0/0，工作树干净）——其中最后三个提交正是上一轮三条 issue 的修复。
+
+### A. 修复验证（按验证模式四步：issue 状态 → 修复提交 → 代码现状 → 回归测试）
+
+| issue | 状态 | 修复提交 | 代码现状 | 回归测试 |
+|---|---|---|---|---|
+| #20409（读失败被当损坏） | closed/completed | `ce2e76ee4b` | `DocIAL` 改为 `(map, error)`，新增 `ErrInvalidDocIAL` 哨兵 + `docIALReader` 包装底层读错误；`Box.docIAL` 只对 `ErrInvalidDocIAL` 走 `moveCorruptedData`，其余读失败只 `LogWarnf` 并返回；4 个调用点全部更新 | `TestDocIALReadFailureDoesNotMoveData`、`TestDocIALSharingViolationRecovers`（Windows 专用，用 `CreateFile` 造共享冲突）、`filesys/doc_ial_test.go` |
+| #20410（暂存目录残留） | closed/completed | `786760be04` | `MkdirAll` 前 `filelock.Lock` + `os.RemoveAll`，并加 `defer os.RemoveAll(exportDir)`、`defer os.Remove(zipPartialPath)`、`defer zip.Close()`（覆盖全部失败分支） | `TestExportSYClearsStaleTempFiles`（先造残留再导出，断言包内只有本次文档）、`TestExportSYConcurrentSameName`、`TestExportSYFailureCleansTempFilesAndAllowsRetry` —— **比报告建议的最小修法更完整** |
+| #20411（数据库拷贝失败被吞） | closed/completed | `dc14ce1ba8` | `copyErr` 非空时 `err = copyErr; return` | `TestImportSYAttributeViewCopyFailure` |
+
+**验证方式与结论**：三处修复均**符合且超出**报告建议；本地 `go test -tags "fts5 sqlcipher" ./filesys ./model`
+相关用例全绿（`TestUnusedAssets*`、`TestExportSY*`、`TestDocIAL*`、`TestImportSY*` 共 20 余个 PASS）。
+
+**本轮最重要的流程发现（影响今后所有验证）**：**`.github/workflows/api-contracts.yml` 已被删除**。
+`git log --diff-filter=D --name-only` 指向 `9f01b444b2`（2026-09-14，
+「:construction_worker: Run contract and unit tests during prerelease packaging」）——
+该 workflow 原本是 `on: pull_request` + `push: branches: [dev, master]`（**每次推送与 PR 都跑**），
+测试被并入 `cd.yml`，而 `cd.yml` 的 `on:` **只有 tag（`*-alpha*`/`*-beta*`/`*-rc*`）与 `workflow_dispatch`**。
+⇒ **推送 dev 与 PR 都不再运行测试**；`gh run list` 只剩 `Unlock`（`issue_comment`）一类运行。
+这既是判据 G4 的实例，也是验证模式硬约束 ⑤ 的直接后果：**本仓的 `fixed` 结论无法再由 CI 收口，只能本地跑**。
+（第四十八 / 五十轮已登记「门禁是 tag-only」这一事实，本轮补上它的**来源与时间点**。）
+
+### B. 本轮发现（4 条，均已提 issue；由两路只读子代理侦察 + 主线逐条自验）
+
+- **P65（新）/ #20413（中）**：`kernel/model/search.go:744-746`（method 0）与 `:760-761`（method 3）
+  `replacement = strings.TrimPrefix(replacement, "#")` —— **对形参赋值**，而紧邻调用的第 3 个实参
+  `strings.TrimSuffix(strings.TrimPrefix(replacement, "#"), "#")` **已内联算出同一值**（Go 先求值实参再调用），
+  所以这两句对本次 tags 替换毫无作用、唯一效果是泄漏给后续所有迭代。后果：把 `旧称` 替换为 `#新称#` 时，
+  只要某篇命中文档同时满足「标题含关键词」与「`tags` IAL 含关键词」，其后所有文档写入的是 `新称`（纯文本）
+  而非 `#新称#`（标签标记）。可达性：`SIYUAN_DEFAULT_REPLACETYPES.docTitle = true`
+  （`app/src/constants.ts:850-872`），文档块在结果中排在前面。权威依据：`kernel/apicontract/search_query.go:73`
+  「替换串按字面量写入」。引入链：`59c479419b`(#14588) → `5d98038afb`(#20276) 重构时内联了实参却留下了这个多余赋值。
+- **P49 第四形态（新）/ #20412（中高）**：`kernel/filesys/tree_compare_write.go:15-16` 引入
+  `WriteTreeIfUnchanged`（注释明写「防止批量操作覆盖并发修改」），唯一调用点
+  `kernel/model/asset_relink_batch.go:574`；而**同为批量改写的查找替换**（`search.go:707` 一次性
+  `cachedTrees[bt.RootID] = tree`，`:1048` `writeTreeUpsertQueue(tree)`）仍无条件整树回写，
+  全程不持锁、不 `FlushTxQueue` ⇒ 替换进行中用户对已载入文档的编辑被覆盖（SQL 索引一并回退）。
+  缓解：替换前每篇写了文件历史（`search.go:705`），可从数据历史回滚。
+- **P66（新）/ #20414（中，已标注未构造端到端时序）**：`GlobalUndoLog.Clear(rootID)` 的**生产调用点只有
+  `kernel/api/transaction.go:341`（`clearHistory` 契约）一处**；查找替换（`search.go:1048`）、
+  优化排版（`format.go:80`）、网络图片转本地（`assets.go:885`）都直接写盘、不入栈也不清栈
+  ⇒ 替换后按 Ctrl+Z 重放的是替换前记录的操作。同族权威：`attribute_view_transaction.go:111`
+  「非编辑器变更在提交成功后清理失效历史」+ `undolog.go:339-341`「旧记录不能再安全地重放」，AV 侧已有四处调用点。
+- **P66 / #20415（中高）**：`removeAttributeViewFieldDefinition`（`attribute_view_fields.go:205`）与删除数据库
+  都不触碰 `Automations`（唯一写点 `attribute_view_automation.go:652`）。删除已被启用规则引用的字段后，
+  `runAttributeViewAutomations` 对「字段不可用」返回错误（`:356-361`、`:377-381`）→
+  `transaction.go:563-566` 整笔回滚 → 用户只看到 `_kernel.258`「操作失败，请稍后再试」，**从此无法编辑该数据库**。
+  权威侧：用户指南原文「新规则默认停用；**配置不完整时会自动停用并提示缺项**」，而该停用只实现于
+  前端 `automation.ts:182`（仅 `save()` 内）；同族对悬空引用的既定处理是降级
+  （`attribute_view.go:5676`「字段删除、改型或关联目标失效时保留块级配置，并以空上下文安全渲染」）。
+
+### C. 已排除（勿重报，除非有新证据）
+
+- 「模板应用会覆盖已存在文档」：`template_doc_tree.go:286-297` 的 `validateLocations()` 对 `box.Exist` 直接报错；
+  内容模板只用于新建文档与数据库新建行。
+- 「`RemoveDeck` 留悬空 `custom-riff-decks`」「删关系字段后 `Rollup.RelationKeyID` 未清」：前者下一次
+  「移出闪卡」会自愈且指南已声明卡包弃用；后者是否显示陈旧值取决于落盘的 `Rollup.Contents`，
+  不跑内核无法判定 ⇒ 观察项。
+- 「`AutoSpace` 的渲染往返丢内容」：无法给出具体夹具，且 `format.go:42` 有 `HistoryOpFormat` 历史兜底 ⇒ 不报。
+- 「`aHref` 清空后转 `NodeText` 未反转义」「`aHref`/`aTitle` 先 `UnescapeHTML` 再回写」：
+  `docs/SY-FORMAT.md:583` 未规定 `TextMarkTextContent` 的 HTML 实体语义，权威依据不足 ⇒ 观察项。
+- 「`ResetFlashcards` 在 `deckID==""` 时把同一卡包 ID 套用到整批 `blockIDs` ⇒ 块被加进它不属于的卡包」：
+  机制成立（`kernel/model/flashcard.go:270-292`，`resetFlashcards` = 先删再 `AddCard`，会为无卡的块建卡），
+  但**前端三个调用点都传具体 `deckID` + 单个 blockID**（`card/openCard.ts:467`、
+  `card/viewCards.ts:223/237/239`），只有直接调 API 才能命中 ⇒ 观察项，未上报。
+- 「`FullTextSearchBlock` 的 `pageCount` 有符号溢出」：`FindReplaceInBox` 用 `_` 丢弃该返回值、前端也不使用 ⇒ 惰性。
+- 「`doRemoveAttrViewView` 用 `setNodeAttrs0` + `indexWriteTreeUpsertQueue` 而非 `tx.writeTree`」：
+  与同功能的 `freezeOtherAttrViewBlockVisibleViews` 一致，最坏只是回滚时镜像块当前视图偏移 ⇒ 观察项。
+- **跨笔记本移动遇目标同 ID 文档时 `.sy` 被静默覆盖**（第六十轮附录项，本轮复核）：机制成立
+  （`file.go:1925-1928` 无备份 `filelock.Remove(absToPath)`；`:1951-1953` `filelock.Rename` 在 Windows 上用
+  `MOVEFILE_REPLACE_EXISTING` 覆盖），但**可达性仍取决于用户手工复制笔记本目录**：
+  导入路径会重映射块 ID（`import.go:601`「新 ID 保留时间部分，仅修改随机值」），
+  工程内不存在笔记本复制功能（`grep` 无 `DuplicateNotebook`/`CopyNotebook`）⇒ 仍列观察项。
+
+### D. 方法论增量
+
+1. **验证模式 ⑤ 在本仓要换判据：测试工作流可能已被删除或降级为 tag-only**。
+   先 `Get-ChildItem .github/workflows` 看现有工作流，再 `git log --diff-filter=D --name-only -- 
+   .github/workflows/<file>` 找它何时消失、被什么取代；不能假定「以前有 CI」就等于「现在还有」。
+2. **P49 的第四形态要求把 grep 目标从「旧实现」换成「新 helper」**：一次「新增更正确的通用实现」不会改动旧实现，
+   所以 `grep 旧函数名` 什么都查不到；`grep 新 helper 的调用点`（只有 1 个）才是入口。
+3. **同一语义域的两个善后要成对检查**：覆盖前的条件写（防并发）与覆盖后的失效通知（防重放旧状态）
+   常由不同提交引入，容易只跟进一半。本轮的清单是「批量改写 `.sy`」：查找替换 / 优化排版 / 资源重链 / 网络图片转本地。
+4. **「删除后引用方没被失效」要看引用方在校验链上的行为是抛错还是降级**：
+   同一个悬空引用，抛错会升级为「整笔事务回滚、用户无法编辑」，比「显示一个失效值」严重得多。
+5. **子代理产出仍是候选**：本轮两路共 6 条候选（含 3 条明确排除 + 4 条观察项），主线采纳 4 条并逐条重读关键代码后上报；
+   其中「`FindReplaceInBox` 无条件回写」由子代理提出、主线补上了「同族已有 `WriteTreeIfUnchanged`」这一权威依据。
 
 ## 如何更新本文
 
