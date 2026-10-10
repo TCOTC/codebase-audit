@@ -4246,6 +4246,61 @@ lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核�
    但**必须重读当轮的「已排除清单」**——本轮的 4 条候选中有 2 条正是被前几轮的排除清单拦下的
    （第五十七轮的 fail-open 同族、第五十八轮的相邻子路径），另 2 条来自全新的子代理方向。
 
+## 第六十轮（2026-10-10）：休眠/唤醒主题验证轮 + 剩余面收口（无修复提交可验证；更正上一轮一条严重度；1 条同族第二实例）
+
+**验证结论**：基线由 `7f911d3212` 推进到 `dc14ce1ba8`（`HEAD == origin/dev`，lag 0）。逐个
+`git log --oneline 7f911d3212..origin/dev -- <file>` 计数为 **0** 的文件：`app/electron/main.js`、
+`kernel/util/websocket.go`、`kernel/model/index_fix.go`、`app/src/util/fetch.ts`、`app/src/layout/Model.ts`、
+`app/src/util/kernelFault.ts`、`kernel/model/session.go` ⇒ 上一轮三条**均未修复**，`main.js:4448` 仍是
+`credentials: item.ownsKernel ? "omit" : "include"`。无修复提交可验证（本轮三条都未提 issue）。
+
+### A. 严重度更正（上一轮第 3 条：网络故障 → 假「内核已退出」对话框）
+
+上一轮写「不可关闭的硬对话框阻塞用户」，本轮实测**它会在下一次重连成功时被自动销毁**，故降为
+**低**：唤醒瞬间闪现约 3 秒的假崩溃模态（覆盖层挡住点击），并使非 local 的停靠面板各刷新一次。
+
+- **取证①（平台行为，本机 Electron 44.7.0 渲染进程实测）**：对未监听端口发起 WebSocket 握手失败时，
+  `onerror` 的 `err.target.readyState === 3`、`err.target.url` 完整（含 `&type=main`）
+  ⇒ `app/src/layout/Model.ts:129-133` 的两条守卫**都成立**，`kernelError()` 必然被调用。
+- **取证②（本机 app.log 10-08）**：12:22:03（resume 同一秒）有 4 条 `/ws` 握手 `net::ERR_FAILED`
+  （`webContentsId=2` 即主窗口），此后 17 分钟内无新失败且界面继续可用 ⇒ 与「对话框被下一次重连销毁」
+  一致（`Model.ts:88-96`：重连 `onopen` 里发现 `#errorLog` 就 `reloadSync` + `dialog.destroy()`）。
+- **`reloadSync` 空数组的实际影响（读数澄清）**：`upsertRootIDs.includes(...)` 恒假 ⇒
+  **编辑器不重载**（不会丢光标/滚动）；只有 `item.type !== "local"` 的分支命中（`reloadSync.ts:110-130`
+  的 graph/outline 等），即非 local 面板各重取一次。这解释了为何「唤醒后编辑器状态没有异常」。
+
+### B. 新增：同族第二实例（P62 变体）
+
+`app/electron/notebookSystemLock.js:35` 同样显式 `credentials: "omit"`，认证完全依赖手工头
+（`:30` `Token <api.token>` / `:32` `Basic <workspaceName>:<accessAuthCode>`）。当
+`accessAuthCode` 为空、`api.token` 被清空、仅启用 OIDC 时**两者都不写** ⇒
+`/api/notebook/lockEncryptedNotebooksOnSystemLock`（`kernel/apicontract/contracts.go:354` =
+`AuthenticatedAccess|AdminAccess|WritableAccess`，且不在 `session.go` 的本机白名单里）恒 401
+⇒ **加密笔记本不随系统锁屏锁定**，而日志承诺的「retry on system unlock or resume」永不成立。
+可达性：开关本身不依赖 `accessAuthCode`（`app/src/config/tabs/accessTab.ts:789-798` 只看平台与 ownsKernel），
+但 `kernel/conf/api.go` 的默认值是 `Token: gulu.Rand.String(16)` ⇒ 需要用户**主动清空** token 才命中，故为低频。
+
+### C. 已排除（勿重报，除非有新证据）
+
+- **boot 期 `/api/system/version`、`/api/system/bootProgress` 会 401**：两者都是 `PublicAccess`
+  （`contracts.go:177`、`:301`）⇒ 不受锁屏密码影响。上一轮我怀疑「boot 也会因缺凭据失败」**不成立**。
+- **`Model.send` 缺 `CONNECTING` 守卫 ⇒ 抛 `InvalidStateError`**：两个桌面调用点都安全——
+  `protyle/util/destroy.ts:55-63` 自带 try/catch + 10 秒重试，`layout/Wnd.ts:993` 紧随 `destroy()`
+  （`socketDisposed` 已为真，`send` 首句即返回）。移动端已在调用点 try/catch（#17680）。仅在新增调用点时才成风险。
+- **挂起中同步会永久挂住锁**：`httpclient` 的 cloud 客户端总超时 30s / 文件传输 2min
+  （`client.go:96`、`:119`），`lockSyncRequest` 用 requested/completed 计数合并并发请求
+  ⇒ 唤醒后最迟约 2 分钟返回并解锁，没有无限持锁。
+
+### D. 观察项（未取证 / 无用户可见后果）
+
+- **`suspend` 不 flush 待提交事务**：`main.js:4416` 只写日志；flush 出现在 `lock-screen` 路径，
+  且仅在 `encryptedNotebookFollowSystemLock` 开启时经 `prepareNotebookSystemLock` → `flushPendingTransactions()`
+  （`onWindowsMsg.ts:39-44`）。S3（内存挂起）期间断电会丢最近数秒；S4 休眠不丢（RAM 在 hiberfil）。
+  触发需要「笔记本电池在睡眠中耗尽」，**未取证**。
+- **`layout/Wnd.ts:993` 的 `model.send("closews", {})` 恒为 no-op**：紧随 `model.destroy()`
+  （`:992`）使 `socketDisposed` 为真；同族 `destroy.ts` 的顺序才是可用的。因客户端 `close()` 已发 FIN、
+  内核读错误即回收会话，**无用户可见后果**（属轨迹 B：读者会以为已通知内核）。
+
 ## 如何更新本文
 
 每轮审计后追加：

@@ -2027,6 +2027,20 @@ AV 定义…）；② 逐类问「目标已存在时它做什么」，把答案�
 改动来源 `d64e5e079d`（远程内核 #18343）把原先默认带 Cookie 的 `net.fetch(...)` 换成
 `session.defaultSession.fetch(..., {credentials: "omit"})`。
 
+**第二实例（第六十轮，同族对照）**：`app/electron/notebookSystemLock.js:35` 也显式
+`credentials: "omit"`，认证**完全**依赖手工头（`:30` `Token <api.token>` / `:32`
+`Basic <workspaceName>:<accessAuthCode>`）。当 `accessAuthCode` 为空、`api.token` 被清空而仅启用 OIDC 时
+两者都不写 ⇒ `/api/notebook/lockEncryptedNotebooksOnSystemLock`（`contracts.go:354`）恒 401
+⇒ 加密笔记本不随系统锁屏锁定，而日志承诺的「retry on system unlock or resume」永不成立。
+**频度提示**：`kernel/conf/api.go` 的默认值是 `Token: gulu.Rand.String(16)`，需用户主动清空才命中。
+**两处合起来给出检查法**：同族里既有「显式 omit + 手工 Authorization」也有「靠默认 Cookie」两种写法，
+**两个方向都要读**——既要问「该端点要不要求凭据」，也要问「这条路径到底带没带」。
+
+**取证方法（可复用，成本很低）**：**用本机 Electron 起一个回环 echo 服务端**，对同一 URL 依次跑
+`credentials: "omit"` / `"include"` / 不传 / `net.fetch(...)` 四组，打印服务端收到的 `Cookie` 头。
+比读文档可靠——Electron 文档**没有**写 `net.fetch` 的 Cookie 默认值，而实测默认等价于 `include`
+（`ses.fetch` 同理），因此「换成 `omit`」这一改动的后果无法从文档推出，只能实测。
+
 **取证方法（可复用，成本很低）**：**用本机 Electron 起一个回环 echo 服务端**，对同一 URL 依次跑
 `credentials: "omit"` / `"include"` / 不传 / `net.fetch(...)` 四组，打印服务端收到的 `Cookie` 头。
 比读文档可靠——Electron 文档**没有**写 `net.fetch` 的 Cookie 默认值，而实测默认等价于 `include`
