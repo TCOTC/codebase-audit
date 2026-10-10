@@ -202,6 +202,54 @@ bad_seq = ["P%d → P%d" % (nums[k], nums[k + 1])
            for k in range(len(nums) - 1) if nums[k] >= nums[k + 1]]
 check(not bad_seq, "P 编号递增", "; ".join(bad_seq[:3]))
 
+print()
+print("[8] 技能库写回/提交推送的「自动执行」声明必须存在，且文档计数不得漂移")
+# 用户明确要求：写回判据库与提交推送**不需要授权、自动执行**。
+# 这条规则若被后续「整理」删掉，每轮审计都会重新停在「要不要写回 / 需你授权吗」的问句上，
+# 因此把它的存在本身做成断言（维护规范第 12 条：断言的存在性也要断言）。
+CONTRIB = os.path.join(SKILL_DIR, "references", "contributing.md")
+AUTO_RULES = [
+    (SKILL_MD, "不需要任何额外授权"),
+    (SKILL_MD, "只适用于被审计的目标仓库"),
+    (SKILL_MD, "本 skill 的写回与提交推送是自动执行项"),
+    (SKILL_MD, "不要把「等用户授权」当成不写回的理由"),
+    (CONTRIB, "且不需要用户授权"),
+    (CONTRIB, "不得追加「要不要写回"),
+]
+for path, needle in AUTO_RULES:
+    check(needle in "\n".join(read(path)),
+          "自动执行声明存在：%r @ %s" % (needle, os.path.basename(path)))
+
+# 计数与范围声明会随每次追加静默漂移（实测：清单已列 9 个脚本却写「八个」；
+# P 编号已到 P58 却仍写 `P1–P53`），而读者正是靠它们判断「有没有漏读」。
+SCAN_SCRIPTS = sorted(n for n in os.listdir(os.path.join(SKILL_DIR, "scripts"))
+                      if n.startswith("scan_") and n.endswith(".py"))
+CN_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+             "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+m_count = re.search(r"\*\*([一二三四五六七八九十]+)个机械扫描脚本", sk_text)
+stated_count = CN_DIGITS.get(m_count.group(1), -1) if m_count else -1
+check(stated_count == len(SCAN_SCRIPTS),
+      "扫描脚本计数一致（文档 %s / 实际 %d）"
+      % (m_count.group(1) if m_count else "未声明", len(SCAN_SCRIPTS)),
+      "实际：%s" % ", ".join(SCAN_SCRIPTS))
+named = [n for n in SCAN_SCRIPTS if n not in sk_text]
+check(not named, "每个扫描脚本都在 SKILL.md 中被点名", ", ".join(named))
+
+m_range = re.search(r"P1–P(\d+) 的定义", sk_text)
+pat_max = max(nums) if nums else 0
+check(bool(m_range) and int(m_range.group(1)) == pat_max,
+      "模式库 P 范围声明一致（文档 P1–P%s / 实际最大 P%d）"
+      % (m_range.group(1) if m_range else "未声明", pat_max))
+
+# 组号连续 + 「N 组」声明与实际组数一致：跳号或漏改数字都会让读者以为漏跑了一组
+src = io.open(os.path.abspath(__file__), encoding="utf-8").read()
+group_nos = sorted({int(m.group(1)) for m in re.finditer(r'print\("\[(\d+)\] ', src)})
+check(group_nos == list(range(1, len(group_nos) + 1)),
+      "自检组号连续（%d 组）" % len(group_nos), "实际：%s" % group_nos)
+m_groups = re.search(r"\*\*(\d+) 组\*\*结构检查", sk_text)
+check(bool(m_groups) and int(m_groups.group(1)) == len(group_nos),
+      "自检组数声明一致（文档 %s / 实际 %d）"
+      % (m_groups.group(1) if m_groups else "未声明", len(group_nos)))
 
 print()
 if FAILURES:

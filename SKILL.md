@@ -39,6 +39,15 @@ argument-hint: '[scope: package or directory] [focus: literals | drift | state |
 **审计结论不是修改授权**。用户只要求「看看有没有问题」时，做完审计就收口；
 进修复模式前必须由用户明确要求改代码。
 
+**上面这条授权约束只适用于被审计的目标仓库。本 skill 自身的写回与提交推送不受它约束。**
+新判据 / 新误报写进 `references/`、给 [更新记录](./references/changelog.md) 追加一行、
+在本 skill 仓库 `git add` → `git commit` → `git push`，都是**交付动作，一律自动执行**：
+不要为它征求授权，也不要在报告末尾附「需要我写回吗 / 需要我推送吗」这类问句。
+用户已经授权过一次（见 [维护规范](./references/contributing.md) 的版本管理节），每轮再问一次
+等于把已给的授权退回给用户，并让一个可以自动完成的收尾永远停在待办上。
+被审计仓库的 `AGENTS.md` 禁止擅自提交，**两者规则相反，不要互相套用**；
+**唯一例外是失败**（推送失败、自检失败、冲突无法自动解决）——那时如实报告并停下。
+
 **差分审查与审计的唯一区别是范围**（diff vs 目录），判据与挑战门完全复用。
 它值得单列的理由：`evidence.md` 实测**58.5% 的 bug 提交只碰 1–2 个文件、中位数 31 行**，
 小 diff 才是主流场景，而它有一个审计模式看不到的产出——**「漏改」**（同一次改动里对称的一侧没改）。
@@ -789,8 +798,12 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 8. **输出报告**。按下方「输出格式」，用普通文本与小标题，不要用代码块包裹发现。
    报告必须含**「附录：主题外发现」**一节（见 [核心原则 7](#7-主题外发现必须登记不得因不在本轮主题丢弃)）；
    **没有也要显式写「无」**——省略无法区分「确实没有」与「忘了写」，而后者会让发现永久丢失。
-9. **写回判据库**。新判据进 [模式库](./references/patterns.md)，新误报进
-   [已知误报](./references/known-false-positives.md)。
+9. **写回判据库（自动执行，不征求确认）**。新判据进 [模式库](./references/patterns.md)，新误报进
+   [已知误报](./references/known-false-positives.md)，本轮实证进 [实证数据](./references/evidence.md)，
+   并在 [更新记录](./references/changelog.md) 追加一行；随后在本 skill 仓库
+   `git add -A` → `git commit` → `git push`，并**以远端状态收口**
+   （`git rev-parse origin/main` 与 `git rev-list --left-right --count` 均为 0）。
+   这一步是本 skill 的交付物，**不需要任何额外授权，也不要问用户是否要做**。
 
 **进入修复模式后接续**（1–9 步已完成，且用户已明确授权修改）：
 
@@ -910,6 +923,11 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 
 排查结论**不是**动手改动的授权。**用户未明确要求修改时，本 skill 只做只读审计。**
 
+> **本节全部约束（含下面那条「禁止 `git commit` / `git push`」）只针对被审计的目标仓库。**
+> 本 skill 自身仓库的写回与提交推送**自动执行、无需授权**，见
+> [维护规范](./references/contributing.md) 的「本 Skill 的版本管理（强制）」。
+> 两者规则相反，**不要把目标仓库的禁止条款套到本 skill 上**。
+
 修改前必须遵守目标仓库的 `AGENTS.md`：
 
 - **禁止** `git commit` / `git push`，除非用户明确要求
@@ -935,6 +953,10 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 
 > 注意区分两个仓库：**目标仓库**（`AGENTS.md` 禁止擅自提交）与 **本 skill 仓库**（每次改动后**必须**提交推送）。
 > 两者规则相反，不要互相套用。
+>
+> **本 skill 的写回与提交推送是自动执行项，不需要用户授权。** 每轮审计收口时直接做：
+> 写 `references/` → 追加 `changelog.md` → 跑自检 → `git add -A` → `git commit` → `git push` → 核对 `origin/main`。
+> **不要**在报告末尾问「需要我把这两条写回 skill 吗」，也不要把「等用户授权」当成不写回的理由。
 
 ## 参考资源
 
@@ -949,12 +971,12 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 | 结论取决于**运行期行为**（耗时 / 内存 / IO / 落盘次数 / 阈值上限） | [运行时量测](./references/runtime-measurement.md) | 仪器盲区表（mmap 不计入进程 IO 计数、系统磁盘计数器不可用）、五步测量协议（静默基线 / 异步屏障 / 冷热缓存 / 分离进程 / overlay 变体）、判据陷阱、可复制骨架；含「先确认代码路径真的执行」的必做项 |
 | 审一个 PR / commit / diff | [差分审查模式](./references/diff-review.md) | 按 diff 定范围、三类必查（漏改 / 新引入 / 声明不符）、本模式特有误报 |
 | 过挑战门 | [挑战门](./references/challenge-gate.md) | 两轮对抗审查（审发现）+ 四问审查（审修法） |
-| 需要某条判据的细节 | [模式库](./references/patterns.md) | P1–P53 的定义、跨领域实例、检查法、修法陷阱 |
+| 需要某条判据的细节 | [模式库](./references/patterns.md) | P1–P58 的定义、跨领域实例、检查法、修法陷阱 |
 | 修复 / 架构调整 / 验证 | [修复与架构调整手册](./references/repair-playbook.md) | 授权边界、爆炸半径、变体分析、修法阶梯、架构判据、验证闭环、高危改动清单、模板 R1 |
 | 写「既往记录」字段 | [实证数据](./references/evidence.md) | 历轮发现登记表（去重的第二来源）与量化结论 |
 | 修改本 skill | [维护规范](./references/contributing.md) · [更新记录](./references/changelog.md) | 追加与整理规范、版本管理、编辑坑；历次变更历史 |
 
-`scripts/` — **八个机械扫描脚本与两个自检**：
+`scripts/` — **九个机械扫描脚本与两个自检**：
 `scan_duplicated_literals.py`（判据 A）、`scan_unescaped_html.py`（判据 F）、
 `scan_dom_type_literals.py`（前端 DOM 契约闭合集合）、`scan_doc_parity.py`（多语言文档一致性）、
 `scan_i18n_text_expansion.py`（判据 I4 文本膨胀）、`scan_a11y_antipatterns.py`（判据 I3 无障碍行为）、
@@ -967,7 +989,8 @@ SCSS 嵌套的后代语义、`transform` 也算焦点指示、按类集合而非
 **`:is()`/`:where()` 必须展开且不算进 `:not()` 内部**、**特异性分属性比较**，
 六个都实测写错过；并补上了运行时赋类名与不带 class 的标签两类使用点）、
 `scan_regression_index.py`（历轮发现的回归索引，服务差分审查与修复验证）、
-`test_scan_scripts.py`（脚本行为与过滤规则）、`skill_self_check.py`（本文档库的 7 组结构检查）。
+`test_scan_scripts.py`（脚本行为与过滤规则）、`skill_self_check.py`（本文档库的 **8 组**结构检查，
+含「技能库写回/提交推送自动执行」的声明断言与脚本清单数量断言）。
 
 > **脚本的准入标准：零产出或极低产出的不进来。**
 > 已按此标准移除过一个设计令牌契约扫描器（`scan_css_token_contract.py`，第二十二轮加、

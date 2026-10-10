@@ -51,12 +51,20 @@
     **嵌套 `:not` 求值**、**特异性分属性比较**、**运行时赋类名回推**、
     **不带 class 的标签收集** 五个新前提，以及一条把展开退化成恒等的负向用例。
     任何一项退化都会让结论**双向**错：多报已修复的，或漏掉真缺口。
+12. `scan_test_quality`：四类判定（gate / oracle / assert / fixture / binding）都不得退化，
+    含双向承重用例；重点是夹具对 `test(name, {options}, fn)` 的识别。
+13. **跨进程文本编码必须锁定**（第 [13] 组），且**本文件自己打印不得因编码崩溃**。
+    子进程被管道捕获时按控制台代码页输出，而本文件按 UTF-8 解码 ⇒ 含中文的输出匹配
+    会静默失败（实测：第 [2] 组因 `默认` 匹配不到而长期假失败）；
+    本文件自己的 stdout 也是管道时同理 ⇒ 打印 `⌘` 直接抛 `UnicodeEncodeError`，
+    **自检在打印阶段就挂掉，而崩溃的退出码同样非 0**，会被误读成「某条断言失败」。
 
 仅依赖标准库，无需第三方包。退出码 0 表示全部通过。
 """
 
 import importlib.util
 import io
+import locale
 import os
 import re
 import shutil
@@ -81,6 +89,30 @@ EVIDENCE = os.path.join(SKILL_DIR, "references", "evidence.md")
 
 FAILURES = []
 
+# 自检自己的 stdout 被重定向到管道时，Python 会用控制台代码页（中文 Windows 上是 cp936）
+# 编码——此时打印 `⌘` 这类字符会抛 UnicodeEncodeError，**整个自检在打印阶段就挂掉**。
+# 崩溃的退出码同样非 0，会被误读成「某条断言失败」。这里只放宽错误处理、不改编码，
+# 以免中文输出在 cp936 控制台上变成乱码。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):  # 老版本 Python / 已被重定向为不支持的类型
+        pass
+
+
+def _child_env(pin_encoding=True):
+    """子进程环境：默认把输出编码钉在 UTF-8。
+
+    子进程的 stdout 是管道时，Python 退回控制台代码页（cp936），而本文件按 UTF-8 解码
+    ⇒ 任何**含中文**的输出匹配都会静默失败。实测：第 [2] 组因 `默认` 匹配不到而长期
+    假失败（字节头 `b'usage: s'`、`gbk_match=True` / `utf8_match=False` 直接可证）。
+    """
+    env = dict(os.environ)
+    if pin_encoding:
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+    return env
+
 
 def run(script, *args, **kwargs):
     # stdin 必须显式关掉：子进程会继承父进程的 stdin，而 scan_regression_index
@@ -92,6 +124,20 @@ def run(script, *args, **kwargs):
         capture_output=True,
         stdin=subprocess.DEVNULL,
         cwd=kwargs.get("cwd"),
+        env=_child_env(kwargs.get("pin_encoding", True)),
+    )
+    return (proc.returncode,
+            proc.stdout.decode("utf-8", "replace"),
+            proc.stderr.decode("utf-8", "replace"))
+
+
+def run_python(code, pin_encoding=True):
+    """跑一段内联 Python，用于验证跨进程编码是否被锁定（第 [13] 组）。"""
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        env=_child_env(pin_encoding),
     )
     return (proc.returncode,
             proc.stdout.decode("utf-8", "replace"),
@@ -1123,6 +1169,27 @@ else:
 
 shutil.rmtree(TQ_A, ignore_errors=True)
 shutil.rmtree(TQ_B, ignore_errors=True)
+
+print()
+print("[13] 跨进程文本编码必须锁定：子进程输出按 UTF-8，父进程打印不得崩溃")
+# 同一个根因的两个症状，两者都实测过（跑在中文 Windows 的 cp936 控制台下）：
+#   ① 子进程被管道捕获时按 cp936 输出，而本文件按 UTF-8 解码 ⇒ 「默认」这类中文匹配
+#      静默失败 ⇒ 第 [2] 组长期假失败；
+#   ② 本文件自己的 stdout 被重定向到管道时也是 cp936，打印 `⌘` 直接抛
+#      UnicodeEncodeError ⇒ 自检在打印阶段崩溃（退出码非 0，看不出是哪条断言）。
+code, out, err = run_python("print('\\u2318 \\u9ed8\\u8ba4 4')")
+check(code == 0 and "Traceback" not in err, "内联子进程正常退出", repr(err[:160]))
+check("\u2318" in out and "\u9ed8\u8ba4" in out,
+      "子进程的非 GBK 字符与中文按 UTF-8 原样到达父进程", repr(out[:120]))
+# 反向对照：不锁定编码时必须**解码不出来**。否则说明本组用例不承重
+# （两者恰好同编码），而宿主机恰好是 UTF-8 时本对照不适用，故显式跳过。
+host_enc = (locale.getpreferredencoding(False) or "").lower().replace("-", "").replace("_", "")
+if host_enc in ("utf8", "utf8mb4"):
+    print("  SKIP  宿主默认编码已是 UTF-8，反向对照不适用")
+else:
+    _, raw, _ = run_python("print('\\u9ed8\\u8ba4')", pin_encoding=False)
+    check("\u9ed8\u8ba4" not in raw,
+          "反向对照：未锁定编码时中文解码不出来（证明本组承重）", repr(raw[:80]))
 
 print()
 if FAILURES:
