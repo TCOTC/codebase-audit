@@ -4459,11 +4459,44 @@ lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核�
 
 | 判据 | 发现 | 置信度 | 状态 |
 |---|---|---|---|
-| D1（新 P67）/ C | 设置 - 鉴权 - 加密笔记本 的「跟随系统锁屏」**保存后不回写读取来源**：`accessTab.ts:789-797` 的 `save` 只发 `POST /api/notebook/setEncryptedNotebookFollowSystemLock`，内核 `notebook_system_lock.go:9-12` 走裸 `contractHandler`（无 `serializeSetting`、无 `setConf`/`settingChanged` 广播），而同组紧邻的 `notebookCrypto.autoLockMinutes`（`:781-784`）在回调里显式写回本地配置 → 关掉设置再打开，开关显示为**关闭**（读的是启动快照）；`refreshSettingConfig` 的 `system` 分支只同步 `api/oidc/accessAuthCode`（`setting/sync.ts:71-79`），其余 `system.*` 一律不刷 | 高（代码可证，未做运行期复现） | 未提 issue（用户只要求审计） |
-| B / D1c | 设置 - 闪卡 的两个 FSRS 项的**前端范围宽于内核接受范围**，且内核只在启动时归一化：`flashcardTab.ts:55-61` 允许 `requestRetention` 取 0 与 1（内核 `model/conf.go:751-753` 是**开区间** `(0,1)`），`flashcardTab.ts:68-73` 的 `weights` 无任何格式/数量校验（内核 `:759-785` 要求 `,` 分隔且长度 = 19）；写入侧 `api/setting.go:340-373` 只兜底 `NewCardLimit`/`ReviewCardLimit` → 当次保存成功、`InitConf` 末尾 `Conf.Save()`（`model/conf.go:881`）改写回默认 ⇒ **重启后用户设的值自己变回去**，weights 另只给一句硬编码英文提示 | 高（读写两端 + 归一化点 + 落盘点均已定位） | 未提 issue |
-| D1 | 第三方同步表单的**非空校验只加在 S3 一侧**：`syncUi.ts:425-433` 仅 `configKey === "s3"` 时逐个字段查空，WebDAV/Local 无此检查；内核侧同样只有 `validateSyncS3`（`model/sync.go:673-701`），`SetSyncProviderWebDAV`（`:702-730`）全文无空值校验 → 清空 Endpoint 仍提示保存成功 | 中 | 未提 issue |
-| D1c / I2 | 同一表单的 `Timeout (s)` / `Concurrent Reqs` 清空后 `parseInt("") → NaN`，经 `JSON.stringify` 变 `null`（契约 `apicontract/sync.go:61-63` 为 `optional,nullable`），内核 `util.NormalizeTimeout`/`NormalizeConcurrentReqs` 归一为 60 / 8 / 1 后由响应回填 ⇒ 输入框里的数字**自己变化**且无任何提示 | 中 | 未提 issue |
-| D1 | `remountOpenSettingTab` 的「详情层白名单」只覆盖 2 类：`setting/mount.ts:56` 匹配 `.config-entry-visibility__view, [data-decision-profile-view]`，而 AI 页还有 `config-ai-provider__view`（非决策视图）、`config-agent-capability__view`、`config-agent-user-skills__view`；该白名单由 `ae387ed6de` 逐次追加（上一版只匹配 entry-visibility），说明它是**按事故逐个补的闭合集合** | 中（触发需「详情已打开且焦点不在 tab 内」＋一次外部刷新） | 未提 issue |
+| D1（新 P67）/ C | 设置 - 鉴权 - 加密笔记本 的「跟随系统锁屏」**保存后不回写读取来源**：`accessTab.ts:789-797` 的 `save` 只发 `POST /api/notebook/setEncryptedNotebookFollowSystemLock`，内核 `notebook_system_lock.go:9-12` 走裸 `contractHandler`（无 `serializeSetting`、无 `setConf`/`settingChanged` 广播），而同组紧邻的 `notebookCrypto.autoLockMinutes`（`:775-784`）在回调里显式写回本地配置 → 关掉设置再打开，开关显示为**关闭**（读的是启动快照）；`refreshSettingConfig` 的 `system` 分支只同步 `api/oidc/accessAuthCode`（`setting/sync.ts:71-79`），其余 `system.*` 一律不刷 | 高（代码可证，未做运行期复现） | 已提 **#20419** |
+| B / D1c | 设置 - 闪卡 的 `requestRetention` **前端范围宽于内核接受范围**，且内核只在启动时归一化、**全程无任何提示**：`flashcardTab.ts:55-61` 允许取 0 与 1（内核 `model/conf.go:751-752` 是**开区间** `(0,1)`）；写入侧 `api/setting.go:340` 只兜底 `NewCardLimit`/`ReviewCardLimit` → 当次保存成功、`InitConf` 末尾 `Conf.Save()`（`model/conf.go:880`）改写回 0.9 ⇒ **重启后用户设的值自己变回去**。（原列的 `weights` 已改判为按设计，见下） | 高（读写两端 + 归一化点 + 落盘点均已定位） | 已提 **#20420** |
+| D1 | 第三方同步表单的**非空校验只加在 S3 一侧**：`syncUi.ts:425-433` 仅 `configKey === "s3"` 时逐个字段查空，WebDAV/Local 无此检查；内核侧同样只有 `validateSyncS3`（`model/sync.go:673-701`），`SetSyncProviderWebDAV`（`:702-730`）全文无空值校验 → 清空 Endpoint 仍提示保存成功 | 中 | 未提 issue（用户指定不提；S3 侧的校验本身正确，见下「S3 为何要求非空」） |
+| D1c / I2 | 同一表单的 `Timeout (s)` / `Concurrent Reqs` 清空后 `parseInt("") → NaN`，经 `JSON.stringify` 变 `null`（契约 `apicontract/sync.go:59-60` 为 `optional,nullable`），内核 `util.NormalizeTimeout`/`NormalizeConcurrentReqs` 归一为 60 / 8 / 1 后由响应回填（`syncUi.ts:446`）⇒ 输入框里的数字**自己变化**且无任何提示 | 中 | 已提 **#20421** |
+| D1 | `remountOpenSettingTab` 的「详情层白名单」只覆盖 2 类：`setting/mount.ts:56` 匹配 `.config-entry-visibility__view, [data-decision-profile-view]`，而 AI 页还有 `config-ai-provider__view`（非决策视图）、`config-agent-capability__view`、`config-agent-user-skills__view`；该白名单由 `ae387ed6de` 逐次追加（上一版只匹配 entry-visibility），说明它是**按事故逐个补的闭合集合** | 中（触发需「详情已打开且焦点不在 tab 内」＋一次配置刷新；`Model.ts:81` 的 WS `onopen` 也会触发） | 已提 **#20422** |
+
+### 一次性改判：`flashcard.weights` 的自动重置是**按设计**（勿再报）
+
+第 64 轮初判把 `weights`（前端无格式校验、内核按 `,` 分片要求长度 = 19）与 `requestRetention` 并列。
+提 issue 前按「去重必查 open + closed」回溯该符号的历史，发现 **#16181**「修改 FSRS Weights 之后无法打开思源」
+（`closed/completed`）正是为此：`ddfc1cbd66`（v3.3.6-dev1，2025-10-22）`:art: Improve FSRS weight initialization`
+引入了「重置为默认 + 推送提示」这套处理，且维护者在评论里明确写「17 个参数是上次升级 fsrs 时没有迁移，
+现在只能重置为 19 个了」「升级新版本后会自动重置」⇒ **自动重置是被接受的迁移行为，不是缺陷**。
+残留的只有文案问题：提示 `fsrs store weights length must be [19]` 是硬编码英文（`model/conf.go:762`），
+属 i18n 规范（AGENTS.md 要求 UI 文案进语言文件）而非本类判据，未单独提 issue。
+
+**方法论**：`requestRetention` 与 `weights` 的**症状与代码形态几乎相同**（都是「前端放行 → 内核启动时改写」），
+只有查过 issue tracker 才能分开 —— 前者从未被处理过，后者是**已接受的迁移策略**。
+「同族里两处同形」不构成「两处同类」，必须逐条回溯各自的 issue 历史。
+
+### 附：第 3 条「S3 为何要求非空 Endpoint」的权威依据（供后续判定参考）
+
+结论：**S3 侧要求非空是正确的，不得报为「过严」**。依据：
+
+1. dejavu 的 S3 客户端**无条件**执行 `o.BaseEndpoint = aws.String(s3.Conf.S3.Endpoint)`
+   （`cloud/s3.go:582` 附近）；`BaseEndpoint` 被置为非 nil（哪怕指向空串）即被 AWS SDK 视为
+   「用户指定了自定义端点」，而 SDK 生成的 endpoint 规则集要求合法绝对 URI，否则报
+   `endpoint rule error, Custom endpoint \`\` was not a valid URI` —— **不存在「空 ⇒ 回落到 AWS 默认地址」的路径**。
+2. 这个错误曾**原样透出到用户界面**（数据历史 - 数据快照）并刷满内核日志，
+   即 **#19497**「Selecting the S3 sync provider without an endpoint shows a raw S3 SDK error」
+   （`closed`），修复提交 `1c9a902231`（`:bug: Validate S3 configuration before saving and cloud access`）。
+   诉求原文即「校验必填项（Endpoint、Access Key、Secret Key、Bucket、Region），**以本地化提示拒绝，
+   而不是先落盘一份不可用的配置**」⇒ 维护者已接受该前提。
+3. 因此第 3 条的定性应是「**#19497 的修复不完整**」：同样不能为空的 WebDAV 与 Local 没有得到校验
+   （WebDAV 侧 `gowebdav.NewClient("")` → `FixSlash("") == "/"`，请求无主机名；
+   Local 侧 `SetSyncProviderLocal` 校验的是 `filepath.Abs("")` = 进程工作目录，空值可通过并落盘）。
+   **未提 issue**（用户指定），但这是可复用的检查法：**一次「加必填校验」的修复要按 provider 枚举核对，
+   而不是只加在触发事故的那一个上**（与 P49 同源：改进只落到同族的一个实现）。
 
 ### 已核对为干净（勿重复投入）
 
@@ -4493,6 +4526,14 @@ lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核�
 5. **子代理的候选必须逐条重读关键代码**：本轮两路各自命中同一条（`requestRetention`）合并为一条；
    另有 2 条候选在主线重读后改判（`maximumInterval` 边界不可见；`[data-decision-profile-view]` 未过滤 `fn__none`
    属**作者明写的意图**，反证是 `aiDecisionUi.ts:165-166` 的注释）。
+6. **提 issue 前的 open+closed 检索会改变结论，不只是去重**：本轮 `weights` 与 `requestRetention`
+   症状与代码形态几乎相同，但 #16181 显示前者的自动重置是**已接受的迁移策略**（维护者原话「只能重置为 19 个了」），
+   后者从未被处理过。⇒ **同族里两处同形 ≠ 两处同类**；判据是把符号名拿去查 issue 历史，再决定是否立论。
+   这条对「同族改进只落到一个实现」（P49）同样适用：**先确认同族每一项的既往处理结论是否相同**。
+7. **「一次加必填校验的修复」要按 provider/枚举逐项核对**：本条最初被写成「S3 过严、WebDAV 过松」，
+   回查后正相反 —— S3 的空端点在 SDK 层是**硬失败**（`BaseEndpoint` 非 nil 即视为自定义端点，空串不是合法 URI），
+   维护者已因此在 #19497 里加了校验；真正的问题是**同一修复没有落到 WebDAV 与 Local 上**。
+   判「同族校验不对称」前，先读**权威侧为何要校验**（此处是依赖库的失败模式），否则会把正确的收紧报成缺陷。
 
 ## 第六十五轮（2026-10-10）：内核「被丢弃的 error 返回」定向审计（判据 D1q / D1m / D1；新增模式 P68）
 
