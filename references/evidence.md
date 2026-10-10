@@ -4494,6 +4494,123 @@ lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核�
    另有 2 条候选在主线重读后改判（`maximumInterval` 边界不可见；`[data-decision-profile-view]` 未过滤 `fn__none`
    属**作者明写的意图**，反证是 `aiDecisionUi.ts:165-166` 的注释）。
 
+## 第六十五轮（2026-10-10）：内核「被丢弃的 error 返回」定向审计（判据 D1q / D1m / D1；新增模式 P68）
+
+**范围**：用户要求「内核应该有些地方是直接忽略函数返回的错误的，审计一下是否实际存在问题」。口径是**全内核**
+（`kernel/**` 非测试 Go 源码），不限目录。基线 `dev` @ **`ba2a683a0a`**（`HEAD == origin/dev`，0/0，工作树干净）。
+**未提 issue**（用户只要求审计）。
+
+**机械筛选（一次性工具，不入 skill）**：用 Go 自身的 `go/parser` + `go/ast` 写只读扫描器（放在审计临时目录，
+不进仓库），对 **880** 个非测试文件做两遍 AST：① 收集「返回类型含 `error` 的函数/方法名」；
+② 找出**表达式语句形式的调用**（Go 允许丢弃返回值）、`_ = f()`、`defer f()`、`go f()`。
+产出 **1115 处**：`bare` 753 / `defer` 288 / `blank` 70 / `go` 4。按被调名排序，头部是
+`Close` 411、`Save` 114、`RemoveAll` 98、`Status` 95、`Remove` 62、`Write` 60。
+**这 1115 条绝大多数是噪声**（排除口径见 B 节）；真缺陷 2 条，全部来自对候选的定向语义核查。
+
+**为什么不能只按「有没有 `_ =`」判**：Go 里 `f()` 作为表达式语句合法，返回值被**静默**丢弃；
+反之 `_ = f()` 也可能是「有意 best-effort」。判据只能落在**失败之后发生什么**。
+
+### A. 本轮发现
+
+- **D1q / P49 第一形态 + D1m / P35（中低）——MCP `repo` 工具的 `checkout` 丢弃错误、报假成功**：
+  `kernel/mcp/tools/repo.go:172` 裸调 `model.CheckoutRepoDirect(id)`，第 175 行无条件返回
+  `CallToolResult{... Text: "checkout to snapshot: " + id}` 且未置 `IsError`。
+  权威侧（同一能力的另一个对外表面）是 CLI：`kernel/cli/cmd/repo.go:165` 为
+  `if err := model.CheckoutRepoDirect(id); err != nil { return err }`，由提交 **`acc5751cef6`**
+  （`:bug: Report failed CLI exports and repository operations` / `#19459`）引入；
+  `git show --stat acc5751cef6` 只改 `kernel/cli/cmd/{block,export,repo,sync}.go` + 测试 +
+  `kernel/model/{repository,sync}.go`，**没有触碰 `kernel/mcp/`**；而 `#19459` 的修复建议第 4 条原文是
+  「让 `CheckoutRepoDirect`（以及 `SyncDataUpload`/`SyncDataDownload` 这类同步入口）返回结果，
+  **CLI 据此设置退出码**」⇒ 属**既存**缺陷被同族改进「照出来」的**第二个对外表面**，不是本轮引入。
+  可达性已核实：`checkoutRepo` 在 `Conf.Repo.Key` 为空时返回 `errors.New(Conf.Language(26))`；
+  `ensureRepoSnapshotComplete`（`kernel/model/asset_download.go:442-445`）在快照不存在时返回错误。
+  **MCP 侧没有替代通道**：`repo.go` 内其余 11 个动作（`repoList:103/118`、`repoCreate:135`、`repoTag:151`、
+  `repoUntag:162`、`repoDiff:186`、`repoSearch:228`、`repoPurge:243`、`repoFileGet:255`、`repoFileRollback:266`、
+  `repoFileOpen:281`、`repoFileExport:293`）全部置 `IsError: true`，`kernel/mcp/tools/` 全仓共 329 处、
+  **无任何把 `util.PushErrMsg` 转成 `IsError` 的 helper**（grep `util.Push` 只命中 `PushReloadFiletree`/
+  `PushReloadProtyle`/`PushEvent`）；`RepoTool` 未设 `AgentOnly`，`externalMCPToolAllowed`
+  （`kernel/mcp/server.go:142`）会把它投影到外部 `/mcp` 端点 ⇒ 外部 MCP 客户端只能看工具文本。
+  **测试盲区**：`kernel/mcp/tools/` 有 `asset_test.go`/`block_test.go` 等，但**没有** `repo_test.go`；
+  同一提交却在 CLI 侧新增了 `kernel/cli/cmd/repo_failure_test.go` 断言非零错误。
+- **P68（新）/ D1 + D1i 变体（中低）——引用锚文本刷新的落盘错误被丢弃，形成「内存 / SQL / 界面已更新、`.sy` 未更新」**：
+  `kernel/model/push_reload.go:481` 的 `indexWriteTreeUpsertQueue(tree)`（= `treenode.UpsertBlockTree` +
+  `writeTreeUpsertQueue` → `filesys.WriteTree`，写 `.sy`）与 `kernel/model/index_fix.go:534` 同形，
+  返回值均被丢弃；同族 25 个调用点里另外 22 个都检查（`block.go:732`、`box_doc.go:265`、`heading.go:458`、
+  `listitem.go:101`、`blockial.go:129` …）。**关键取证是写序**：`commit()` 的带校验写循环在
+  `kernel/model/transaction.go:2987-2999`（`writeTransactionTree`，出错即 `return`），而
+  `tx.changedRootIDs = refreshDynamicRefTexts(tx.nodes, tx.trees)` 在 **`:3013`**，即**刷新发生在校验写之后**；
+  代码自己在 `:2797` 注释写明 `GetMutatedRootIDs` **「不含 `refreshDynamicRefTexts` 刷新的引用树」**；
+  且 `refreshDynamicRefTexts0` 对不在 `updatedTrees` 里的引用树走 `LoadTreeByBlockID`（`push_reload.go:432-436`），
+  这些树**从不在 `tx.trees` 里**。`:481` 还被三条**无事务**路径复用（`push_reload.go:321` 的 `ReloadProtyle`、
+  `blockial.go:290` 的异步 goroutine、`transaction.go:3322` 的 `flushUpdateRefTextRenameDoc`），那三条连提交循环都没有。
+  后果：`refreshDynamicRefTexts0` 已 `sql.UpdateRefsTreeQueue(refTree)`（`:475`）并投递 UI 推送，内存块树也已
+  `UpsertBlockTree`，于是**界面与 SQL 显示新锚文本、磁盘 `.sy` 保留旧锚文本**，重启或重建索引后锚文本回退、
+  且与 SQL 索引不一致。触发条件是 `.sy` 写盘失败（磁盘满 / Windows 上被同步客户端或杀软占用），
+  `filesys.WriteTree`（`kernel/filesys/tree.go:489`）只 `logging.LogErrorf`，不通知用户。
+
+### B. 已审查并驳回 / 已核对为无害（勿重报）
+
+- **REST `POST /api/sync/performSync`（Mode 3）丢弃 `SyncDataUpload`/`SyncDataDownload` 的错误不是缺陷**：
+  契约为 `define[PerformSyncRequest, Null]`（`kernel/apicontract/contracts.go:836`），响应类型是 `Null`、
+  没有承载同步结果的数据位；前端两个调用点（`app/src/sync/syncGuide.ts:208`、`:248`）都 `fetchPost` 不传回调；
+  结果经 WS `syncing` 广播 + `Conf.Sync.Stat` 投递（`app/src/index.ts:261` → `processSystem.ts`）；
+  `kernel/api/contract_sync_test.go:108-109` 只钉**请求校验**（`{"mobileSwitch":true,"upload":"ignored"}`→0、`{}`→-1），
+  从未断言同步执行失败时的 code ⇒ 属**异步触发语义**，与 CLI「终态操作必须回报退出码」**不是同一族**。
+- **MCP `sync upload`/`download`（`kernel/mcp/tools/sync.go:66`、`:71`）：降为一致性问题**。
+  失败原文通常**已经**随 `Conf.Sync.Stat` 出现在返回文本里（`kernel/model/repository.go:2053/2072/2083/2131/2148/2159/2252/2352`
+  均为 `Conf.Sync.Stat = msg` 后紧随 `Conf.Save()`），缺的只是 `IsError`；但**早退分支**
+  （`checkSync` 为假、未取得 `lockSyncRequest`）返回哨兵错误却**不写 Stat**（`kernel/model/sync.go:128-135`），
+  此时展示的是上一次的旧文案。定性为「错误标记缺失」，不是「误导性成功」。
+- **`kernel/model/transaction.go:1530` 丢弃 `indexWriteTreeUpsertQueue` 的错误属冗余**：
+  该处的树来自 `getAttrViewBoundNodes` → `tx.loadTree`，必然在 `tx.trees` 内，`commit()` 的带校验写
+  （`:2987-2999`）会重写同一对象，失败经 `TxErrCodePushMsg` → `util.PushTxErr` 弹给用户。
+- **`Conf.Save()` 的约 100 个裸调用点**（`kernel/api/setting.go` 19 处、`kernel/model/{sync,crypto,repository,conf}.go` 等）：
+  `Save()` → `saveLocked()` → `save0()`，写失败时 `logging.LogErrorf` + **`util.ReportFileSysFatalError(err)`**
+  （`kernel/util/runtime.go:330-346`，末尾 `os.Exit(logging.ExitCodeFileSysErr)`）⇒ 进程直接退出，是**有意设计**。
+- **`defer x.Close()` / 裸 `Close()`（411 处）**：绝大多数是 `resp.Body`/`stream`/`reader`/`file` 释放；
+  真正决定产物完整性的写入方在交付路径上**都检查了**（`kernel/api/export.go:583-595` 的
+  `zip.AddDirectory`/`zip.Close` 失败即 `Failure` + 删除半成品；`kernel/model/notebook_bundle.go:217-227`
+  的 `archive.Close()` 失败即 `return ""`）。错误分支里的 `_ = zip.Close()` 是清理，不影响结论。
+- **`os.Remove` / `os.RemoveAll` / `os.MkdirAll` 的丢弃（约 150 处）**：清理与建目录，后续写入各自上报。
+- **名字碰撞造成的假候选**（按名匹配返回 `error` 的函数会大量误报）：`av/calc.go` 的 `sum.add(...)`、
+  `mcp/tools/*` 的 `register(X)`、`plugin/*` 的 `worker.Run(fn)`/`body.finish()`、
+  `heif/cache.go` 的 `container/list.Remove`、`api/lute.go` 的 DOM `Remove()`、`strings.Builder.Write`、
+  `plugin/crypto` 的 `block.Encrypt/Decrypt`、`conf.Secrets.Encrypt/Decrypt`（无返回值）、
+  `cmd.Exec` 与 server 的 void 派发 `Exec`、`db.Exec`（返回 `(Result, error)`）——必须再用**接收者类型**核实。
+
+### C. 附录观察项（未取证）
+
+- `kernel/model/conf.go:1141` `util.WriteWorkspacePaths(workspacePaths)` 丢弃返回值（「打开上次工作空间」失效，无提示）。
+- `kernel/model/plugin.go:462` `savePetals0(tmp)`、`kernel/model/storage.go:829` `setRefUsed(used)`、
+  `kernel/model/file.go:1391` `SetBlockAttrs(retID, {"tags": …})`、`kernel/mcp/client/oauth.go:148/162`
+  `_ = putOAuthCredential(...)`（失效凭据的清空未持久化，下次启动重读旧值再判一次失效）。
+- `kernel/model/import.go:111`、`kernel/agent/session.go:104`、`kernel/model/push_queue.go:57`、
+  `kernel/sql/index_queue.go:62`、`kernel/model/{assets,emojis,themes}_watcher*.go`、`kernel/api/repo.go:137`
+  的 `_ = os.MkdirAll(...)`；后续写入各自有错误日志，未取证是否可达用户可见后果。
+- `kernel/model/notebook_archive.go:563`、`kernel/model/notebook_archive_import.go:135/141` 的
+  `_ = rollbackNotebookArchive*`（回滚失败被丢弃，主错误已返回）。
+
+### D. 方法论增量
+
+1. **「直接忽略函数返回的错误」这个主题，机械层必须限定在「失败之后发生什么」，否则 1000+ 候选全是噪声。**
+   本轮 1115 处里 `Close`+`defer`+`RemoveAll`+`Conf.Save()` 就占了大半，且都是有意设计。
+2. **Go 特有的两个坑**：① `f()` 作为表达式语句合法，返回值被**静默**丢弃（`errcheck` 类 linter 抓的正是它），
+   所以判据不能只看 `_ =`；② 按**名字**匹配返回 `error` 的函数会大量误报（`add`/`register`/`Run`/`Write`/`Close`/`Exec`
+   跨包同名），必须结合接收者类型。本次扫描器用 `go/ast` 而非正则，就是为了至少拿到真实调用形态。
+3. **`Remove`/`RemoveAll`/`Close` 的丢弃要按「消费方是不是产物本身」分级**：写 `zip`/`gzip` 的 `Close`
+   决定产物完整性、必须查；释放 `http.Response.Body` 的不必查。
+4. **「带校验的写循环」与「提交后动作」的先后顺序决定后者有没有兜底**（→ 新 P68）：
+   只要写循环在刷新**之前**，刷新路径就没有兜底，而它在无事务入口上更完全没有。
+5. **挑战门第一轮把 P68 判为「不是问题」，第二轮以写序证据推翻**——第一轮的「无 error 通道 + 派生内容可自愈」
+   是**技术断言**，按「降级理由本身也要过门」必须再验；验法就是读「兜底写入」与「被检验写入」的**行号先后**。
+   若只看「函数有没有 error 返回值」，会得出与事实相反的结论。
+6. **同一个「假成功」家族在同一提交里只修了一个对外表面**（CLI），但**并非所有表面都该回报**——
+   本轮的 REST 端点契约是 `Response[Null]` + WS 投递（已驳回），MCP 才是与 CLI 同族。
+   **判「同族」前先按投递通道分组**，不能按「都调了同一个 model 函数」分组。
+7. **同族计数必须自己复核**：我一度把 `indexWriteTreeUpsertQueue` 说成「26 个调用点、23 处检查」，
+   实际是 **25 个调用点、22 处检查**（第 26 条命中是函数定义本身）。挑战门第二轮抓出了这个 ±1，
+   说明「用 grep 计数」时**必须剔除定义行**。
+
 ## 如何更新本文
 
 每轮审计后追加：
