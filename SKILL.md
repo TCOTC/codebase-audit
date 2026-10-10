@@ -974,7 +974,7 @@ test 数量增长后迅速失真：本地全量一跑就红、CI 恒绿，于是
 | 结论取决于**运行期行为**（耗时 / 内存 / IO / 落盘次数 / 阈值上限） | [运行时量测](./references/runtime-measurement.md) | 仪器盲区表（mmap 不计入进程 IO 计数、系统磁盘计数器不可用）、五步测量协议（静默基线 / 异步屏障 / 冷热缓存 / 分离进程 / overlay 变体）、判据陷阱、可复制骨架；含「先确认代码路径真的执行」的必做项 |
 | 审一个 PR / commit / diff | [差分审查模式](./references/diff-review.md) | 按 diff 定范围、三类必查（漏改 / 新引入 / 声明不符）、本模式特有误报 |
 | 过挑战门 | [挑战门](./references/challenge-gate.md) | 两轮对抗审查（审发现）+ 四问审查（审修法） |
-| 需要某条判据的细节 | [模式库](./references/patterns.md) | P1–P66 的定义、跨领域实例、检查法、修法陷阱 |
+| 需要某条判据的细节 | [模式库](./references/patterns.md) | P1–P67 的定义、跨领域实例、检查法、修法陷阱 |
 | 修复 / 架构调整 / 验证 | [修复与架构调整手册](./references/repair-playbook.md) | 授权边界、爆炸半径、变体分析、修法阶梯、架构判据、验证闭环、高危改动清单、模板 R1 |
 | 写「既往记录」字段 | [实证数据](./references/evidence.md) | 历轮发现登记表（去重的第二来源）与量化结论 |
 | 修改本 skill | [维护规范](./references/contributing.md) · [更新记录](./references/changelog.md) | 追加与整理规范、版本管理、编辑坑；历次变更历史 |

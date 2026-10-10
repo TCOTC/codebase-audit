@@ -2211,3 +2211,43 @@ if newTags, matched := replaceSearchText(tags, method, keyword,
 **修法方向**：删除路径主动失效（停用/清理规则），或运行期降级（跳过失效规则、清空无法重放的撤销条目）。
 **修法陷阱**：把「自动停用」实现成前端行为不够——用户不打开规则面板就永远停不下来；
 且必须把「缺哪个字段」透出到用户可见提示，否则用户无法自救。
+
+### P67 设置项保存后不回写其读取来源（同族兄弟已回写）
+
+**对应判据**：D1（同族不对称）＋ C（状态保持）＋ D3c 家族（写读不同源）。
+
+**定义**：设置项的值**读自**某一处（内核配置 / `window.siyuan.storage` / 前端内存派生值），
+而保存路径**只把新值发往后端**，不再更新那处来源。于是同一次会话内界面重开、重挂载或切换标签页时
+显示的还是旧值——用户看到「改完又变回去」，并可能因此**再点一次**把它改错方向。
+
+**为何出现**：值来源通常是启动或首次挂载时抓的一份快照；写 `save` 时只想到「把值送出去」。
+同族里往往已有兄弟项完成了回写（响应回调赋值、或后端 `setConf` 全量广播触发整份替换），
+于是**同一分组内相邻两项一个回写一个不回写**——这是本形态最强的信号。
+
+**检查法（三步，全在前端）**：
+
+1. **列读取来源**：默认 `readConfig` 是 `getAtPath(window.siyuan.config, id)`；有覆盖实现的项目另有
+   `window.siyuan.storage`、cookie、模块级派生值。同一分组内把每项的来源写成一列。
+2. **问写完有没有回写该来源**。三个可能通道：① `save` 的响应回调里赋值；
+   ② 后端 `BroadcastByType("main", "setConf", …)` 全量广播 → 前端整份替换配置对象；
+   ③ 保存后主动 `GET` 一次配置。三者皆无 ⇒ 候选。
+3. **判可达性**：确认那处来源在用户重开界面前不会被别的通道刷新。
+   本轮的关键一步是读后端的**通知合并函数**——本仓库 `refreshSettingConfig` 对 `system` 命名空间
+   **只同步 `api/oidc/accessAuthCode` 三个字段**，其余 `system.*` 一律不刷，
+   所以「有没有 WS 通知」根本不是决定因素，**字段白名单才是**。
+
+**本仓库实例（第六十四轮）**：`app/src/config/tabs/accessTab.ts:785-798` 的
+`system.encryptedNotebookFollowSystemLock` 保存路径只 `fetchPost("/api/notebook/setEncryptedNotebookFollowSystemLock", …)`，
+无回调；后端 `kernel/api/notebook_system_lock.go:9-12` 是裸 `contractHandler`（不经 `serializeSetting`，
+不广播）；而同组紧邻的 `notebookCrypto.autoLockMinutes`（`accessTab.ts:775-784`）在回调里显式
+`window.siyuan.config.notebookCrypto.autoLockMinutes = value`。⇒ 关闭设置再打开，开关显示为**关闭**。
+
+**修法方向**：在 `save` 的响应回调里赋值（最小、最安全）；或让后端端点走
+`serializeSetting`/`notifySettingChanged` **并**把它加入通知合并函数的同步字段列表。
+**修法陷阱**：只加 WS 通知而不加同步字段列表同样无效——合并函数按**字段白名单**同步，
+通知到了也只是重新读一遍同一份被忽略的响应。
+
+**为什么值得单独成模式**：它既不是 B（两份实现漂移），也不是 D3c（字段不存在）——
+**路径、字段名、类型全都对，缺的是写完之后那一步**。任何静态一致性检查（字段集合比对、
+读写路径比对、类型检查）都抓不到；只有把「读取来源」与「写完后的动作」分别列出并与
+**同一分组内的相邻项**对照才会暴露。

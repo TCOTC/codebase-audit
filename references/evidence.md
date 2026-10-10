@@ -4452,6 +4452,48 @@ lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核�
 5. **子代理产出仍是候选**：本轮两路共 6 条候选（含 3 条明确排除 + 4 条观察项），主线采纳 4 条并逐条重读关键代码后上报；
    其中「`FindReplaceInBox` 无条件回写」由子代理提出、主线补上了「同族已有 `WriteTreeIfUnchanged`」这一权威依据。
 
+## 第六十四轮（2026-10-10）：设置界面定向审计（判据 D1 / D3c / B；新增模式 P67）
+
+范围：`app/src/config/**`（16 个标签页 / 约 250 个条目）＋ 其内核契约侧（`kernel/conf/*.go`、`kernel/model/conf.go`、`kernel/api/setting*.go`）。
+取证基线 `dev` @ `734b8ac9a7`（与 `origin/dev` 同步、工作树干净）。三路只读子代理侦察 + 主线逐条重读关键代码；5 条候选全部过挑战门。
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| D1（新 P67）/ C | 设置 - 鉴权 - 加密笔记本 的「跟随系统锁屏」**保存后不回写读取来源**：`accessTab.ts:789-797` 的 `save` 只发 `POST /api/notebook/setEncryptedNotebookFollowSystemLock`，内核 `notebook_system_lock.go:9-12` 走裸 `contractHandler`（无 `serializeSetting`、无 `setConf`/`settingChanged` 广播），而同组紧邻的 `notebookCrypto.autoLockMinutes`（`:781-784`）在回调里显式写回本地配置 → 关掉设置再打开，开关显示为**关闭**（读的是启动快照）；`refreshSettingConfig` 的 `system` 分支只同步 `api/oidc/accessAuthCode`（`setting/sync.ts:71-79`），其余 `system.*` 一律不刷 | 高（代码可证，未做运行期复现） | 未提 issue（用户只要求审计） |
+| B / D1c | 设置 - 闪卡 的两个 FSRS 项的**前端范围宽于内核接受范围**，且内核只在启动时归一化：`flashcardTab.ts:55-61` 允许 `requestRetention` 取 0 与 1（内核 `model/conf.go:751-753` 是**开区间** `(0,1)`），`flashcardTab.ts:68-73` 的 `weights` 无任何格式/数量校验（内核 `:759-785` 要求 `,` 分隔且长度 = 19）；写入侧 `api/setting.go:340-373` 只兜底 `NewCardLimit`/`ReviewCardLimit` → 当次保存成功、`InitConf` 末尾 `Conf.Save()`（`model/conf.go:881`）改写回默认 ⇒ **重启后用户设的值自己变回去**，weights 另只给一句硬编码英文提示 | 高（读写两端 + 归一化点 + 落盘点均已定位） | 未提 issue |
+| D1 | 第三方同步表单的**非空校验只加在 S3 一侧**：`syncUi.ts:425-433` 仅 `configKey === "s3"` 时逐个字段查空，WebDAV/Local 无此检查；内核侧同样只有 `validateSyncS3`（`model/sync.go:673-701`），`SetSyncProviderWebDAV`（`:702-730`）全文无空值校验 → 清空 Endpoint 仍提示保存成功 | 中 | 未提 issue |
+| D1c / I2 | 同一表单的 `Timeout (s)` / `Concurrent Reqs` 清空后 `parseInt("") → NaN`，经 `JSON.stringify` 变 `null`（契约 `apicontract/sync.go:61-63` 为 `optional,nullable`），内核 `util.NormalizeTimeout`/`NormalizeConcurrentReqs` 归一为 60 / 8 / 1 后由响应回填 ⇒ 输入框里的数字**自己变化**且无任何提示 | 中 | 未提 issue |
+| D1 | `remountOpenSettingTab` 的「详情层白名单」只覆盖 2 类：`setting/mount.ts:56` 匹配 `.config-entry-visibility__view, [data-decision-profile-view]`，而 AI 页还有 `config-ai-provider__view`（非决策视图）、`config-agent-capability__view`、`config-agent-user-skills__view`；该白名单由 `ae387ed6de` 逐次追加（上一版只匹配 entry-visibility），说明它是**按事故逐个补的闭合集合** | 中（触发需「详情已打开且焦点不在 tab 内」＋一次外部刷新） | 未提 issue |
+
+### 已核对为干净（勿重复投入）
+
+- **D3c 跨语言键集合**：脚本提取 `app/src/config/**` 的 228 个点分字面量，逐个解析 `kernel/conf/*.go` + `model/conf.go` 的 JSON tag 路径，
+  **无一条落在「父结构存在但字段缺失」**；唯二例外是 `appearance.__themeMode`（虚拟项，`readConfig`/`save` 成对覆盖）
+  与 `editor.image`/`editor.slash*`（`entryVisibility/catalog.ts` 的菜单 `data-id`，非配置路径）。
+- **设置项读写路径**：225 个注册项的 `readConfig` 与 `save` 一一对应，无「读 A 写 B」。
+- **`save`/`readValue` 缺省**：access/app/about 无 `defaultSave` 但逐条传了显式 `save`；`/api/setting/patch` 走 `endpoint.Decode(merged)`，非法结构会被拒。
+- 机械扫描（三个脚本限定 `app/src/config`）：14 / 28 / 30 条候选，逐条回读**无新真缺陷**——
+  重复字面量全是 `sync.*` 设置项 id（即 `data-id` 本身）与既有路径常量；未转义候选全是 i18n 文案、数值量或已转义变量的调用点；
+  a11y 的 K2/A6 为 0，K5 的 10 条与已知 `.b3-switch` 同族。
+
+### 方法论增量
+
+1. **「设置项是否生效」有三条独立的机械核对线，必须分开跑**：① id ↔ 内核 struct 字段（D3c，本轮脚本化，零产出）；
+   ② `readConfig` ↔ `save` 的路径一致性；③ `save` 是否存在。只跑 ① 会漏掉本轮第 1 条——
+   那条的**路径全对**，缺的是「写完之后回写读取源」这一步。
+2. **「保存成功」之后还有第四件事：把结果写回读取源**（→ 新 P67）。设置项的值来源有三类——内核配置、
+   `window.siyuan.storage`、前端内存派生值。**同一分组内相邻两项一个回写一个不回写**是最强信号
+   （本轮 `autoLockMinutes` ↔ `encryptedNotebookFollowSystemLock` 同组相邻）。
+3. **判「前端范围宽于内核范围」必须先判边界是开区间还是闭区间，再看归一化发生在哪一刻**：
+   只在启动归一化 ⇒ 症状是「重启后自己变回去」；每次写入归一化 ⇒ 症状是「保存后立刻跳回」。
+   同一文件里 `maximumInterval` 的 UI 上限 36500 **恰好等于**内核的重置目标 ⇒ 用户不可见，
+   **不能与 `requestRetention` 并列上报**（已写入误报表）。
+4. **前端表单校验与内核校验的宽窄对比要按字段做，不能按表单做**：同一张表单里 S3 有 5 个字段的空值检查、
+   WebDAV 一个都没有，属同族不对称，而不是「有意留给内核」。
+5. **子代理的候选必须逐条重读关键代码**：本轮两路各自命中同一条（`requestRetention`）合并为一条；
+   另有 2 条候选在主线重读后改判（`maximumInterval` 边界不可见；`[data-decision-profile-view]` 未过滤 `fn__none`
+   属**作者明写的意图**，反证是 `aiDecisionUi.ts:165-166` 的注释）。
+
 ## 如何更新本文
 
 每轮审计后追加：
