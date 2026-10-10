@@ -4652,6 +4652,67 @@ lock-screen / unlock-screen）穿过 Electron 主进程、渲染进程与内核�
    实际是 **25 个调用点、22 处检查**（第 26 条命中是函数定义本身）。挑战门第二轮抓出了这个 ±1，
    说明「用 grep 计数」时**必须剔除定义行**。
 
+## 第六十五轮（续，2026-10-10）：前端「回调不检查 code」的口径 + P68 变体分析
+
+**范围**：`app/src`（前端错误处理，与上一节的内核「丢弃返回值」互补）+ P68 的同族变体扫描。
+已提 issue（英文标题、中文正文，base64 逐字段回读一致）：**#20423**（MCP repo checkout 报假成功）、
+**#20424**（动态锚文本刷新的落盘错误被丢弃）。
+
+### A. 前端「回调不检查 `response.code`」的权威口径（未发现缺陷，但拿到了一条可复用判据）
+
+`app/src/util/fetch.ts:127` 写的是 `if (processMessage(response) && cb) { cb(response); }`，而
+`app/src/util/processMessage.ts:101-105` 是：
+
+```
+// 小于 0 为提示：-2 提示；-1 报错，大于 0 的错误需处理，等于 0 的为正常操作
+if (response.code < 0) { showMessage(...); return false; }
+return response;
+```
+
+⇒ **`code < 0` 时前端不会调 `cb`（已弹过提示）；`code > 0` 时 `cb` 会被调用且必须自己处理。**
+因此「回调不检查 `code`」只在**端点能返回正数 code** 时才是缺陷，否则恒为安全（回调只在 `code >= 0` 时被调）。
+
+**正数 code 端点清单（机械取得，`Failure[...](1..)`）**：`asset/statAsset`（`api/asset.go:47-80`）、
+`bazaar/*`（`api/bazaar.go:52-251`，大量 1）、`inbox/*`（`api/inbox.go:29-49`）、
+`network/forwardProxy`（`api/network.go:149-245`，**1–10 每个数字含义都不同**）、`plugin`（`api/plugin.go:70-74`，3/4）、
+`ref/getBacklink*`（`api/ref.go:68/148/253`）、`refGlobal`（`api/ref_global.go:32-48`）、`repo/getCloudSpace`（`api/repo.go:119`）、
+`search/findReplace`（`api/search.go:132`）、`sql/select|exec`（`api/sql.go:62/67/71`）、`sync/getBootSync`（`api/sync.go:402`）、
+`system/uploadCustomFont`（`api/system.go:986`，**400**）。
+
+**逐类回读结果：全部已守卫，零缺陷**（与上一轮内核侧的结论相反，这是正面结论）：
+`block/popover.ts:215`（`code === 0 && response.data`）、`:307`（显式分支 `code === 1` 即资源缺失）、
+`boot/globalEvent/command/global.ts:189`（`code !== 1`）、`layout/dock/Inbox.ts:337/348/363/470`（`code !== 0`）、
+`layout/dock/BacklinkContent.ts:1263`、`:2078`、`layout/dock/backlinkRefFilterMenu.ts:26`、`protyle/util/reload.ts:80`（均 `code !== 0 || !data`）、
+`config/tabs/syncUi.ts:500`（先判 `code === 1` 再判 `!== 0`）。
+
+**反面（看似缺守卫、实为安全）**：`search/util.ts:1576` 与 `mobile/menu/search.ts:333` 直接读 `response.data.pageCount`/`.blocks`，
+但 `fullTextSearchBlock`（`api/search.go:331-407`）只返回 `-1` 与 `0`，`semanticSearchBlock` 只返回 `Success`
+⇒ `code < 0` 时 `cb` 根本不会被调用。**不要把这两个当缺陷报**。
+
+### B. P68 变体分析：其他「派生内容写入未检查」的调用点
+
+按修复手册第 10 步做同族扫描：`av.SaveAttributeView` 在 `kernel/` 有约 290 个调用点（绝大多数在测试里、且带错误检查），
+**生产代码里裸调（丢弃返回值）的只有 5 处**，逐个回读后：
+
+| 位置 | 结论 |
+|---|---|
+| `kernel/model/attribute_view.go:7552` | keyIDs 订正（修复型归一化），下次 Parse 会重做 ⇒ **自愈，无害** |
+| `kernel/model/transaction.go:2340` | 在 `go func(){ time.Sleep(100ms) … }()` 里重建分组，属派生内容且调用方结构上无法收错误 ⇒ **无害** |
+| `kernel/sql/av.go:1260` | 把已不存在的字段从各视图布局里剔除，属修复型清理 ⇒ **自愈，无害** |
+| `kernel/model/template.go:832` | 虽丢弃返回值但**显式 `logging.LogErrorf`** ⇒ 按「有日志」归为已处理 |
+| `kernel/model/assets.go:2865` | 网络资源本地化后把新路径写回数据库 mAsset 字段；同一函数族里**文档树写入是检查的**（`writeTreeUpsertQueue`）⇒ 观察项（需磁盘写失败才触发） |
+| `kernel/model/attribute_view.go:7932` | 删除字段时清空**关联数据库**上引用该字段的汇总并 `SaveAttributeView`（丢弃返回值）⇒ 观察项；注意第六十/六十三轮已把「删关系字段后 `Rollup.RelationKeyID` 未清」列为需跑内核才能判定的观察项，**本处不重复立论**，新增的只是「其落盘错误也被丢弃」 |
+
+### C. 方法论增量
+
+1. **前端的「忽略返回值」与内核形态不同，必须先读网关契约再扫**：`fetchPost` 是一个**主动抑制回调**的网关
+   （`code < 0` 不调 `cb`），所以「回调没写 code 判断」的假阳性率极高。判据是「该端点能否返回正数 code」，
+   而正数 code 清单可以机械取（grep `Failure[...]([1-9]`）。
+2. **同一主题在前端与内核两侧的结论可以完全相反**：内核 1115 处丢弃点里 2 条真缺陷，前端 59 个候选里 0 条。
+   记录这种「一侧干净」的结论与记录缺陷同等重要——它让下一轮不再重复投入。
+3. **网关的自解释注释是权威依据**：`processMessage.ts:101` 的注释明写「大于 0 的错误需处理」，
+   这就是「回调必须判 code」的依据；没有它就只能靠推断。
+
 ## 如何更新本文
 
 每轮审计后追加：
