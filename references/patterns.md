@@ -2292,3 +2292,58 @@ if newTags, matched := replaceSearchText(tags, method, keyword,
 
 **与 P29 的区别**：P29 是**异步队列**不传播错误（调用方等排空即认为成功）；
 本条是**同步**写盘错误被丢弃，且成因是**写序**而不是队列语义。
+
+### P69 取值域被声明却从未被任何代码执行，而「双路径一致」型测试结构上无法发现
+
+**对应判据**：D1（同族不对称）＋ D3（闭合集合漏项）＋ J2（无判定力测试）。
+
+**定义**：配置字段的**合法取值域**在项目里被声明过（struct 字段注释写出枚举值、前端设置项声明 `min`/`max`、
+契约注释写出范围），但该段的 `Normalize*` 函数**从未执行这个约束**；更关键的是，仓库里已有的
+「双路径一致性」守护测试**结构上无法发现它**——它只比对启动路径与写入路径的输出是否相等，
+而**共同缺失的约束在两条路径上都缺失**，于是恒等通过。
+
+**为何出现**：约束在两处被**声明**、零处被**执行**。声明方（字段注释、前端 spec、契约注释）与执行方
+（`Normalize*`）之间没有任何机械联系；同时「两路径一致」（I1）被误当成「归一化正确」。
+于是一个字段的约束可以整段缺失而**同时**逃过字段集合测试（只比键名）与路径一致性测试（只比相等）。
+
+**检查法（四步）**：
+
+1. **提取「声明」**：conf struct 字段注释里的枚举（`// 0 文档分组，1 全局锚文本升序，2 全局锚文本降序`）、
+   前端 spec 的 `min`/`max`、契约注释里的范围。三类都是项目自己的声明，可作权威依据。
+2. **提取「执行」**：把**全部** `Normalize*` 与 `Set*` 方法体里的 `.Field` 引用收集成集合，
+   并按调用关系求**传递闭包**（本次实测：67 struct / 517 字段，仅 173 个被触及）。
+3. **取差集** → 候选。**差集本身只是候选**：自由文本、凭据、纯开关本就不需要约束，
+   只保留**带数值/枚举语义**的那批。
+4. **用真实 Normalize 函数跑越界值**，并且**必须注入对照组**——同一函数内已知有钳制的兄弟字段。
+   没有对照组，「原样输出」分不清「实现确实不钳制」与「探针没调到真实代码」。
+
+**本仓库实例（第六十七轮，探针实测）**：`conf.NormalizeEditor`（`settings_normalize.go:60`）对
+`BacklinkGlobalSort=7`、`BacklinkBlockSort=-9`、`FloatWindowMode=42`、`HeadingEmbedMode=-3`、
+`DatabaseAttrClickMode=99`、`DatabaseAttrViewMode=-1`、`CodeTabSpaces=5` **全部原样通过**，
+而同函数的 **`FontSize=200 → 16`**（对照组，证明探针有效）；同批实测 `NormalizeSearch` 的 `Limit=1000000`、
+`NormalizeFileTree` 的 `MaxListCount=1000000`、`NormalizeExport` 的 `BlockEmbedMode=9`、
+`NormalizeSync` 的 `AssetDownloadMode=7`、`NormalizeSystem` 的 `AutoLaunch2=9`/`LockScreenMode=3`、
+`NormalizeFlashcard` 的 `ReviewMode=7`、`NormalizeRepo` 的 `IndexRetentionDays=100000`、
+`NormalizeAI` 的 `Agent.MaxToolCallRounds=-7` 均原样通过。
+其中 `search.limit` 与 `fileTree.maxListCount` 的**前端声明了 `max=10240`**，内核只有下限 ⇒ 前后端不一致。
+
+**守护测试的盲区（J2 实例，必须一并记录）**：`TestConfAllSectionsShareStartupAndWriteNormalization`
+（`model/conf_regression_test.go:16`）的实现是「同一份 JSON 分别过启动归一化与段写入归一化，再 `bytes.Equal`」，
+而它的输入语料只有 4 个字段（`editor.fontSize:200`、`sync.interval:1`、`repo.indexRetentionDays:0`、`ocr.*`），
+**其余字段全是 Go 零值，且零值恰好是合法值**（`CodeTabSpaces=0` 是合法档位）⇒ 该测试对「两路径共同缺失的约束」
+恒等通过。`TestSettingContractFieldsMatchConf`（`api/setting_contract_fields_test.go:17`）只比键名。
+**因此「已经有一致性测试」不构成「该段字段受约束」的证据。**
+
+**修法方向**：在对应 `Normalize*` 里补钳制，并使**内核与前端声明同界**。
+
+**修法陷阱**：
+- 不要「照抄相邻字段的边界」——同族不同字段的合法域不同（`FontSize` 是 9..72，`CodeTabSpaces` 是离散 `{0,2,4,6,8}`）。
+- **前端有上限、内核无上限时，必须补内核**：只调前端无效，因为 API、配置导入、插件与手写 `conf.json` 全都绕过前端。
+- 钳制只对越界值生效、不改动合法值 ⇒ 对已发布配置安全；但仍须按仓库的兼容性条款确认是否要迁移或告警。
+- **先确认该字段是「归一化」还是「迁移」的职责**：本仓库 `NormalizeExport` 有意不处理废弃的 `BlockRefMode`，
+  那由版本化迁移 `MigrateExportBlockRefMode`（`model/conf_migration.go:95`）与写入端点负责，
+  且 `conf/defaults_purity_test.go:51-54` 明确断言这一职责分离 ⇒ 这类**不是**本条缺陷。
+
+**与既有模式的区分**：与 P14 / D3「闭合集合漏项」不同——那是**成员表**缺项（`switch` 漏 `case`），
+本条是**约束从未被任何代码执行**；与 P49 / D1q「同族改进只落到一个实现」不同——那是改进者**找到了一个**实现，
+本条是**零个**实现；与 B「语义漂移」不同——那是**两份实现不一致**，本条是**没有实现**。
