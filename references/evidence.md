@@ -4807,6 +4807,89 @@ selection regressions with alpha9 test repairs`），且该提交**正好改了�
   确定结果，只因为**另一个实例根本没有被放进注册表**（map 里只有 `false` 那个）。
   **判「按锁地址查找 spec」这类间接寻址时，必须同时确认「同一把锁下是否只注册了一个 spec」**。
 
+## 第六十八轮（2026-10-12）：#20464 修复验证（判据 A / D1 / C；5 项落地、1 项部分、我方 2 项判断被驳回）
+
+上一轮（第 66 轮）验证出的 9 项候选里，用户据其中 4 项 CONFIRMED 与 1 项实项提了 **#20464**。
+维护者以 `c741cb1517`（`:recycle: Unify configuration merge and resource write paths`，28 文件 /
++398−244）实现并将 issue **closed / reason=completed**（2026-10-11T17:32:09Z）。
+本轮是**修复验证**，不是新审计。基线 `dev` @ `97777ed13f`（0/0；`c741cb1517` 的父提交是 `ff736c6f3c`，
+其后再有一个无关的 bug 修复提交 `97777ed13f`）。
+
+### A. 逐项验证结果
+
+| # | 第 66 轮的结论 | 本轮核实 | 关键证据 |
+|---|---|---|---|
+| 1 | `mergeSettingJSON` 与 `MergeConfJSON` 逐行相同 | **已修** | api 层那份已删除，全仓仅剩 `model/conf_patch.go:20`；`setting_patch.go:127` 改调 `model.ConfSectionPatchJSON`；测试改为直接调 `model.MergeConfJSON` |
+| 2 | `confSectionSpecs()` 每次重建 23 个 spec + 按互斥量地址反查 | **已修** | 改为 `confSectionSpecFactories`（`conf_specs.go:13`，`map[string]func() registeredSection`，**只构造被请求的那一段**）；`updateConfSection[T](spec *SectionSpec[*T], mutate)`（`conf_section.go:48`）**显式接收 spec**，反查循环删除 |
+| 3 | `patchSetting` 分两条合并路径 | **部分** | 合并**算法**已统一到 `MergeConfSectionJSON`；`keymap` 的手工拼串改成结构化 `json.Marshal(struct{ Data json.RawMessage })`。**两条入口仍在**（api 层 14 + model 层 system/repo/sync），按设计保留：api 层需保留 `endpoint.Decode` 的入站契约校验与各处理器领域动作 |
+| 4 | `applySectionLocked` 的 `expected`/`checkSource` 是死参 | **我方错** | 见 C 第 1 条 |
+| 5 | `api.notifySettingChanged` 是 3 行纯转发 | **已修** | 函数删除，3 个调用点（含 `api/sync.go:496`）改直调 `model.NotifyConfChanged` |
+| 6 | 机械命名 | **已修** | `confSectionValue0/1` → `flashcard, warning`（`conf_normalize.go:52-54`）；`conf*Snapshot` → `appearance`/`editor`/`fileTree`（`conf_runtime.go:59-77`） |
+| 7 | 前端写端点散落多处 | **已修（我方计数有两处错）** | 新增 `app/src/config/util/resourceConfig.ts` 作 6 组端点的统一入口；见 C 第 2、3 条 |
+
+### B. 「统一入口」类修复的正面样本（可复用）
+
+1. **入口模块 + 守卫测试同步扩展**：不只是新建 `resourceConfig.ts`，还把既有的机制守卫
+   `config/util/configWriteCoverage.test.ts` 一并扩展——把 `setWorkspaceDir`/`setUILayout`
+   从 `dedicated` 白名单**移除**，并新增一条正则断言「任何文件直接对
+   `setWorkspaceDir|setUILayout|importConf|removeCriterion|setOutlineStorage|setNotebookConf`
+   发起 `fetchPost`/`fetchSyncPost`/`postFile` 即 `assert.fail`」。
+   **判据**：确认「统一入口」类修复是否完整，要看**是否同时加了机器可执行的防回退断言**，
+   而不只是看新模块是否存在。
+2. **入口测试直接断言线上载荷**：`resourceConfig.test.ts` 用 `runInNewContext` + 自替换 `#if MOBILE`
+   伪指令的方式，把桌面/移动两条分支都编译执行，逐条 `assert.deepEqual` **完整的 (url, body) 序列**，
+   并覆盖回调成功/失败两种协议。
+   **判据**：前端「收拢调用点」的重构，最有价值的证据是**重构前后请求体逐字节相同**。
+3. **为「因形状特殊而不得不特判」的分支补专项测试**：`keymap` 是唯一请求形状 ≠ 段形状的命名空间，
+   新测试用带转义引号的键（`quoted"key` / `Ctrl+\\`）断言 `{"general":{"cleared":null,"keep":"F1","quoted\"key":"Ctrl+\\"}}`，
+   同时断言 `nullable` 字段被归一化、以及**合并后的结果仍受入站契约约束**
+   （`merged settings bypassed the nested request contract`）。
+   **判据**：修复里出现「特判」时，必须有一条只针对该特判的测试，否则下次统一化会把它静默吃掉。
+
+### C. 我方被驳回的两项（均为方法性问题，已入误报表）
+
+1. **`applySectionLocked` 的 `expected` / `checkSource` 不是死参**（第 66 轮第 4 项）。
+   我用 `applySectionLocked(` 检索调用点，得到 3 处「非 At 形态」，据此判定 `conf_spec.go:111` 的
+   `if checkSource && !reflect.DeepEqual(old, expected)` 永不执行。**实际**：`applySectionLockedAt(`
+   在 `applySectionLocked` 之后紧跟 `A` 而非 `(`，**带 `(` 的模式匹配不到**，而它才是真正的调用者——
+   `conf_patch.go:54`（`spec.patch` 补丁路径）与 `conf_section.go:62`（`updateConfSection` 增量更新路径）
+   都以 `checkSource=true` 调用。维护者原话：「第 4 项的并发检测实际由增量更新及补丁路径调用，需要保留」。
+   **教训**：检索函数名**不带尾部 `(`**；`Xxx`/`XxxAt`/`XxxWith`/`XxxLocked` 这类后缀族在本仓很常见。
+2. **`util/fetch.ts` 不是调用点**（第 66 轮第 7 项）。我用裸 URL 正则普查「同一端点被几个文件调用」，
+   把 `fetch.ts` 计为 `setWorkspaceDir`/`setUILayout` 的第 3 个调用点。**实际**：该文件里的 URL 只出现在
+   **字符串相等比较**里——`fetch.ts:20` 用它选超时时长、`fetch.ts:122` 用它决定内核被中断时是否
+   `ipcRenderer.send(SIYUAN_QUIT)`——是响应/错误处理。维护者原话：「`util/fetch.ts` 的相关内容是响应处理
+   和请求跟踪，并非额外的写调用」。**教训**：URL 普查必须匹配**调用形态**
+   （`/(?:fetchPost|fetchSyncPost|postFile)\(\s*"(\/api\/[^"]+)"/g`），裸串会把 `===` / `.includes(...)` 算进来。
+3. **`setLocalStorageVal` 已有统一入口**（同一项）。**实际**：`protyle/util/compatibility.ts:945` 的
+   `setStorageVal` 是唯一写点（含 `readonly`/`isPublish` 守卫、按 key 的数据清洗、内存镜像回写），
+   全仓约 40 处都走它；另一处命中仍是上一条的 `fetch.ts`。维护者原话：「`setLocalStorageVal` 已通过
+   `setStorageVal` 统一写入，继续沿用该入口」。**教训**：判「缺少统一入口」前先确认该端点是否**已经有一个
+   被广泛调用的包装函数**。三条误报同源：**用字面量普查代替调用图普查**。
+
+### D. 本轮实际执行的验证（供后续复用命令）
+
+- `go test ./model/ -run "TestConf|TestApplyConf|TestConfigurationDefaults|TestExportMode|TestPasswordChange|TestMasterPassword"` → ok 6.177s
+- `go test ./conf/` → ok 5.630s；`go test ./api/ -run "TestSetting|TestPatchSetting|TestContract"` → ok 5.586s；`go test ./apicontract/...` → ok 6.216s
+- `gofmt -l model api apicontract conf` → 无输出；`go vet ./model/ ./api/` → **仅 1 处既有告警**
+  （`api/contract_block_remaining_test.go:86` copy-lock，来自 `320f6ecd1d`，**不在本提交改动文件内**，
+  取证方式：`git diff --name-only c741cb1517^ c741cb1517` 不含该文件 ⇒ 与本次修复无关）
+- `pnpm run api:check --petal ../../petal` → `717 typed method/path pairs checked`
+- `pnpm run test`（前端）→ 1427 行输出、**0 个 `not ok`、0 个 AssertionError**；
+  本提交新增的 4 条测试全部通过（`desktop and mobile configuration writes use the shared gateway`、
+  `resource writes preserve desktop and mobile payloads and both failure protocols`、
+  `desktop/mobile configuration import prepares optionally and restarts only after success`）
+
+### E. 已核对为干净（勿重复投入）
+
+- 全仓检索 `mergeSettingJSON` / `notifySettingChanged` / `confSectionSpecs` 均为 **0 命中** ⇒ 无悬挂引用。
+- `keymap` 包装语义**等价**：`conf.Keymap` 是 `map[string]any`（`conf/layout.go:20`），
+  `request.patch`（`apicontract/setting_patch.go:48`）是**解包后**的 keymap 对象（不含 `data` 外壳），
+  故「先按段合并、再包一层 `{"data": …}`」与旧实现「base/patch 各包一层再合并」结果相同。
+- `c741cb1517` **未触碰** `kernel/apicontract/`、`app/src/types/api/`、`legacy_routes.json` ⇒ 无需重新生成契约产物。
+- `outlineStorage.test.ts` 与 `layouts.test.ts` 的改动只是**把注入点从 `fetchPost` 换成新的入口函数**，
+  断言值未变 ⇒ 属测试适配而非放宽。
+
 ## 如何更新本文
 
 每轮审计后追加：

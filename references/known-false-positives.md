@@ -153,6 +153,40 @@
   一对已知会命中与不命中的样本）；否则「无异常」与「没跑到」不可区分。协议的完整版见
   [运行时量测](./runtime-measurement.md) 第 0 条。
 
+- **「grep 带尾部 `(` 会漏掉同前缀的变体函数」**（2026-10-12，第 68 轮）：审 `applySectionLocked` 时我用
+  `applySectionLocked(` 检索调用点，得到 3 处「非 At 形态」，据此判定 `conf_spec.go:111` 的
+  `if checkSource && !reflect.DeepEqual(old, expected)` **永不执行**（死参 + 死代码）。
+  **实为误报**：`applySectionLockedAt(` 在 `applySectionLocked` 之后紧跟的是 `A` 而非 `(`，
+  **模式匹配不到**，而它恰是真正的调用者——`conf_patch.go:54`（补丁路径 `spec.patch`）与
+  `conf_section.go:62`（增量更新路径 `updateConfSection`）都以 `checkSource=true` 调用，守卫是活的。
+  维护者在关闭说明里直接指出「第 4 项的并发检测实际由增量更新及补丁路径调用，需要保留」。
+  **判别法**：检索函数名时**不要带尾部 `(`**，先取裸名，再人工区分「定义行 / 调用行 / 同前缀变体」；
+  若确实要按调用形态过滤，用 `applySectionLocked[^A-Za-z]`。
+  **同类陷阱**：`Xxx` / `XxxAt` / `XxxWith` / `XxxImpl` / `XxxLocked` 这类后缀族在本仓库很常见
+  （`applySectionLockedAt`、`replaceConfSectionLocked`、`mergeConfSection`），带 `(` 的检索必然漏掉后缀族。
+  **代价**：这一条把我送进了「报告一个不存在的死代码」，并在公开 issue 里写成结论。
+
+- **「文件里出现端点 URL 字符串」≠「该文件是调用点」**（2026-10-12，第 68 轮）：我用
+  `"(\/api\/\w+\/\w+)"` 正则在 `app/src` 里做「同一端点被几个文件调用」的普查，把
+  `app/src/util/fetch.ts` 计为 `setWorkspaceDir`/`setUILayout` 的第 3 个调用点。
+  **实为误报**：该文件里的 URL 只出现在**字符串相等比较**里——`fetch.ts:20` 用它选超时时长
+  （30s 而非 0）、`fetch.ts:122` 用它决定内核被中断时是否 `ipcRenderer.send(SIYUAN_QUIT)`
+  ——是响应/错误处理，不是请求发出点。维护者指出「`util/fetch.ts` 的相关内容是响应处理和请求跟踪，
+  并非额外的写调用」。
+  **判别法**：URL 串的调用点普查必须匹配**调用形态**而非裸串，即
+  `/(?:fetchPost|fetchSyncPost|postFile)\(\s*"(\/api\/[^"]+)"/g`；天然把 `===` / `.includes(...)` 排除。
+  本轮修正后 `setWorkspaceDir` 与 `setUILayout` 的真实调用点各为 2 个而非 3 个。
+
+- **「某端点有多个文件引用 ⇒ 缺少统一入口」**（同一轮）：`setLocalStorageVal` 被报为「2 个文件分头调用」，
+  实为**已有统一入口**——`protyle/util/compatibility.ts:945` 的 `setStorageVal` 是唯一写点
+  （含 `readonly`/`isPublish` 守卫、按 key 的数据清洗、内存镜像回写），全仓约 40 处都走它；
+  另一处命中仍是上一条的 `fetch.ts` 字符串比较。维护者指出「`setLocalStorageVal` 已通过
+  `setStorageVal` 统一写入，继续沿用该入口」。
+  **判别法**：判定「缺少统一入口」前，先确认**该端点是否已经有一个被广泛调用的包装函数**
+  （本仓形态：`protyle/util/compatibility.ts`、`config/util/configApi.ts`、`config/util/resourceConfig.ts`
+  这类 util 模块）；只看端点串的出现次数会把包装器自身也算成「散落」。
+  **同源教训**：三次误报（本三条）都出自同一类「用字面量普查代替调用图普查」。
+
 ## 维护
 
 - 新误报由审计轮次追加（`SKILL.md` 执行流程第 9 步）
