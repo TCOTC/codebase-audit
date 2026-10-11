@@ -4774,6 +4774,39 @@ return response;
   `go test ./model/ -run 'TestConf|TestApplyConf|TestConfigurationDefaults|TestExportMode|TestPasswordChange|TestMasterPassword'`）
 - 9 个新增文件除 `conf_runtime.go`/`conf_normalize.go` 的机械命名外，无其他生成痕迹
 
+### E. 补记：基线在我验证之后又前进了一个提交
+
+验证收口时 `git status` 干净但 **HEAD 已从 `fbcaa64bf1` 移到 `70a867b8fc`**（`:bug: Fix appearance refresh and PDF
+selection regressions with alpha9 test repairs`），且该提交**正好改了两个被验证文件**：
+`kernel/api/setting.go`（2 行）与 `kernel/model/conf_specs.go`（11 行）。改动内容：
+
+```go
+// api/setting.go:564 附近
+- issues, applyErr := model.ApplyConfSection("appearance", appearance)
++ issues, applyErr := model.ApplyAppearanceSetting(appearance)
+
+// conf_specs.go
+- "appearance": appearanceSectionSpec(),
++ "appearance": appearanceSectionSpec(false),
++ func ApplyAppearanceSetting(value *conf.Appearance) ([]Issue, error) {
++     return Apply(appearanceSectionSpec(true), value)
++ }
+- return old.Lang != next.Lang || …
++ return refreshResources || old.Lang != next.Lang || …
+```
+
+**逐项复核结论不变**（`conf_patch.go`、`setting_patch.go`、`conf_spec.go`、`conf_section.go`、
+`conf_snapshot.go`、`conf_notify.go`、`conf_runtime.go`、`conf_normalize.go` 在区间内**零改动**）：
+第 1、4、5、6a、6b、7、9 项完全不受影响；第 2 项仍分两路（`appearance` 只是换了 api 层的调用目标，
+仍在 api 层合并）。**第 3 项反而多一条证据**：
+
+- `appearanceSectionSpec()` 现在有**两个实例**（注册表里的 `false` 与 `ApplyAppearanceSetting` 的 `true`），
+  二者**共享同一把互斥量**（`newSectionSpec` 取的是 `&field.cell.mu`，即锁属于 `ConfSection` 而非 spec），
+  差别只在 `refreshResources` 闭包。这说明 **`WriteLock` 是「段身份」而 `SectionSpec` 是「行为」**，
+  注册表因此不再是 `appearance` 段行为的唯一来源——`updateConfSection` 按互斥量指针查找之所以还能得到
+  确定结果，只因为**另一个实例根本没有被放进注册表**（map 里只有 `false` 那个）。
+  **判「按锁地址查找 spec」这类间接寻址时，必须同时确认「同一把锁下是否只注册了一个 spec」**。
+
 ## 如何更新本文
 
 每轮审计后追加：
