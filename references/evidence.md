@@ -4713,6 +4713,67 @@ return response;
 3. **网关的自解释注释是权威依据**：`processMessage.ts:101` 的注释明写「大于 0 的错误需处理」，
    这就是「回调必须判 code」的依据；没有它就只能靠推断。
 
+## 第六十六轮（2026-10-12）：配置系统重构（#20443）两提交的 9 项「可统一 / 简化」候选验证（判据 A / D1 / C；3 项 CONFIRMED、3 项需收窄、3 项 REJECTED）
+
+**口径**：用户要求「确认这 9 项」（对上一轮代码评审提出的候选做验证）。**基线**：`dev` @ `fbcaa64bf1`
+（`git rev-list --count HEAD..origin/dev` = 0；工作树仅含用户自己的两处前端改动）；被验证提交
+`6f97d80a3d`（446 文件 / +7069−3443）与 `3ef2c223f2`（31 文件 / +467−187）均为 HEAD 祖先
+（`merge-base --is-ancestor` 退出码 0）。**去重**：本文与 `known-false-positives.md` 对本批**零登记** ⇒ 无重复立论风险。
+**未提 issue**（用户只要求确认）。全部按轨迹 B。
+
+### A. 验证结果
+
+| # | 候选 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | `mergeSettingJSON` 与 `MergeConfJSON` 重复 | **CONFIRMED** | `api/setting_patch.go:88-111`（24 行） vs `model/conf_patch.go:20-43`（24 行），函数名归一化后**逐行完全相同**（唯一差异是递归自调用名）。同一递归合并算法两份副本 |
+| 2 | `patchSetting` 的写入分两路 | **CONFIRMED（需收窄）** | 14 个命名空间在 api 层合并（`applySettingPatch`）， 3 个（system/repo/sync）在 model 层合并（`ApplyConfPatch` / `ApplySyncSettingPatch`）。**但**那 14 个的请求类型是 `struct{ SettingX; settingConfig }`（`apicontract/setting_input.go:38-60`），JSON 形状**等于**段形状 ⇒ 合并层级相同、可统一；`keymap` 是例外（请求形状 `{"data": Keymap}` ≠ 段形状，`api/setting_patch.go:200-203` 显式包装） |
+| 3 | `confSectionSpecs()` 每次调用重建全表 | **CONFIRMED** | `conf_specs.go:12-38` 每次调用构造 23 个 spec（含闭包与 Reactions 切片）；`conf_section.go:51-59` 为拿「同一个 spec」先建全表、再**按互斥量指针相等**线性查找；`conf_spec.go:148` 也每次重建 |
+| 4 | `applySectionLocked` 的 `expected`/`checkSource` 是死参 | **CONFIRMED** | `conf_spec.go:77-80`：`var expected C`（零值）+ `checkSource=false` ⇒ `:111` 的 `reflect.DeepEqual(old, expected)` 永不执行。3 个调用点（`conf.go:915`、`conf_patch.go:165`、`conf_spec.go:74`）全走非 At 版 |
+| 5 | 每次写入 2 次 JSON 往返，第二次克隆可省 | **REJECTED** | 事实成立（`spec.apply` 与 `applySectionLockedAt` 各 1 次），且 5 个调用点确实都传入已私有副本。**但克隆是刻意契约且有测试**：`TestConfDirectApplyClonesNestedInputs`（`conf_regression_test.go:164-183`）断言 `stored != input`、`stored.Markdown != input.Markdown`、且 apply 之后改 `input.Markdown.InlineMath` 不影响已发布快照；导出入口 `Apply` 被 `ApplyAppearanceSetting`（`conf_specs.go:71-74`）与测试直接调用 ⇒ **取舍而非缺陷** |
+| 6a | 机械命名痕迹 | **CONFIRMED** | `conf_runtime.go:62,64,66` 的 `confAppearanceSnapshot`/`confEditorSnapshot`/`confFileTreeSnapshot`（11 处）；`conf_normalize.go:52-54` 的 `confSectionValue0, confSectionValue1 := conf.NormalizeFlashcard(...)` |
+| 6b | 注释不是中文 | **REJECTED（假阳性）** | 统计把 19 行 AGPL 许可头算作英文注释。从 `package` 行截断后，9 个新增文件正文注释**全为中文**（10/10、3/3、5/5、20/20、6/6、2/2、3/3、12/12、1/1） |
+| 7 | `api.notifySettingChanged` 是纯转发 | **CONFIRMED** | `api/setting_patch.go:57-59` 函数体 3 行，仅调 `model.NotifyConfChanged(namespace)`；3 个调用点（`setting_patch.go:82`、`:239`、`api/sync.go:496`） |
+| 8 | 前端仍有多处未走 `config.set` | **CONFIRMED（数字与分类均需更正）** | 见 §B |
+| 9 | 单段写入叠两层互斥 | **CONFIRMED（安全）** | api 层 `lockSetting(namespace)`（`setting_patch.go:62-72`）+ model 层 `spec.WriteLock = &field.cell.mu`（`conf_spec.go:143`、`conf_snapshot.go:16-18`）。顺序固定（api→model），且 model **不引用** api 层互斥量 ⇒ 无反向持有、无死锁；`conf_patch.go:84-86` 的 `lockAssetSourceChange` 也在段写锁之前 |
+
+### B. 第 8 项：更正上一轮的两处数字与一处分类
+
+上一轮（代码评审）报的是「34 处 / 14 个文件」与「3 个端点未列入例外」。本轮按**端点集合 + 逐个分类**重测：
+
+- **写设置端点 36 处 / 26 个端点**（口径：`setting/set*`、`system/set*`、`sync/set*`、`repo/set*`、
+  `notebook/set*`、`system/import*`、`storage/set*`、`storage/remove*`、`graph/set*`）
+- 26 个端点里 **23 个属设计例外**（`storage/*` 本地偏好库、`notebook/*` 是 BoxConf、
+  `setUILayout`/`setWorkspaceDir`/`setBootAppearance`/`setSyncProvider`/`importConf`/`resetSettings`/
+  凭据类/`setGraphConf`/`setBazaarPetalDisabled`）
+- 原报的「3 个未列入例外」逐个复核后**全部不成立**：
+  - `importTLSCABundle`、`importCustomFont` 都是 `MultipartBody` + `SystemImportFileRequest{File *multipart.FileHeader}`
+    （`apicontract/contracts.go:1336-1337`）⇒ **文件上传，JSON patch 无法表达**，属正当例外；
+    错在**我上一轮的例外清单漏列了它们**，不是实现缺陷
+  - `setSnapshotMemo` 调 `model.SetRepoSnapshotMemo(ID, Memo)`（`api/repo.go`）⇒ 写的是
+    **按 ID 定位的快照备忘**，不是配置段；我的端点集合按命名 `repo/set*` 把它过度纳入了
+- **真实残留的是「同一端点被多个文件各自调用」**：`setWorkspaceDir`×3、`setUILayout`×3、`removeCriterion`×3、
+  `importConf`×2、`setOutlineStorage`×2、`setNotebookConf`×2、`setLocalStorageVal`×2
+
+### C. 本轮方法论增量
+
+1. **提取 Go 函数体不能用大括号计数**：源码里的字符串字面量（`[]byte("{")`）会让计数失真，
+   「函数体」被一路吃到下一个函数。**判据是找列 0 的 `}`**。我第一次判定「两份合并函数是否相同」时
+   因此差点得出错误差异清单（diff 里混入了后续函数）。
+2. **「注释语言」类指标必须先截断文件头**：本仓库所有 `.go` 都有约 19 行英文 AGPL 许可头，
+   不截断则**百分百误报**（已入 [已知误报](./known-false-positives.md)）。
+3. **反证优先查「有没有测试在钉住这个行为」**：第 5 项的「冗余克隆」被
+   `TestConfDirectApplyClonesNestedInputs` 直接驳回——**测试名就是一阶证据**。
+4. **按命名约定圈「同类端点」会过度纳入**：`repo/setSnapshotMemo` 名字像配置写入，
+   实际是按 ID 的领域操作。圈完集合必须逐个回读**是否真的写该存储**。
+5. **区分「实现缺陷」与「自己上一轮的文档缺口」**：第 8 项里两个 multipart 端点属后者——
+   **自己写的例外清单也要回读核对**，不能当权威用。
+
+### D. 已核对为干净（勿重复投入）
+
+- `conf/` 与 `model/` 配置相关测试全绿（`go test ./conf/`；
+  `go test ./model/ -run 'TestConf|TestApplyConf|TestConfigurationDefaults|TestExportMode|TestPasswordChange|TestMasterPassword'`）
+- 9 个新增文件除 `conf_runtime.go`/`conf_normalize.go` 的机械命名外，无其他生成痕迹
+
 ## 如何更新本文
 
 每轮审计后追加：
