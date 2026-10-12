@@ -5747,6 +5747,75 @@ ristretto README 的 FAQ：
 之间的已知边界；而 SiYuan 侧那次 `Del`（3 天前为字节预算引入）把这个边界暴露到了热路径上。
 库侧的问题（契约承诺 update 有保证、实现却可能丢）可作为上游反馈再报一例。
 
+## 第八十二轮（2026-10-13）：向上游 ristretto 提缺陷报告（新增 **P85、P86** + 3 条误报）
+
+**任务来源**：用户要求「确认问题真实存在并且有最小复现、确认问题确实由该上游的特定代码逻辑引起、
+确认没有相关的 open issue，然后才提 issue，并且使用英文、地道但准确的英语」。目标仓库只读，未改动任何源码。
+
+### A. 三项前置核查（结论）
+
+| 核查项 | 依据 |
+|---|---|
+| 问题真实存在 + 最小复现 | 纯 ristretto 的独立程序，在**最新版 v2.4.2** 上 **214/2000 = 10.7%** 丢失；v0.2.0 为 229/2000 = 11.45% |
+| 由特定上游代码引起 | `main` 的 `cache.go`：`Del` 同步删 + 排队 `itemDelete`（371-387）、`SetWithTTL` 同步 `storedItems.Update` 命中后标 `itemUpdate`（350-353）并早退返回 true（358-366）、`processItems` 的 `itemUpdate` 分支**只更新策略**（570-571） |
+| 无相关 open 条目 | 上游全部 open issue **只有 5 条**，逐条读过无一相关；20 组关键词（含反方向与同义表述）0 命中；**但** 把 PR 一并算上后发现 **PR #503** 是同类缺陷的在修修复（见下） |
+
+### B. 最强的证据不是「我认为」，而是**三处被违反的书面承诺**
+
+1. `Wait` 的文档注释（`main` cache.go:267-268）：「Wait blocks until all buffered writes have been applied.
+   **This ensures a call to Set() will be visible to future calls to Get()**」；
+2. README FAQ 原文（**从 `main` 重新取**，非本地副本）：「a Set call for a **new item (updates are
+   guaranteed)** isn't guaranteed to make it into the cache」；
+3. 维护者在 **#102** 的回复：「**However, if a key is already present in the cache, then any Sets for that
+   key would definitely get the updated value.**」
+
+而实测：`sets-dropped: 0`、`sets-rejected: 0`（**没走 FAQ 说的两条丢弃路径**）、
+**214 次失败每一次的 `Set` 都返回 `true`**。即「API 报告成功、屏障已过、值却不在」。
+
+### C. 机制（第二轮修正后定稿）
+
+`Del` 与 `Set` 在 store 层**没有相互定序**，而 `itemUpdate` 这条捷径假定「已写入的条目不会被移除」：
+
+1. `Del` 同步删除（377）后**入队** `itemDelete`（383）；
+2. 更早一轮的 `Set` 的 `itemNew` 可能仍在队列里；`setBuf` 是单 FIFO 通道，它会在上面那次同步删除**之后**
+   执行，把旧值写回 store；
+3. 本次 `Set` 在入队**之前**先做同步 `storedItems.Update`（350）——因第 2 步此刻命中，新值被**同步写入**，
+   条目标记为 `itemUpdate`，且按 358-366 的注释直接返回 true（不再走准入）；
+4. `processItems` 按 FIFO 处理：第 1 步入队的 `itemDelete` 排在本条**之前**，于是把第 3 步刚写入的值删掉；
+   紧随其后的 `itemUpdate` 分支**不写 store**（570-571）⇒ 条目最终不存在。
+
+**为何不是偶然**：第 3 步能命中，本身就证明「某个更早的 `itemNew` 已在同步删除之后写入 store」，
+从而该 `itemDelete` 排在它之后被处理——即必然晚于第 3 步的写入。**命中即必删，且不写回。**
+
+**此处我自己更正过一次**：草稿写的是「新值从未写入 store」，重读代码后发现同步 `Update` **确实会写入**，
+真正的时序是「写入 → 被排队的删除抹掉 → update 分支不写回」。已按正确版本发布（见误报表）。
+
+### D. 建单前的关键发现：**open PR 不是 open issue**（P85 的由来）
+
+枚举 open **issue** 只有 5 条、关键词也 0 命中，一度准备写「无重复」。但平台返回的 `issues` 端点
+**混装 PR**，把 PR 一并计入后发现 **PR #503「fix: preserve refreshed entries during TTL cleanup」（open）**
+修的是**同一类**缺陷（TTL 清理会删掉刚被 `Set` 刷新的条目），只是触发路径不同
+（`expirationMap.cleanup` vs `Del` 排队的 `itemDelete`），且它的 `DelExpired` 修法**不覆盖**本场景。
+已在 #506 下补评论（`6129827308`）显式说明「不是同一处、也不会被 #503 覆盖」，避免被误关为重复。
+
+### E. 另一个发布前修正：引文与行号必须取默认分支（P86）
+
+契约原话最初读自本地依赖副本 `…/ristretto@v0.2.0/README.md`；发布前改为从 **GitHub `main`** 重新拉取
+（确认 FAQ 段落仍在，否则整条论证失效），并把全部行号按 `main` 的 `cache.go` 重新核对。
+
+### F. 产出与回读
+
+- 新建 **dgraph-io/ristretto#506**「A Set that immediately follows a Del of the same key can be silently lost」
+  （title 73 字符 / body 9388 字符，与 payload **逐字节一致**，state=open）；
+- 评论 `6129827308`（688 字符，逐字节一致）说明与 #503 的关系。
+- 全文英文；同时列出与 #52（镜像方向的既有报告，维护者承认过）、#62（那一半修复）、#167、#102 的关系，
+  并给出两个**调用侧**候选缓解方向，主动询问 `Del` + `Set` 是否属于受支持的用法。
+
+### G. 本轮新增误报（3 条，见误报表）
+
+① 「我自己写的机制描述一定准确」（草稿的因果方向写错）；② 「open issue 只有 5 条 ⇒ 无相关报告」（漏掉 open PR）；
+③ 「文档承诺在最新版仍成立」（引用了本地依赖副本而非默认分支）。
+
 ## 如何更新本文
 
 每轮审计后追加：
