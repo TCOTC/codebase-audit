@@ -133,7 +133,8 @@
 | 「`go env GOEXPERIMENT` 为空 ⇒ 没有实验生效」 | 第七十三轮据此把 `jsonv2` 判为未启用 | **baseline 实验集合里的开关不会出现在 `GOEXPERIMENT` 里**：`exp.go` 的 `baseline` 映射（含 `JSONv2: true`）是默认值，只有**显式**开关才进该变量。查「某实验是否默认启用」要看 `internal/buildcfg/exp.go` 的 baseline，不是环境变量 |
 | 「用 `go1.26.5` 包装器跑就一定是用 1.26.5 工具链」 | 用它跑探针时输出 `go go1.27.2` | **包装器遵循 `go.mod` 的 toolchain 指令**：该探针的 go.mod 由 `go mod init` 写成 `go 1.27.2`，于是包装器切回了 1.27.2（在 `kernel/` 下不受影响，因为 `kernel/go.mod` 是 `go 1.26.5`）。判「A/B 两侧工具链真的不同」的**唯一可靠证据是被测代码自己打印的版本**（`runtime.Version()`），不是「我调用了哪个二进制」 |
 | 「并行加速/量测只是更快，没有代价」 | 用 N 路并发跑测试只关心墙钟 | **代价是机器本身**：被测命令若已并行（`go test` 按包、Jest 按文件、pytest-xdist），真实并行度是 **N × 内部并行度**。实测 16 核上 4 路 `go test ./...` ≈ 数十个重量级进程 ⇒ 机器在数分钟内完全无响应（Chrome 卡死、交互程序饿死），而**事后可用物理内存仍有 16.2 GB**（主导机制是 CPU + 磁盘 I/O 过订阅，不是内存耗尽）。**`go test` 不会因为被压垮而报错，它只是变慢** ⇒ 测量结果的可用性比机器的可用性先被牺牲，而后者不出现在任何数字里。规则：外层并发 ≤ 核数 / 内部并行度，并先用 `-p 1` 把内部并行关掉（见 P76） |
-
+| 「同名测试文件 ⇒ 重复覆盖」 | `app/src/**/<name>.test.ts` 与 `app/tests/<name>.test.js` 有 8 组同名（`agentStreamingMarkdown`/`backlinkRefresh`/`customFont`/`databaseRowNavigation`/`emojiFont`/`inlineMathSelection`/`pictureImages`/`verticalNavigation`），看着像同一模块被两套机制各测一遍 | **实测重叠为 0**：把两者的断言消息与用例名都抽出来（共 130 条），交集 **0 条** ⇒ 覆盖的是**不同方面**（`src/` 侧是 node 进程内的纯逻辑与解析，`tests/` 侧是 Electron 内的真实渲染与输入模拟）。**判「重复覆盖」必须比对断言/用例消息集合，不能靠文件名相同**（见 P77） |
+| 「字面断言数少 ⇒ 这个测试很薄」 | `AgentMarkdownBlocks.test.ts` 全文只有 **10 处** `assert.`，却花 16.9 s；`mobileUi.test.ts` 只有 **1 处**却花 6.0 s | **字面断言数会系统性低估两类形态**：① **循环驱动**——`AgentMarkdownBlocks` 的 3 个用例是「27 个样例 × 2 个前缀 × 每 113 字符一个边界」的嵌套循环，实际执行**上万次**断言，`assert.ok`/`assert.equal` 在源码里只出现 10 次；② **渲染侧字符串**——`tests/*.test.js` 把断言写进 `browserCases.toString()` 注入到 Electron renderer 里，外层只剩 `assert.match(stdout, /…passed/)` 一处。**判测试厚薄要用「执行了几次断言」，不能用源码里出现几次**；机械计数只能当候选（见 P77） |
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 
 上表是「不要报告」的过滤集，但历史上有条目**被错误地放进这里**，后来证实是真缺陷。
