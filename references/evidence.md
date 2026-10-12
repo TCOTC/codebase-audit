@@ -5350,6 +5350,57 @@ go         test -tags "fts5 sqlcipher" -count=1 -run '^TestSortConfAppendRecover
 **本轮未提 issue**：优化手段属「怎么做更快」，且第一条（分片）**依赖先修顺序耦合**，
 应由维护者决定是否值得改测试基建。
 
+## 第七十六轮（2026-10-12）：把 r75 的两项发现提成 issue（#20490、#20491）
+
+**用户要求**：「提 issue 吧」。基线 `dev` @ `8bd98ded4f`（0/0），目标仓库只读。
+
+**建单前的去重检索**（`gh api -X GET search/issues`，12 组：`test order dependency`、
+`tests depend on execution order`、`database is closed`、`CloseDatabase`、`kernel tests slow`、
+`model package test duration`、`test sharding -run`、`go test parallel`、`testing.Short`、
+`内核测试 慢`、`测试 顺序 依赖`、`测试 分片`）**均无重复**。命中的近似项与本次无关：
+#18733（map 顺序导致的不稳定，已修）、#19474（前端替身表过期）、#20480（我前几轮提的前端并发）。
+
+### 已提 issue（2 条，title/body 逐字段回读一致）
+
+| # | 标题 | 性质 | 位置 |
+|---|---|---|---|
+| **20490** | Some kernel model tests fail with `sql: database is closed` when run as a subset | 测试卫生缺陷（顺序耦合） | `model/clipboard_test.go:101-106` + 6 处关库不重开 |
+| **20491** | Improve kernel test throughput by running the model package as duration-balanced shards | 提速改进 | `./model` 的墙钟构成 |
+
+### #20490 的取证要点（本轮新取到的）
+
+把 r75 里「分片时冒出 `sql: database is closed`」查到了**可复现的最小条件**与**完整调用链**：
+
+1. **受影响用例自己不初始化库**：`TestPrepareRichClipboardAssetsDecryptsEncryptedNotebook`
+   （`model/clipboard_test.go:101`）只替换 `util.WorkspaceDir/DataDir/TempDir`，
+   但 `defer` 里调用 `LockBox(boxID)`。
+2. **调用链**：`LockBox`(`crypto.go:1529`) → `lockBoxWithPreparation`(`:1536`)
+   → `lockBoxWithPreparationHeld`(`:1542`) → `sql.FlushQueue`(`sql/queue.go:297`)
+   → `sql.beginTxForBox`(`sql/database.go:2129`) → `sql.beginTx`(`:1692`) 抛 `database is closed`。
+3. **最小复现**（本轮实测）：
+   - 单独 `-run '^TestPrepareRichClipboardAssetsDecryptsEncryptedNotebook$'` → **3/3 通过**
+   - 与任一会关库的用例同批 `-run '^(…|TestSortConfAppendRecoveryAtEveryWriteStage)$'` → **3/3 失败**
+4. **6 处「init 后 close 且不重开」**（用 `grep 'CloseDatabase('` 逐文件取行号，比 r75 的结论更精确）：
+   `model/embed_heading_export_test.go:54-61`、`model/import_notebook_as_document_fts5_test.go:159-169`、
+   `model/export_publish_test.go:80-88`、`model/file_doc_sort_test.go:74-81`、
+   `model/template_doc_tree_fts5_test.go:476-487`、`model/transaction_fold_fts5_test.go:501-510`。
+5. **CI 也在这个风险上**：`cd.yml` 的 `Test path fixtures with custom temporary directories` 步骤
+   带 `-run` 过滤跑 `./model`，且该步骤被 `continue-on-error` 放行 ⇒ 过滤集合一变就可能踩到，
+   而失败不会让 job 变红。
+
+### 方法论教训（本轮）
+
+- **「整包跑通过」不等于「这个用例是好的」**：只要它的清理依赖全局状态，它的结果就与「本次运行里还有谁」绑定。
+  判一个测试是否自足，要看它**自己有没有建立所需前提**，而不是看它在整套里绿不绿。
+  这与判据 J4（测试绑定实现结构）同族：都是「纯换运行方式就会变红」。
+- **`grep 'X('` 得到的清单要逐条看上下文再下结论**：`CloseDatabase(` 全仓命中 50 处，
+  但绝大多数是 `defer` 且各自 init（`api/` 与 27 处 `treenode.CloseDatabase()`），
+  真正构成缺陷的只有 `model/` 下那 6 处「init → close → 不重开」。**数量不是结论，上下文才是。**
+- 两条 issue 之间有**依赖方向**（#20491 的分片以 #20490 的修复为前提），正文里都写明了这一点，
+  避免维护者按任一条单独实施时踩空。
+
+**本轮未做代码修改**（只建单），目标仓库 `git status` 仍只剩用户原有的 3 个 SCSS 改动。
+
 ## 如何更新本文
 
 每轮审计后追加：
