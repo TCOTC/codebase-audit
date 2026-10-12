@@ -5125,6 +5125,82 @@ shard3 **388.4 s**/1254/fail=2、shard4 305.1 s/1074/fail=1。
    去重检索脚本直接把 `gh` 输出打到控制台时崩溃（`'gbk' codec can't encode character '\u2b06'`）。
    **检索结果一律写 UTF-8 文件再读**，不要直接 print。
 
+## 第七十三轮（2026-10-12）：内核（Go）测试耗时的定向量测（新增 **P74** + 3 条误报）
+
+**用户提问**：「内核测试的速度怎样？」基线 `dev` @ `8bd98ded4f`（0/0），本机 16 逻辑核 / Go 1.27.2。
+**目标仓库未被修改**（只读 + 量测），跑完已清理 `go test` 在源码树留下的 4 个未跟踪文件。
+
+### 规模与耗时（41 包 / 977 个测试文件 / 3731 顶层用例 + 4461 子用例）
+
+| 量 | 值 |
+|---|---|
+| 首次全量 `go test -tags "fts5 sqlcipher" ./... -count=1` | **283.4 s** |
+| 热态全量（构建缓存已热） | 238 s → **176.2 s** |
+| `model` 包单独跑 | 185.4 s → **165.0 s** |
+| Σ(各包自报 wall) | **928 s** ⇒ 并行度 3.5×（16 核未闲置） |
+| `go test ./...`（不带 `-count=1`，缓存冷） | 288.6 s |
+| CI（Windows runner，Go 1.26.5） | 35 包全 `ok`；`model` **122.996 s**；job 11.0 min（含 setup，且为 `continue-on-error`） |
+
+### 关键结构：wall 由**单个包**决定
+
+`go test -json` 的 `Time` 字段给出包级时间线（`%TEMP%\audit-go\timeline.py`）：
+
+- **前 47 s 只有 `agent` 在跑** —— 其余 40 个包在编译/链接测试二进制；所有包在 t=47 s 起同时执行。
+- **`model` 47.2 → 265.2 s（218 s），独自构成关键路径**；次慢的 `mcp/tools` 47.0 → 156.9 s（109.8 s），
+  其余 39 包最晚 156.9 s 结束。
+- ⇒ wall ≈ 编译 47 s + max(包) 218 s。**加核数或 `-p` 无效**，因为 Go 只在包之间并行。
+- **`t.Parallel()` 全仓仅 20 处且全在移植子树 `plugin/encoding`；`testing.Short()` 全仓 0 处**
+  ⇒ 包内串行、且没有 `-short` 快速档（`-run` 是唯一裁剪手段）。
+
+### 逐用例快慢的**两种条件对照**（同一机器、同一代码）
+
+| 用例 | 整轮 | 单独 `-run '^Name$'` | 放大 | 归属 |
+|---|---|---|---|---|
+| `TestElevatedProcessResult`（`internal/elevator`） | 36.67 s | **1.1 s** | **33×** | 争用假象 |
+| `TestAppearanceInstallUsesOrdinaryMetadata`（`bazaar`） | 34.26 s | **2.7 s** | **13×** | 争用假象 |
+| `TestFileQueryLimits`（`mcp/tools`） | 67.56 s | **49.9 s** | 1.35× | **真成本** |
+| `TestBazaarProjectOfflineGuardsAndEffects` | 11.24 s | 4.9 s | 2.3× | 部分争用 |
+| `TestPluginProjectRepeatedMutationsKeepBoundedRecoveryState` | 13.16 s | 13.9 s | 1.06× | 真成本 |
+| `TestSortConfAppendRecoveryAtEveryWriteStage` | 0.08 s | 5.3 s | — | 见下（失败） |
+
+用例耗时分布（顶层，n=3731）：`<10ms` 2135、`10–100ms` 1036、`0.1–1s` 494、`1–5s` 55、
+`5–20s` 8、`≥20s` 3。**≥1 s 的 66 条累计 303 s；≥5 s 的 11 条累计 205 s。**
+
+### 确定性失败：`model.TestSortConfAppendRecoveryAtEveryWriteStage`（4/4 子用例）
+
+- **现象**：`empty=true` 的 4 个子用例全部失败，报 `sort append separator does not match the source object`
+  （源自 `kernel/model/sort_conf_append.go:112`，经测试文件 `:173` 的 `t.Fatal(err)` 抛出）。
+- **机制（用独立探针复现，未改目标仓库）**：空对象 `{ }` 时 `newSortConfAppendRecord` 取
+  `Offset = bytes.LastIndexByte(data, '}') = 3`，于是 `verifySortConfAppend` 读的区间 `[0, Offset)`
+  **恰好把右括号切掉**，只剩 `" { "`；`json.Decoder.More()` 对「未闭合的 `{` 且还有内容」返回 **true**，
+  而空对象的 `Suffix` **不带前导逗号**，守卫要求 `More() == (Suffix[0] == ',')` ⇒ `true != false` ⇒ 报错。
+  探针实测：`empty=false` 得 `More()=true / sep=true` → 通过；`empty=true` 得 `More()=true / sep=false` → 报错。
+- **对照实验**：`{`、` { `、`{"a":1`（未闭合）→ `More()=true`；`{}`、` { }`（完整）→ `false`。
+  ⇒ `More()` 不能用来判断「源对象是否为空」。
+- **与 CI 的矛盾（如实记录，未闭合）**：该测试在 CI 那次运行的提交里**存在且被子用例名确认**
+  （`6f97d80a3d` 是两次的祖先；`git diff c612302fb674..HEAD` 对这两个文件为空），
+  CI Windows 日志 **35 个包 `ok`、0 条 FAIL**，而本地确定性失败。
+  已排除的两个假设：① **Go 版本**（CI 1.26.5 / 本地 1.27.2）——
+  两版 `encoding/json/stream.go` 的 `More`/`peek`/`refill`/`Token`/`readValue` **代码逐字符相同**；
+  ② **`GOEXPERIMENT=jsonv2`**（本地为空、`internal/goexperiment` 默认 `JSONv2=false`）。
+  **`-overlay` 在本环境未生效**（三种路径写法都试过；判据是错误文案没变、`logging.LogInfof` 行号仍是 `:276`），
+  故未能取到 CI 侧的实际取值。**结论按「置信度中」记录**，机制清楚、CI/本地差异未解释。
+- 备注：`git log -1 -- <两个文件>` 会把引入测试文件的 `1164b07631`(#20369) 与随后改实现的
+  `6f97d80a3d`(#20443) 混在一起；**用 `--follow` 单独查测试文件才能定位引入者**。
+
+### 内核测试步骤被 `continue-on-error` 放行（正面确认既有记忆）
+
+`cd.yml:218`（Linux）与 `:266`（Windows）的 `go test ./...` 都带 `continue-on-error: true`；
+job `success` 不代表测试通过。判「内核测试是否通过」必须下钻 job 日志数 `^ok ` / `^FAIL` 行。
+
+### 另记（既有、非本轮引入）
+
+`go vet -tags "fts5 sqlcipher" ./...` 退出码 1，两条既存告警：
+`agent/agent.go:1609:3: unreachable code`、
+`api/contract_block_remaining_test.go:86:33: call of json.Marshal copies lock value: ... model.Transaction contains sync/atomic.Int32`。
+
+**本轮未提 issue**（用户在问速度；失败测试的 CI/本地差异未闭合，需维护者复现后再定）。
+
 ## 如何更新本文
 
 每轮审计后追加：
