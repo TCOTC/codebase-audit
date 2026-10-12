@@ -5069,6 +5069,62 @@ shard3 **388.4 s**/1254/fail=2、shard4 305.1 s/1074/fail=1。
 
 **本轮未提 issue**（用户问的是方法可行性，且结论为「不值得做」）。
 
+## 第七十二轮（2026-10-12）：把第七十/七十一轮的发现提成 issue（4 条，全部逐字段回读一致）
+
+**用户要求**：「好，提交 issue 报告」。基线仍为 `dev` @ `8bd98ded4f`（0/0）。
+**目标仓库未被修改**（只读 + 建单）；临时目录 `%TEMP%\audit-r72`（payload 与正文）。
+
+### 建单前的去重检索（覆盖 open + closed）
+
+用 `gh api -X GET search/issues` 跑了 18 组查询（英文 12 组 + 中文 6 组），含
+`test-concurrency` / `frontend tests slow` / `CI duration` / `BrowserWindow show` / `iosTouchCaret` /
+`mobileEditingToolbar` / `tabsFocus` / `flaky test` / `imageLayout` / `EBUSY` / `test shard` /
+`requestAnimationFrame occluded` / `测试 耗时|并发|加速|慢`。结论：
+
+- **4 条待报项均 0 命中**（框架/分片/可见窗口/flaky 全无既有 issue）。
+- 但**检索到本会话前几轮提的 issue 已全部 closed/completed**：#20284、#20286、#20287、#20288、
+  #20299、#20301、#20302、#20303、#20264、#20306 —— 说明维护者修复很快，
+  **不提「已修」的东西，但要注意「同一族里被漏掉的那一处」**（见下条 #20483）。
+- **关键判定：`panelPosition` 是 #20284 的第二处且未被修复**。取证三件：
+  ① 我在 #20284 的评论里于 2026-10-08 16:34 指出过这一处，维护者 17:24 的回复只提「设置窗口」；
+  ② `git log -1 -- app/src/block/panelPosition.test.ts` = **2026-09-28**（`0e35efa157`），早于修复；
+  ③ 现状 `:59/:67/:68/:76/:77/:108/:119` **仍是精确相等**（`check.equal(..., 250)`），
+  而同文件 `:38` 用 `Math.abs(...) < 1`。
+  ⇒ 属「被关闭的 issue 里的第二处未覆盖」，按既有规范**允许新开并引用原 issue 与评论**。
+
+### 已提 issue（4 条，title/body 逐字段回读一致）
+
+| # | 标题 | 位置 | 依据 |
+|---|---|---|---|
+| **20480** | Improve frontend test throughput by scaling test concurrency to the available cores | `app/package.json:16` | 本机 16 核 726→168.8 s（4.30×）；4 核亲和性模拟 319.4 s；CI 实测该步骤 997.7 s、job 17.9 min、`fail 0`；按 0.44 外推 4 核约 **7.3 min**。正文另附**已实测排除**的 `--test-isolation=none`、换框架、`--test-shard`，以及两处小幅收益（imageLayout 视口并行、TS 4.9→5.9），避免维护者重复投入 |
+| **20481** | Two Electron tests create visible windows and can hang until their declared timeouts | `tests/iosTouchCaret.test.js:379`、`tests/mobileEditingToolbar.test.js:317` | 94 个启动 Electron 的测试里**只有这 2 个**用 `show: true`，而三次全量运行里**只有这 2 个**用满声明超时（×27.7 / ×32.7）。置信度**如实写为「未做成功受控复现」**，并写明「CI 上没挂不构成无害的证据」 |
+| **20482** | Tab item focus test fails intermittently because it asserts before the injected style is cleaned up | `tests/tabsFocus.test.js:227` | 单文件串行 8 次 = 1 红 7 绿（12.5%），TS 版本与并发度无关。根因：清理点 `wysiwyg/tabsFocus.ts:43-44` 与写入点 `render/tabsRender.ts:493-511` 的调度先后；`:226`（类）稳定通过而 `:227`（style）偶发失败，**两行对同一竞态敏感度不同** |
+| **20483** | Block panel position test still compares layout metrics with exact equality and fails under non-integer display scaling | `src/block/panelPosition.test.ts:68`（同族 7 处） | #20284 的第二处未被那次修复覆盖（三件取证见上） |
+
+### 建单流程（按 `AGENTS.md` 的文件式工作流）
+
+正文用 `create_file` 写成 UTF-8 Markdown（4 个文件）→ Python 组装 payload JSON（`ensure_ascii=False`）
+→ `gh api --method POST repos/siyuan-note/siyuan/issues --input <绝对路径>` → 逐字段回读
+（`--jq .title` / `--jq .body`，各一次调用，不做写命令与 `--jq` 混用）→ 比对通过后再删 payload。
+
+**回读的唯一差异**：四条正文回读后各比 payload **多 1 个字符**，经 `strip("\n")` 归一化后完全相等
+⇒ GitHub 追加了一个尾部换行。**判定「正文一致」要把行尾与尾部空行归一化**，
+但**不得去除有意义的行首缩进与空行**（本轮正文里的状态表格与代码块都靠它们）。
+
+### 本轮工具坑（已写进 `contributing.md`）
+
+1. **提交信息含单引号时 `git commit -m '…'` 会被 PowerShell 拆成多实参**：
+   写了 `mocha-s 0.35 s`（本想用撇号）后 git 报一串
+   `error: pathspec 'more' did not match any file(s) known to git`。
+   修法：提交信息写进 UTF-8 文件，用 `git commit -F <绝对路径>`。**与「不要把复杂文本经 shell 传递」同源。**
+2. **提交是否成功要回读 `git log`，不能凭输出观感**：`-F` 那次输出被工具简化成一行 `^C`，
+   看着像中断，但 `git status --porcelain` 为空、`git log -1` 已有该提交、
+   `rev-list --left-right --count` 为 `1 0` ⇒ 其实成功。若凭观感重跑一次 `git commit`，
+   会得到「nothing to commit」或重复提交。**先回读，再决定是否重试。**
+3. **Python 在 GBK 控制台下 `print` 含 `⬆` 等字符会 `UnicodeEncodeError`**：
+   去重检索脚本直接把 `gh` 输出打到控制台时崩溃（`'gbk' codec can't encode character '\u2b06'`）。
+   **检索结果一律写 UTF-8 文件再读**，不要直接 print。
+
 ## 如何更新本文
 
 每轮审计后追加：

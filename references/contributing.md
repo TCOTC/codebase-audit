@@ -232,3 +232,18 @@ git push
   报 `label=False`，而 FAIL 行里标签明明存在。修法是 `env["PYTHONIOENCODING"] = "utf-8"`
   （必要时再加 `PYTHONUTF8=1`）。**这与 PowerShell 的 `*>` 写 UTF-16LE 是同一类问题：
   跨进程读中文时，先锁定编码再谈内容。**
+
+- **提交信息里带单引号时，`git commit -m '…'` 会被 PowerShell 拆成多个参数**（第七十一轮实测）。
+  提交信息中写了 `mocha-s 0.35 s`（原意是撇号）后，PS 把单引号当字符串边界收尾，
+  其后的词变成独立实参，git 报一串
+  `error: pathspec 'more' did not match any file(s) known to git`。
+  这与本文件已记的「不要把非 ASCII / 复杂文本经 shell 管道传递」同源。
+  修法：**提交信息写进 UTF-8 文件，用 `git commit -F <绝对路径>`**（用 `create_file` 生成，
+  不经 shell）。首次踩到时用 `-m` 失败了，改 `-F` 一次通过。
+
+- **提交失败与否必须回读 `git log`，不能凭输出观感判断**（同一轮）。
+  `git commit -F` 那一次的输出被工具简化成一行 `^C`，看起来像被中断；
+  但 `git status --porcelain` 返回空、`git log -1` 里已经出现该提交、`rev-list --left-right --count`
+  是 `1 0`（本地领先远端 1 个），说明提交其实成功了。
+  **判据是这三条，不是那行 `^C`**；若凭观感重跑一次 `git commit`，会得到「nothing to commit」
+  或一个重复提交。**先回读，再决定是否重试**（与审计流程里「非零退出不等于失败，先确认远端状态」同源）。
