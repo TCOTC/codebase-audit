@@ -5686,6 +5686,67 @@ Lume 流式解析等价性（`AgentMarkdownBlocks` 16.9 s）、916 次断言的�
 目标查询（`TestBlockCacheReplacementRemainsInvalidatable`、`replacement was lost`、`block cache`、
 `cache budget`、`cache 偶发`、`ristretto cache`）**均 0 命中** ⇒ 无重复，可建单。
 
+## 第八十一轮（2026-10-13）：用户追问「是 ristretto 有问题吗」——把归责查清并更正我自己已发出的建议（新增 **P83、P84** + 3 条误报）
+
+**任务来源**：用户就上一轮 #20496 的机制追问「是 ristretto 有问题吗」。这是一个**归责问题**，
+按 P84 的顺序取证（钉版本 → 读契约 → 查上游 → 与最新版 A/B → 落到契约 vs 实现），未改目标仓库任何文件。
+
+### A. 契约与实现的冲突（决定性）
+
+ristretto README 的 FAQ：
+
+> As for "shortcuts," the only thing Ristretto does that could be construed as one is **dropping some Set
+> calls**. That means a Set call for a **new item (updates are guaranteed)** isn't guaranteed to make it
+> into the cache. The new item could be dropped at two points: when passing through the Set buffer or when
+> passing through the admission policy.
+
+即库**承诺 update 有保证**；本次那条 `Set` 在库内部被判成 `itemUpdate`（因同步 `storedItems.Update`
+命中），按承诺应当生效，实际却丢失 ⇒ **契约与实现不一致**，可以作为立论依据。
+
+### B. 上游脉络（#52 → #62 → #167）
+
+| issue | 时间 | 内容 |
+|---|---|---|
+| **#52** Race condition between `Cache#Set()` and `Cache#Del()` | 2019-09-22 | 报告 `Set(k,v)` → `Del(k)` → `Get(k)` 仍可能读到值（**`Del` 被前面缓冲中的 `Set` 覆盖**）；维护者 karlmcguire 回复「**You're correct about that sequence.**」，称要做 per-item state machine，标 high priority |
+| **#62** synchronous Set/Del calls | 2019-09-25 | **就是 #52 的修复**：把 `storedItems` 的更新/删除改为**同步**，异步只做 policy 记账 —— 即当前 `SetWithTTL`/`Del` 的形态 |
+| **#167** Update returns false even when the item was updated | 2020-06-29 | 同一设计的另一副作用（`Set` 返回值与实际结果不一致），带 `TestUpdateBug` |
+
+⇒ 本次问题是 **#52 的镜像方向**（`Set` 被排队的 `itemDelete` 吃掉），而 #62 只修了「`Del` 被覆盖」那一半。
+
+### C. 升级不能解决（A/B 实测）
+
+- **源码**：v2.4.2 的 `SetWithTTL` / `Del` / `processItems` 与 v0.2.0 **逐行等价**（仅泛型化、`store`→`storedItems`、`policy`→`cachePolicy`）；`itemUpdate` 分支仍只调 `cachePolicy.Update`。
+- **实测**（同一段代码、同参数，各 2000 轮 × 64 次同键 `Del`+`Set`）：v0.2.0 **229/2000 = 11.45%**；v2.4.2 **221/2000 = 11.05%**。
+- 版本跨度：`go.mod` 是 v0.2.0（2024-10-06），上游最新 v2.4.2（2026-07-07），**跨两个大版本仍一样**。
+
+### D. 更正我自己已发出的建议（P83 的实例）
+
+上一轮 #20496 我写过「首选：去掉那次 `Del`，因为超预算的情况已有显式的 `cost >= MaxCost()` 判断」。
+**实测否证**（只用 ristretto 复刻，`MaxCost=1000`，放满 a/b/c 各 cost 400 后把 b 由 400 变 700）：
+
+| 写法 | used（变大后） | 超预算 | 缓存内容 |
+|---|---|---|---|
+| `Del` + `Set`（当前） | **756** | 否 | 只剩 b（a、c 被淘汰） |
+| 只 `Set`（我的建议） | **1212** | **是（> MaxCost 1000）** | b 与 c 都在 |
+
+原因：`itemUpdate` 路径只 `policy.Update` → `updateIfHas`，**只加记账、不检查 `roomLeft`、不触发淘汰**，
+`used` 可涨过 `MaxCost`；`Del` 的作用正是让条目回到 `itemNew` 走完整准入。
+`git log -L` 显示该行是 `eed42b1b6f`（#20366，2026-10-10）加的，**注释就在旁边**（「删除后重新准入，
+让变大的条目也接受字节预算检查」）—— 我先给结论、后考古。
+
+已发布评论更正（comment `6129675055`，3097 字符，逐字节回读一致），并列出三个**未实测**的候选方向
+（`Del` → `Wait` → `Set`；版本化 key；仅在真正变大时 `Del`）。
+
+### E. 本轮新增误报（3 条，见误报表）
+
+① 「某行看起来多余 ⇒ 删掉安全」；② 「本地实测有缺陷 ⇒ 是库的 bug / 升级可解」；③ 「上游没人报过」。
+
+### F. 综合判定（写进 issue 的结论）
+
+**不是 SiYuan 用错 API，也不是升级能解决**：这是该库「最终一致 + 可丢弃 Set」与「同步/异步混合记账」
+之间的已知边界；而 SiYuan 侧那次 `Del`（3 天前为字节预算引入）把这个边界暴露到了热路径上。
+库侧的问题（契约承诺 update 有保证、实现却可能丢）可作为上游反馈再报一例。
+
 ## 如何更新本文
 
 每轮审计后追加：
