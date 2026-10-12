@@ -129,6 +129,9 @@
 | 「内核测试慢是因为包并行度不足 / 机器核数不够」 | `go test ./...` 在本仓库跑 3–5 分钟 | **先算包级时间线再看并行度**：实测 Σ(各包自报 wall) = **928 s** 而 wall = **265 s** ⇒ 并行度已达 **3.5×**，16 核并未闲置；真正的原因是 Go 的并行粒度是**包**，而 `model` 一个包（1466 个顶层用例、**0 处 `t.Parallel()`**）独自占 218 s，与 wall 几乎相等。**加核数/加 `-p` 对该现象无效**，杠杆只在包内（拆包、拆 `-run` 分片、或给独立用例加 `t.Parallel()`）。判「并行度不足」前必须把 Σ(包) 与 wall 相除（见 P74） |
 | 「按整轮运行里最慢的用例排序去优化内核测试」 | `TestFileQueryLimits` 67.6 s、`TestElevatedProcessResult` 36.7 s、`TestAppearanceInstallUsesOrdinaryMetadata` 34.3 s 排前三 | **前两名是并行包执行造成的争用假象**：单独 `-run '^Name$'` 复测分别是 **1.1 s** 与 **2.7 s**（放大 33× / 13×），只有 `TestFileQueryLimits` 单独跑仍 49.9 s。**「整轮里的单条耗时」包含与其它包的争用**，不能当作该用例的成本。判「哪个测试慢」必须**整轮与单独两种条件各测一次**（见 P74 第 3 步） |
 | 「CI 的 kernel job 是 success ⇒ 内核测试都通过了」 | `Linux kernel tests` / `Windows kernel tests` 均报 success | **两个内核测试步骤都带 `continue-on-error: true`**（`cd.yml:218`、`:266`）⇒ 步骤失败不会让 job 变红。判「内核测试是否通过」必须**下钻 job 日志**（`gh run view --job <id> --log`）数 `^ok ` 与 `^FAIL` / `--- FAIL` 行。实测该次运行 Windows 侧 35 个包 `ok`、**0 条 FAIL**（这一步反过来是有效证据，但只对「日志里出现了什么」有效） |
+| 「两个 Go 版本的同一个函数源码逐字符相同 ⇒ 行为相同 ⇒ 可以排除工具链」 | 第七十三轮我比对了 `encoding/json/stream.go` 的 `More`/`peek`/`refill`/`Token`/`readValue`，得出「逐字符相同」，据此把 Go 版本列为已排除项 | **方法本身是错的**（第七十四轮实测推翻）：1.27 默认启用 `encoding/json` v2（`internal/buildcfg/exp.go` 的 baseline 含 `JSONv2: true`），**真正生效的实现根本不是那份 `stream.go`**，其整文件只差一个注释。**源码比对只能用来解释已观测到的行为差，不能用来否定行为差。** 正确做法是**装上被 pin 的工具链实跑**（见 P75） |
+| 「`go env GOEXPERIMENT` 为空 ⇒ 没有实验生效」 | 第七十三轮据此把 `jsonv2` 判为未启用 | **baseline 实验集合里的开关不会出现在 `GOEXPERIMENT` 里**：`exp.go` 的 `baseline` 映射（含 `JSONv2: true`）是默认值，只有**显式**开关才进该变量。查「某实验是否默认启用」要看 `internal/buildcfg/exp.go` 的 baseline，不是环境变量 |
+| 「用 `go1.26.5` 包装器跑就一定是用 1.26.5 工具链」 | 用它跑探针时输出 `go go1.27.2` | **包装器遵循 `go.mod` 的 toolchain 指令**：该探针的 go.mod 由 `go mod init` 写成 `go 1.27.2`，于是包装器切回了 1.27.2（在 `kernel/` 下不受影响，因为 `kernel/go.mod` 是 `go 1.26.5`）。判「A/B 两侧工具链真的不同」的**唯一可靠证据是被测代码自己打印的版本**（`runtime.Version()`），不是「我调用了哪个二进制」 |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 

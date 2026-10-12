@@ -2616,3 +2616,72 @@ Chromium 会停止其 rAF ⇒ 等待帧的循环永不推进 ⇒ 测试**挂到�
 - **跑完 `go test` 必须清理源码树**：本仓库会留下 `kernel/api/conf.json`、`kernel/api/index.queue`、
   `kernel/model/conf.json`、`kernel/model/index.queue` 四个未跟踪文件（比历史记录多一个 `kernel/api/conf.json`）。
 
+---
+
+### P75 判据落在标准库的**未指定行为**上，而该行为随工具链版本变化 → 同一份源码在两版 Go 上结论相反
+
+**对应判据**：E2（平台/宿主假设，此处宿主是**工具链**）＋ E5（对运行期行为的假设未经验证）＋ J5 的镜像。
+
+**定义**：产品代码用一个标准库函数的**观察到的**行为来表达业务判断，而该行为
+① 不在语言规范里被承诺，且 ② **随工具链版本变化**。于是同一份源码用不同 Go 版本构建得到不同结论：
+本地红、CI 绿（或反过来），而**两边跑的是逐字节相同的代码**。
+
+**本仓库实例（第七十四轮，已提 #20484）**：
+
+```go
+// kernel/model/sort_conf_append.go 的 verifySortConfAppend
+decoder := json.NewDecoder(io.NewSectionReader(file, 0, record.Offset))
+token, err := decoder.Token()
+if err != nil || token != json.Delim('{') || decoder.More() != (record.Suffix[0] == ',') {
+	return errors.New("sort append separator does not match the source object")
+}
+```
+
+作者用 `More()` 表达「源对象里还有条目吗」。空对象 `{ }` 时 `LastIndexByte(data, '}')` 落在那个 `}` 上，
+于是交给 Decoder 的 `[0, Offset)` 把右括号切掉、只剩 `" { "`（未闭合且尚无条目）——
+
+| 交给 `json.NewDecoder` 的区间 | Go 1.26.5 | Go 1.27.2 |
+|---|---|---|
+| `" { "`（空对象被切掉 `}`） | `More()=false` | **`More()=true`** |
+| `"{"` | false | **true** |
+| `"{}"` / `" { }"` | false | false |
+| `{"a":1`（未闭合但已有条目） | true | true |
+
+⇒ 空对象在新版被判成「有条目」，守卫拒绝一次合法的恢复/增量写入。
+
+**根因不是源码差异，而是构建配置**：Go 1.27 的 `internal/buildcfg/exp.go` 把 `JSONv2: true`
+放进了 **baseline 实验集合**（1.26.5 无此项）⇒ **默认启用 `encoding/json` v2**，公开 `Decoder` 的行为随之改变。
+所以两版的 `encoding/json/stream.go` **整文件只差 `Buffered` 的注释**，
+`More`/`peek`/`refill`/`Token`/`readValue` 逐字相同——**那份文件在 1.27 下不是活路径**。
+
+**检查法（四步，第 2 步是决定性的）**：
+
+1. **找可疑点**：grep 那些「行为细节不在规范承诺内」的标准库调用——
+   `json.Decoder.More()` / `Token()`、`filepath` 的清洗与大小写、`os` 的错误码、`time.Timer` 的语义、
+   正则的贪婪细节、`sort` 的稳定性、`strings`/`bytes` 的边界。凡是「靠观察得知」而不是「文档保证」的都在列。
+2. **装上被 `go.mod` pin 的版本，把同一个测试跑两遍**（一条命令定论，**不要比对源码**）：
+   ```
+   go install golang.org/dl/go1.26.5@latest && go1.26.5 download
+   go1.26.5 test -count=1 -run '^TestX$' ./pkg     # ok
+   go         test -count=1 -run '^TestX$' ./pkg     # FAIL
+   ```
+   **判据是「被测代码自己打印的版本」**（让探针/测试打 `runtime.Version()`），不是「我调用了哪个二进制」。
+3. **确认构建配置差异**：查 `internal/buildcfg/exp.go` 的 baseline 集合、
+   `internal/goexperiment/exp_*.go` 的默认值、`internal/godebug` 里按 `go` 指令分档的行为开关。
+4. **判生产影响**：这类守卫常同时被写入路径与恢复路径调用。要问「出错后调用方回落吗」
+   （本仓库 `placeDocsInSiblingOrder` 直接 `return err`，不回落）与「被判错的输入在生产里可达吗」
+   （本仓库 `salvageSortConfMap` 会写出 `{}`，可达）。
+
+**修法**：**不要跟随标准库的观察行为**，改成语义显式的判据——本实例应把 `[0, Offset)` 补上 `}`
+后 `json.Unmarshal` 判断条目数，或直接比较「前缀去空白后是否等于 `{`」。这样与工具链版本无关。
+
+**修法陷阱**：
+
+- **`go env GOEXPERIMENT` 为空不等于「没有实验生效」**：baseline 里的实验不出现在该变量里。
+  上一轮我正是据此把 `jsonv2` 判为「未启用」。
+- **不要用「比对函数源码」代替「实跑」**：本轮我先比对了 5 个函数的文本、得出「两版相同」，
+  实际差异在**没被比较的构建配置**里。**源码比对只能用来解释已观测到的行为差，不能用来否定行为差。**
+- **换工具链做 A/B 时，包装器会被 `go.mod` 的 toolchain 指令切走**：
+  `go1.26.5` 在 `go 1.27.2` 的模块里会打印 `go go1.27.2` 并真的用 1.27.2 ⇒ 两次测的是同一工具链。
+  被测代码必须自己打印版本来自证。
+

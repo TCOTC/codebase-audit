@@ -5180,11 +5180,12 @@ shard3 **388.4 s**/1254/fail=2、shard4 305.1 s/1074/fail=1。
 - **与 CI 的矛盾（如实记录，未闭合）**：该测试在 CI 那次运行的提交里**存在且被子用例名确认**
   （`6f97d80a3d` 是两次的祖先；`git diff c612302fb674..HEAD` 对这两个文件为空），
   CI Windows 日志 **35 个包 `ok`、0 条 FAIL**，而本地确定性失败。
-  已排除的两个假设：① **Go 版本**（CI 1.26.5 / 本地 1.27.2）——
-  两版 `encoding/json/stream.go` 的 `More`/`peek`/`refill`/`Token`/`readValue` **代码逐字符相同**；
-  ② **`GOEXPERIMENT=jsonv2`**（本地为空、`internal/goexperiment` 默认 `JSONv2=false`）。
-  **`-overlay` 在本环境未生效**（三种路径写法都试过；判据是错误文案没变、`logging.LogInfof` 行号仍是 `:276`），
-  故未能取到 CI 侧的实际取值。**结论按「置信度中」记录**，机制清楚、CI/本地差异未解释。
+  **⚠️ 本段的「已排除 Go 版本」结论是错的，已在第七十四轮推翻并给出根因**：
+当时我据「两版 `encoding/json/stream.go` 的 `More`/`peek`/`refill`/`Token`/`readValue` 代码逐字符相同」
+判定与工具链无关——**方法有误**（1.27 下真正生效的是 `encoding/json` v2 实现，那份 `stream.go` 不是活路径）。
+当时另有一条「`GOEXPERIMENT=jsonv2` 为空」也被我读成「未启用」，实际 1.27 把它放进了 **baseline** 集合，
+`go env GOEXPERIMENT` 本来就不会显示。**正确做法是装上被 pin 的工具链实跑**（一条命令即可定论），
+而不是比对源码。`-overlay` 在本环境确实不生效（三种路径写法都试过），故当轮未能取到 CI 侧取值。**结论按「置信度中」记录**，机制清楚、CI/本地差异未解释。
 - 备注：`git log -1 -- <两个文件>` 会把引入测试文件的 `1164b07631`(#20369) 与随后改实现的
   `6f97d80a3d`(#20443) 混在一起；**用 `--follow` 单独查测试文件才能定位引入者**。
 
@@ -5200,6 +5201,67 @@ job `success` 不代表测试通过。判「内核测试是否通过」必须下
 `api/contract_block_remaining_test.go:86:33: call of json.Marshal copies lock value: ... model.Transaction contains sync/atomic.Int32`。
 
 **本轮未提 issue**（用户在问速度；失败测试的 CI/本地差异未闭合，需维护者复现后再定）。
+
+## 第七十四轮（2026-10-12）：r73 遗留失败的真因 = Go 1.27 默认启用 json v2（新增 **P75** + 2 条误报，已提 #20484）
+
+**起点**：第七十三轮把 `model.TestSortConfAppendRecoveryAtEveryWriteStage` 的 4/4 子用例确定性失败
+记为「机制清楚、CI/本地差异未解释、置信度中」。本轮用户说「继续」，把它查到底。
+
+**决定性实验（一条命令定论，取代上一轮的源码比对）**：
+
+```
+go install golang.org/dl/go1.26.5@latest && go1.26.5 download
+cd kernel
+go1.26.5 test -tags "fts5 sqlcipher" -count=1 -run '^TestSortConfAppendRecoveryAtEveryWriteStage$' ./model
+#   ok      github.com/siyuan-note/siyuan/kernel/model      5.496s     ← 通过
+go         test -tags "fts5 sqlcipher" -count=1 -run '^TestSortConfAppendRecoveryAtEveryWriteStage$' ./model
+#   FAIL    4/4 empty=true 子用例失败                               ← 失败
+```
+
+⇒ **与 Go 版本有关**。上一轮「源码逐字符相同 ⇒ 无关」的结论作废。
+
+**根因（源码级）**：Go 1.27 的 `internal/buildcfg/exp.go` 在 **baseline 实验集合**里含 `JSONv2: true`；
+1.26.5 无该项 ⇒ **1.27 默认启用 `encoding/json` v2**，公开 `Decoder` 的行为随之改变。
+这解释了为什么两版的 `encoding/json/stream.go` **整文件只差 `Buffered` 的注释**
+（`More`/`peek`/`refill`/`Token`/`readValue` 逐字相同）——那份文件在 1.27 下不是活路径。
+⇒ **`go env GOEXPERIMENT` 看不出 baseline 里的实验**，这一条上一轮误导了我。
+
+**行为差异（同一探针、两个工具链各跑一次）**：
+
+| 交给 `json.NewDecoder` 的区间 | Go 1.26.5 `More()` | Go 1.27.2 `More()` |
+|---|---|---|
+| `" { "`（空对象 `{ }` 被切掉 `}`） | **false** | **true** |
+| `"{"` | **false** | **true** |
+| `" {  "` | **false** | **true** |
+| `"{}"` / `" { }"` | false | false |
+| `{"a":1`（未闭合但已有条目） | true | true |
+
+**产品影响已闭合（不只是测试）**：
+
+1. 守卫 `verifySortConfAppend` 同时被 `appendSortConfMap`（写入前校验）与 `recoverSortConfAppend`（启动/导出恢复）调用。
+2. **出错不回落**：`kernel/model/file.go` 的 `placeDocsInSiblingOrder` 在 `appendSortConfMap` 报错时
+   直接 `return err` ⇒ 跨笔记本移动文档（`file.go:1808` 的 `MoveDocs` 路径）会向用户报错；
+   `addSort`（新建文档，`file.go:1284`）只记日志，功能可用但不再分配排序值。
+3. **空 sort.json 是可达状态**：`kernel/model/sort_conf.go` 的损坏恢复在无可用快照时调
+   `salvageSortConfMap`，它返回 `map[string]int{}`（非 nil 空 map），随即 `writeSortConfMap` 写盘 ⇒ 磁盘上是 `{}`。
+4. `newSiblingSortValues`（`file.go`）对空 `fullSortIDs` 仍返回 ok（`found=false → start=1`）⇒ 会走 append 而非整份重排。
+
+**已提 issue**：**#20484**（title 英文 / 正文中文首段为中文标题，逐字段回读一致；
+正文含两条复现命令、`More()` 对照表、可达性证据与修法方向）。
+建单前用 `gh api -X GET search/issues` 检索 12 组（`appendSortConfMap`、`verifySortConfAppend`、
+`incremental sort`、`Decoder More`、`jsonv2`、`Go 1.27`、`toolchain upgrade`、`sort.json`、中文关键词等）
+均无重复；相关先例 **#20222**（契约产物依赖 Go 工具链版本）与引入提交 **#20369** 已写入正文。
+
+**本轮工具坑**：
+
+- **`go1.26.5` 包装器不一定用 1.26.5**：它遵循 `go.mod` 的 toolchain 选择。我的探针用 `go mod init` 建了
+  `go 1.27.2` 的 go.mod，于是包装器打印出 `go go1.27.2` 并照样用 1.27.2（**探针自己打印 `runtime.Version()`
+  才暴露**）。在 `kernel/` 下不受影响，因为 `kernel/go.mod` 写的是 `go 1.26.5`。
+  **凡「换工具链做 A/B」，都必须让被测代码自己打印版本**，否则测的可能是同一个工具链两次。
+- `-overlay` 在本机不生效（已三次确认），所以「不改工作树插桩」这条路在本环境不可用。
+
+**本轮新增误报 2 条**（见误报表）：「源码逐字符相同 ⇒ 行为相同」、
+「`go env GOEXPERIMENT` 为空 ⇒ 实验未启用（baseline 里的实验不会出现在该变量里）」。
 
 ## 如何更新本文
 
