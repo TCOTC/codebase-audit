@@ -4890,6 +4890,108 @@ selection regressions with alpha9 test repairs`），且该提交**正好改了�
 - `outlineStorage.test.ts` 与 `layouts.test.ts` 的改动只是**把注入点从 `fetchPost` 换成新的入口函数**，
   断言值未变 ⇒ 属测试适配而非放宽。
 
+## 第七十轮（2026-10-12）：测试耗时、不必要测试与依赖升级的**实际调整试验**（新增 **P70–P72** + 4 条误报）
+
+**用户要求**：先分析测试耗时/不必要测试/依赖升级能否提速；随后明确要求「**实际调整试验**看看有哪些方法
+可以在保证正确性的前提下加速测试，包括但不限于调整测试代码、更换测试基建」。⇒ 进入**修复/试验模式**（已授权改文件）。
+
+**基线与取证前提**：目标仓库 `HEAD == origin/dev == 8bd98ded4f`（`dev`，0/0，工作树有 3 个用户自有的 SCSS 改动）。
+本机 16 逻辑核 / AMD Ryzen 7 7840H / Windows / Node v26.8.2。
+
+### 前端套件耗时画像（本机实测，`--test-reporter=spec`）
+
+| 量 | 值 |
+|---|---|
+| 测试文件 | **829**（`src` 704 TS / `tests` 90 JS / `electron` 25 / `scripts` 6） |
+| 用例数 | **4997**（`suites` 523 / `skipped` 9） |
+| 串行 `concurrency=1` wall | **726 s**（另一次含并行探针干扰的运行为 900.3 s） |
+| Σ(单条用例自报耗时) | **479 s**（干净串行） |
+| ≥1 s 的用例 | **95 个，占总时 83.8%**；**top10 用例占 42%** |
+| 94 个启动 Electron 的测试文件 | 占**用例时间的 81.7%**（串行口径） |
+| 128/829 文件 `require("typescript")` | **559 处 `transpileModule`、191 处 `createSourceFile`** |
+| 固定「必定等待」（括号配对法） | **123 处 / 10.7 s = 1.5%** |
+
+**最慢用例（三次运行对照，串行/串行/conc=4）**：`imageLayout` 79.2/79.4/75.9 s、
+`agentStreamingMarkdown` 40.9/31.1/47.0 s、`decisionProviderFocus` 23.4/23.0/24.6 s、
+`iframeResize` 19.0/19.4/22.9 s、`tableVirtualization` 24.1/18.0/23.2 s。
+
+### 试验矩阵（同一代码、同一机器，仅改变量；验收＝失败集合是否变化）
+
+| # | 试验 | wall | 加速 | 失败集合变化 |
+|---|---|---|---|---|
+| T1a | 16 核 `conc=1` | 726 s | 1.00× | 基线：panelPosition(环境值) + tabsFocus(flaky) |
+| T1b | 16 核 `conc=4` | **233.6 s** | 3.11× | 仅 panelPosition（**减少**） |
+| T1c | 16 核 `conc=8` | **168.8 s** | **4.30×** | 仅 panelPosition（无新增） |
+| T1d | 16 核 `conc=16` | 154.6 s | 4.70× | **+`decisionProviderFocus:376`（新失败）** ✗ |
+| T2 | `--test-isolation=none` | 15.4 s 崩溃 | — | 97k 行错误（`Cannot assign to read only property 'window'`）✗ |
+| T3 | TS 5.9.3 替代 4.9.5（conc=8） | **153.7 s** | 4.72× | 与 T1c 相同（+已知 flaky） |
+| T5 | `imageLayout` 视口并行（单文件） | 79.4 → **40.7 s** | 1.95× | PASS×3，断言数不变 |
+| T5b | T5 改动 + conc=8 全量 | 165.7 s | 4.38× | 与 T1c 相同 |
+| **T6** | **模拟 4 核（affinity）+ conc=4** | **319.4 s** | **2.27×** | **仅 panelPosition（最少）** |
+
+**CI 侧对照（`gh run view --job 114675341087 --log`，run 38207790940）**：
+该步骤 **997.7 s（16.6 min）**，job 总 17.9 min（上限 30 min）；**`tests 4997 / pass 4988 / fail 0`**；
+Σ(单条) = **626 s** ⇒ **371 s（37%）在编排开销里**（819 个 Node 子进程 + 94 次 Electron 启动）。
+CI 上 `mobileEditingToolbar` = 4836.6 ms、`tabsFocus` = 1368.9 ms（**两者在 CI 上均未挂起/未失败**）。
+
+**结论**：`--test-concurrency` 是唯一能大幅提速且不改测试代码的杠杆；CI 按 4 核算约为 997.7/2.27 ≈ **440 s（7.3 min）**，
+`fail` 保持 0。本地 16 核可达 4.3×。
+
+### 非耗时类发现（两条，均按轨迹 A 报）
+
+- **`show: true` 的可见窗口测试偶发挂起到超时**：全仓 94 个 Electron 测试中只有 2 个用 `show: true`
+  （`iosTouchCaret:379`、`mobileEditingToolbar:317`），而三次运行里只有这两个出现挂起
+  （111.0/3.4/4.4 s = ×32.7；40.3/1.5/2.0 s = ×27.7，均停在声明超时上）。单跑 5 次、4 路并行 12 次**未能复现**
+  ⇒ 置信度标「中」，机制为「可见窗口被遮挡 ⇒ Chromium 停 rAF」（见 P71）。
+- **`tabsFocus:227` 的 flaky**：单文件串行 8 次 **FAIL 1 / PASS 7（12.5%）**，与 TS 版本、并发度无关。
+  根因：清理点 `wysiwyg/tabsFocus.ts:43-44`（清 class + `removeAttribute("style")`）与写入点
+  `render/tabsRender.ts:493-511`（对仍带 `.tabs-title-editor` 的 `.tab-item-info` 写 `left/top/width/…`）
+  的先后依赖 `dataset.tabsEditing` 与渲染调度，而测试只 `await setTimeout(0)` 就断言 ⇒ 偶发写入晚于清理。
+  **产品侧无缺陷**（清理逻辑存在），缺陷在测试断言。
+
+### TS 版本 A/B（不改 `node_modules`、不改 lockfile 的做法）
+
+用 `Module._resolveFilename` 重定向把测试内的 `require("typescript")` 指向另一份安装目录
+（`--require redirect-ts.js` + `AUDIT_TS_DIR` 环境变量），实现零侵入 A/B。实测：
+
+| 量 | TS 4.9.5 | TS 5.9.3 |
+|---|---|---|
+| `require("typescript")` 冷加载 | 102.5 ms | 115.1 ms |
+| `transpileModule` × 495 KB 源码 | 652.3 ms | **325.3 ms（快 2.0×）** |
+| `createSourceFile` × 同批 | 52.3 ms | 50.6 ms |
+| 全量（conc=8） | 168.8 s | **153.7 s（−8.9%）** |
+
+**注意**：`pnpm dev` / `pnpm build` 走 `esbuild-loader`，**不经过 TypeScript** ⇒ 升级 TS 只影响测试与 `typecheck`，
+不影响构建产物；但 **TS 5 的 `useDefineForClassFields` 默认值变更**会改变类字段 emit 语义，属独立风险，需单独验证。
+
+### 本轮的方法论教训
+
+1. **「更快但多了一条红」不是提速，是回归**。T1d（conc=16）比 T1c 快 14 s，却引入了此前从未失败的用例。
+   并发度必须与核数匹配，且**每次变更都要逐条比对失败文件清单**（不能看 `fail` 标量）——见新判据 P70。
+2. **flaky 会让加速的验收标准本身失效**。`tabsFocus` 12.5% 的失败率与「提速是否引入回归」的方差同量级，
+   不先把它剔出验收集合，就无法区分两者。
+3. **`CI 上没挂` 不是「无害」**。两个 `show: true` 的测试在 CI 上正常（4.8 s / 1.4 s），
+   因为 CI 是单进程串行且无其它窗口；本地跑全量时开发者常同时在用别的程序。
+4. **测量口径比测量本身更容易出错**：宽松正则把「超时守卫」计入固定等待，使 10.7 s 变成 55.9 s（×5.2）。
+   凡「pattern 里含函数实参」的统计必须做括号配对。
+5. **不要用探针污染被测机**：本轮第一次串行运行（900.3 s）同时跑着 CPU 密集的基准脚本，
+   使 `mobileEditingToolbar` 从 3.4 s 涨到 111.0 s 并让 `iosTouchCaret` 超时。
+   串行基线的无干扰复测为 726 s。**报数字前必须确认机器空闲**。
+6. **`<skill>/scripts` 不新增脚本**：本轮的机械统计（耗时解析、括号配对、Electron 启动点普查）
+   都是一次性且依赖具体 reporter 输出格式，按准入标准不入 `scripts/`，判据写成 P70–P72。
+
+**本轮试验的工具坑**：`Select-String` 对同一文件报的行号与 `Get-Content` 的行数不一致（后者受编码影响），
+定位时用 `read_file` 而非行数推算；`gh api .../logs` 在 PowerShell 下因终端转义序列报错，
+须改用 `gh run view --job <id> --log`；`gh` 输出的 JSON 在 Windows 上是 **UTF-16LE**（`Out-File` 默认），
+`json.load` 要用 `encoding="utf-16"`。
+
+**副产品（如实记录）**：试验期间改过 `src/protyle/export/imageLayout.test.ts`（视口并行）与
+`tests/tabsFocus.test.js`、`tests/iosTouchCaret.test.js`（未实际改，仅备份）——
+`imageLayout` 已在试验后**还原**，收尾 `git status` 只剩用户原有的 3 个 SCSS 修改。
+临时工作目录 `%TEMP%\audit-testperf-r69`。
+
+**未提 issue**（用户要求的是试验与结论，未要求建单）。
+
 ## 如何更新本文
 
 每轮审计后追加：

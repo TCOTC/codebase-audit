@@ -120,6 +120,9 @@
 | 前端 fetch 回调不检查 `response.code` ⇒ 会把错误当成功 | `app/src/search/util.ts:1576`、`mobile/menu/search.ts:333` 直接读 `response.data.pageCount`/`.blocks` | **`fetchPost` 是主动抑制回调的网关**：`app/src/util/fetch.ts:127` 写 `if (processMessage(response) && cb) cb(response)`，而 `processMessage.ts:101-105` 在 `code < 0` 时 `showMessage(...)` 并 `return false` ⇒ **只有 `code >= 0` 才会调 `cb`**。所以「没判 code」只对**能返回正数 code 的端点**才是缺陷。实测该仓库 `asset/statAsset`、`inbox/*`、`ref/getBacklink*`、`bazaar/*`、`sql/*`、`network/forwardProxy`、`plugin`、`findReplace`、`getBootSync` 这些正数 code 端点的前端调用点**全部已守卫**；而 `fullTextSearchBlock` 只返回 `-1`/`0` ⇒ 上述两处安全。**判前先机械取正数 code 端点清单**（grep `Failure[...]([1-9]`） |
 | `av.SaveAttributeView` 有 5 处裸调（丢弃返回值） | `kernel/model/attribute_view.go:7552`、`kernel/model/transaction.go:2340`、`kernel/sql/av.go:1260`、`kernel/model/template.go:832` | **四处均为自愈或已有日志**：`:7552` 是 keyIDs 订正修复（下次 Parse 重做）、`:2340` 在 goroutine 里重建派生分组、`sql/av.go:1260` 把已不存在的字段从视图布局剔掉、`template.go:832` 虽丢弃但显式 `logging.LogErrorf`。只有 `kernel/model/assets.go:2865`（资源本地化后回写 mAsset）与 `kernel/model/attribute_view.go:7932`（删字段后清关联库汇总）属观察项（需磁盘写失败才触发），不得与上述四处合并上报 |
 | 「新增的配置文件注释不是中文 ⇒ 违反 `AGENTS.md` 的注释规范」 | `kernel/model/conf_runtime.go`（机械统计给出「注释 25 行，含中文 10」）、`kernel/model/conf_normalize.go`（「18 行，含中文 3」） | **统计口径把 AGPL 许可头算进去了**：本仓库每个 `.go` 文件头部都有约 19 行英文许可注释（`// SiYuan - From thought to insight, with agents` / `// Copyright (c) 2020-present, b3log.org` …）。**先从 `package` 行截断再统计**，则同一批文件（第六十六轮验证的 9 个新增 `conf_*.go`）的正文注释**全部是中文**：10/10、3/3、5/5、20/20、6/6、2/2、3/3、12/12、1/1 ⇒ **不成立**。不截断的话，本仓库**任何**文件都会被判成「注释非中文」 |
+| 「测试里的固定 `sleep`/`await` 是套件耗时的主因」 | 全仓 829 个测试文件；用宽松正则（匹配任意 `setTimeout(\w+, N)`）得到 **55.9 s** | **必须用括号配对区分「必定等待」与「超时守卫」**：回调 `reject` 的是守卫（只在失败时消耗），`resolve` 的才计入。实测必定等待共 **123 处 / 10.7 s**，占串行总长 726 s 的 **1.5%**（宽松正则高估 5.2×）。真正的成本在**编排开销**：CI 上 Σ(单条耗时)=626 s 而套件自报 **997.7 s**，差值 371 s（37%）在进程启动/模块加载里（829 个测试文件 = 829 个 Node 子进程 + 94 次 Electron 启动）。**先算「Σ(单条)/总 wall」再决定优化方向**（见 P72） |
+| 「`--test-isolation=none` 是一条省掉进程启动的免费提速」 | 该参数确实让同进程内已加载模块的单条用例从 8.9 ms 降到 0.14 ms | **本仓库的测试普遍假设独占 `globalThis`**：实测 15.4 s 内产生 **97k 行错误**，典型为 `TypeError: Cannot assign to read only property 'window' of object '#<Object>'`（前一个测试把 `window` 定义成只读，后续测试无法重新赋值）。**且同一次运行的头部全是 PASS** ⇒ 只读开头会误判为「快 50 倍」。判「某基建开关可用」必须读**完整输出与退出码**，不能看抽样（见 P70 第 4 步） |
+| 「测试偶发挂起到超时 ⇒ 被测代码有竞态」 | `tests/iosTouchCaret.test.js`、`tests/mobileEditingToolbar.test.js` 在全量运行中偶发用满声明超时（40 s / 111 s） | **先查测试自己的宿主假设**：这两个（**全仓仅有的两个**）用了 `new BrowserWindow({show: true})`，其余 92 个 Electron 测试用 `show:false`。可见窗口被完全遮挡时 Chromium 停止其 `requestAnimationFrame`，等待帧的循环不推进 ⇒ 挂到超时。**产品侧无竞态**：单跑 5 次、4 路并行 12 次全部稳定 1.6–2.3 s，复现需要「窗口被遮挡」这一外部条件（见 P71）。反向陷阱也要防：**不要因为 CI 上没挂就判无害**（CI 是单进程串行、无其它窗口竞争） |
 
 ## 曾被误判为误报、实为真缺陷（不要据此排除）
 
@@ -186,6 +189,14 @@
   （本仓形态：`protyle/util/compatibility.ts`、`config/util/configApi.ts`、`config/util/resourceConfig.ts`
   这类 util 模块）；只看端点串的出现次数会把包装器自身也算成「散落」。
   **同源教训**：三次误报（本三条）都出自同一类「用字面量普查代替调用图普查」。
+
+- **「测试慢只是工程实践问题，不是缺陷，不值得报」**（第七十轮实测）：第四十八/四十九轮曾把
+  「门禁 tag-only」「45% 创建后未再修改」定为工程实践问题而未提 issue。**但可量化的耗时是可以取证的缺陷面**：
+  本轮量出 CI 的前端 job **997.7 s** 且该步骤占 job 总时长的 99%（17.9 min / 上限 30 min），
+  而仅调一个参数（并发 1→4）即可降到约 7.3 min，**且失败集合不变**。
+  **可复用教训**：判「属不属于工程实践」之前先问「它的后果能不能写成一条可验证的量」——
+  「CI 时间 / 本地反馈循环」是可测量的，因此与「45% 测试创建后未再修改」这类**无分母、无阈值**的观察不同。
+  同源提醒：**「CI 跑不到不是免报牌」（判据 G4）与之是一对**——两者都是把「环境/流程问题」降级为不可报的合理化。
 
 ## 维护
 
