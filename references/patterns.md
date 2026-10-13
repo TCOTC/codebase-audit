@@ -3110,6 +3110,12 @@ blockCache.Set(key, entry, cost)
   `chat.sessionSync.excludeRepositories`、`chat.tools.terminal.ignoreDefaultAutoApproveRules` 等无关项
   ⇒ 无法让工作区外的临时目录不被追踪，只能「用完即删」。
 
+**实测补充（同一日观察到，改变了处置建议）**：被回写的文件**删掉也留不住**——
+我把 5 个 `%TEMP%` 目录删除后，它们在同一分钟内**以全新且彼此相同的时间戳**（`21:14:15`）整批复现。
+⇒ **只要该会话的检查点还在，清理由它追踪的路径就是无效动作**。因此处置顺序应是：
+先关掉检查点（`chat.checkpoints.enabled: false`），或等会话结束，**再去清理**；
+不要把「删了又回来」误判为「有恶意进程」或「我的脚本没删干净」。
+
 **检查法（每次批量写回前，三行成本）**：
 
 1. `git -C <repo> status --porcelain` 与 `git diff --stat HEAD`——**出现非预期的删除行数就立即停下**；
