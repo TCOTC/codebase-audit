@@ -5882,6 +5882,22 @@ CI 用 `actions/setup-go@v6` 默认 `cache: true`（缓存 GOCACHE）⇒ **CI �
 | **#20490**（关库用例不重开 → `database is closed` + nil panic） | `f44b384d8b` | 新增 `closeModelTestDatabases()`（`FlushTxQueue` → `backgroundRefreshWaitGroup.Wait()` → `sql.ClearQueue()` → `sql.CloseDatabase()`），替换 6 处裸 `CloseDatabase()`；新增的回归测试**把我那条复现原样搬了进去**（关库 fixture 之后紧跟受害用例）。修复后 `-count=2`/`-count=3`/`-shuffle=on` 各 3/6 次**全部通过**（此前 `-count=2` 3/3 失败、`-shuffle` 4/6 失败） |
 | **#20496**（同键 `Del`+`Set` 丢写） | `843c67114c` | 采用**版本化 key**（我建议的首选方向）：`blockCacheSequence` 单调递增，新条目用**新 cacheKey** 写入（必然走 `itemNew` 完整准入 ⇒ 预算仍受控），随后删旧 key；并新增 `TestBlockCacheGrowingReplacementRespectsBudget`（正是我那条更正评论描述的场景）。原 10% 偶发测试 `-count=2000` 现 **0 次失败**（此前 15–20 次） |
 
+### F. 回填到 #20491（用户要求「回复吧」）
+
+在 #20491 下补了一条验证回复（`6146159319`，1927 字符，逐字节回读一致），组织方式按目标仓库
+`AGENTS.md`（#20494 后的新口径）：**结论优先 → 核查表 → 自我更正 → 可行动数据 → 邀请验证**。内容：
+
+1. **逐项核实**评论里的 9 条宣称（API 两片、共用 4 槽、一次编译两个二进制且 `-p 2`、低核数不分片、
+   动态发现用例、独立工作目录、剪贴板隔离、MCP 限 2 并行、未改产品功能）——全部成立；
+2. **主动写出自己的判断被推翻**（P87 的实例），并附热缓存 A/B 表（137.7 s vs 213.9 s）；
+3. **标注数字必须绑定编译缓存状态**，并指出 CI 用 `actions/setup-go` 默认缓存 ⇒ 属热缓存侧；
+   同时声明「每个变体只跑一次，作量级参考」以区分实测与估计；
+4. **给出下一步的杠杆点**（`kernel/mcp/tools` 69.7 s + `kernel/util` 31.3 s 占 other-packages 的 83%）；
+5. **顺带确认 #20490 / #20496 已修复并各自回归**，并邀请继续提供对照数据。
+
+**值得复用的一点**：回复里把「我错了」写在与实测数据同一段，而不是单独致歉——维护者需要的是
+「哪条判断被什么数据推翻、现在的结论是什么」，致歉本身不提供信息。
+
 ### E. 事件：skill 仓库工作副本被外部写入破坏（已恢复）
 
 本轮写回时发现 `references/patterns.md` 在**我未操作的情况下**丢失 **P70–P86 整段（681 行）**，
