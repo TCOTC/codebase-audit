@@ -5826,6 +5826,75 @@ ristretto README 的 FAQ：
 ① 「我自己写的机制描述一定准确」（草稿的因果方向写错）；② 「open issue 只有 5 条 ⇒ 无相关报告」（漏掉 open PR）；
 ③ 「文档承诺在最新版仍成立」（引用了本地依赖副本而非默认分支）。
 
+## 第八十三轮（2026-10-13）：验证 #20491 的 API 分片改动与提交 `d62bef94`
+
+**任务来源**：维护者在 #20491 评论（`6138916910`）称「已分片 `other-packages`」，用户要求确认该评论与提交
+`d62bef9471046d5c9ad87dc5aff8daa199ee5193`。目标仓库只读，全部实跑在隔离 worktree（`origin/dev` @ `3a49b52bed`）。
+
+### A. 评论与提交的逐项核实
+
+| 宣称 | 核实方式 | 结果 |
+|---|---|---|
+| API 包按历史耗时分 2 片，与 model 共用最多 4 个执行槽 | 跑一次入口，看 summary 的作业构成 | **成立**：api-1 229 / api-2 287 个用例，与 model 4 片并存于同一次 `runJobs`（`concurrency = Math.min(4, cores-1)`） |
+| model、API 二进制各编译一次，编译仍限 `-p 2` | 读代码 + 计时 | **成立**：一次 `go test -p 2 -c -o <dir> ./model ./api`；实测热缓存 9.8 s |
+| 低核数机器保留 API 整包 | 读 `testPackageConfigurations` | **成立**：`cores >= 4` 才加 API 配置，否则只有 model 一个配置（`other-packages` 走未分片路径） |
+| 新增用例仍从二进制动态发现并校验覆盖 | 读代码 | **成立**：每个配置各自 `-test.list=.`，并由 `expectedTests` 做 missing/unexpected 校验 |
+| 各片使用独立临时工作目录 | 读 `preparePackageWorkspace` | **成立**：`model-shard-i` / `api-shard-i` 各自 junction 一份 |
+| 剪贴板样式测试依赖前序测试的 Markdown 配置，已改为显式设置+恢复并加回归测试 | 读 patch + 实跑 + **破坏性验证** | **成立且回归测试承重**：移除 `t.Cleanup` 的恢复逻辑后该测试立即失败并打印 `clipboard fixture did not restore the previous Markdown settings` |
+| MCP 文件查询只读用例改为最多 2 个并行，断言不变 | 读 patch | **成立**：`querySlots := make(chan struct{}, 2)` + `t.Parallel()`，其余断言未动 |
+| 未修改产品功能 | 看提交文件清单 | **成立**：只有 2 个测试文件 + runner + 耗时表 |
+| API 共 515 个用例 | 从 api.test.exe `-test.list` 计数 | **当时正确**：我这次数出 **516**，差 1 是因为后续提交 `8cfe56b185`（#20508）新增了 `TestAPIContractSystemExitRecovery` |
+| 两片最长约 76 s、整套含编译约 414 s | 实跑 | **未复现同值但方向一致**：我这边 api 最长 61.7 s（冷）/47.1 s（热），整套 310.3 s（冷）/137.7 s（热）。机器不同，不作矛盾处理 |
+
+### B. 我最初的判断被自己的实验推翻（P87 的由来）
+
+我起初据「`other-packages` 从并行改为编译后启动」推断这会拖慢关键路径，且用「298.8 s → 310.3 s」佐证。
+**A/B 实测（热缓存，把改动反向打补丁）否证**：
+
+| 变体 | other-packages | 最长分片 | 端到端 |
+|---|---|---|---|
+| 先编译后运行（当前实现） | 121.7 s | 76.2 s | **137.7 s** |
+| 与编译并行（旧行为） | 158.7 s | 138.5 s | **213.9 s** |
+
+即**热缓存下当前实现快 76 s**：并行会让编译与测试互相抢 CPU，把长作业从 121.7 s 膨胀到 158.7 s。
+而我引用的「298.8 s」是**冷缓存 + 旧行为**，与「310.3 s（冷缓存 + 新行为）」虽同为冷缓存，
+但两者正是 A/B 的两侧，冷缓存下重叠反而快 13 s ⇒ **结论必须绑定缓存状态**（P87）。
+CI 用 `actions/setup-go@v6` 默认 `cache: true`（缓存 GOCACHE）⇒ **CI 属热缓存侧，该改动方向正确**。
+
+### C. 剩余关键路径（对维护者有用的量化结论）
+
+`other-packages` **仍是关键路径**（热 121.7 s / 冷 238.8 s，而次长作业仅 76.2 s）。解析其内部逐包耗时：
+
+| 包 | 秒 |
+|---|---|
+| `kernel/mcp/tools` | **69.7** |
+| `kernel/util` | **31.3** |
+| `kernel/agent` | 9.4 |
+| 其余 36 个包 | 均 < 3 |
+
+⇒ `kernel/mcp/tools` 一个包占 `other-packages` 的 **57%**，与最长 model 分片同量级；
+把 `kernel/mcp/tools`（必要时加 `kernel/util`）纳入分片集合是下一个明确的杠杆点。
+
+### D. 顺带确认：我提的两条 issue 都已被修复
+
+| issue | 修复提交 | 核实 |
+|---|---|---|
+| **#20490**（关库用例不重开 → `database is closed` + nil panic） | `f44b384d8b` | 新增 `closeModelTestDatabases()`（`FlushTxQueue` → `backgroundRefreshWaitGroup.Wait()` → `sql.ClearQueue()` → `sql.CloseDatabase()`），替换 6 处裸 `CloseDatabase()`；新增的回归测试**把我那条复现原样搬了进去**（关库 fixture 之后紧跟受害用例）。修复后 `-count=2`/`-count=3`/`-shuffle=on` 各 3/6 次**全部通过**（此前 `-count=2` 3/3 失败、`-shuffle` 4/6 失败） |
+| **#20496**（同键 `Del`+`Set` 丢写） | `843c67114c` | 采用**版本化 key**（我建议的首选方向）：`blockCacheSequence` 单调递增，新条目用**新 cacheKey** 写入（必然走 `itemNew` 完整准入 ⇒ 预算仍受控），随后删旧 key；并新增 `TestBlockCacheGrowingReplacementRespectsBudget`（正是我那条更正评论描述的场景）。原 10% 偶发测试 `-count=2000` 现 **0 次失败**（此前 15–20 次） |
+
+### E. 事件：skill 仓库工作副本被外部写入破坏（已恢复）
+
+本轮写回时发现 `references/patterns.md` 在**我未操作的情况下**丢失 **P70–P86 整段（681 行）**，
+`references/changelog.md` 丢失 r70/r71 两行；`patterns.md`、`SKILL.md`、`known-false-positives.md`
+三者的修改时间同为 `20:52:09`，而 `known-false-positives.md` 的本轮新增却保留
+⇒ 形态是**外部写入者用旧快照重写了部分文件**（非我的写入）。
+
+处置：`git checkout HEAD -- references/patterns.md references/changelog.md` 恢复（HEAD 是我几分钟前推送、
+已验证的完整版本），再重新追加 P87 与 r83 记录；恢复后校验 `patterns.md` 词条 **79 个、P8–P87**
+（P33 为既有历史缺号，与本次无关）。**教训**：写回前先比对**当前工作副本与 HEAD 的体积差**，
+体积异常缩小就说明被人动过，应先 `checkout` 再追加，而不是在损坏的基线上继续追加
+（我这一次差点把「丢失 P70–P86」当成正常基线提交上去）。
+
 ## 如何更新本文
 
 每轮审计后追加：
