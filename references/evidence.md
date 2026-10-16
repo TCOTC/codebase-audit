@@ -6169,6 +6169,22 @@ go test -tags "fts5 sqlcipher" -p 1 -run '^$' <37 个包>
 - `image/heic`/`image/heif`/`image/bmp` 分散在 4 个文件：第 40 轮已按「用途不同的各自白名单」判为低危不报（本轮由 3 处增至 4 处，仍不报）
 - i18n 文本膨胀候选（未给 `--source` 时只有长度比）：ar/de/fr 的长译文本多是可换行容器 ⇒ 无结论
 
+### 文档一致性项的逐条取证（**后续轮次勿重复投入**）
+
+此前标为「未取证」的 `scan_doc_parity.py` 剩余命中已全部回读，结论如下：
+
+| 命中 | 结论 |
+|---|---|
+| `API-CONTRACTS.zh-CN.md` 缺 28 个标识符 | **真缺陷** —— 实为**「兼容要求」节少 8 个整段**（英文 101 段 / 中文 93 段），已提 **#20628** |
+| `API.md` / `API.zh-CN.md` / `API.ja.md` 的 `table_rows 51->52` | **真缺陷** —— `### Set a cell value` 的 `keyType` → `value` 结构表里，英文 13 个 keyType、中文与日文各 **12** 个（**缺 `mAsset` 行**及其唯一示例 `{"mAsset": [{"type": "image", …}]}`）；`grep -c mAsset` 英文 6 / 中文 2 / 日文 2，差集即该行。已提 **#20629** |
+| `API.ja.md` 缺 `app/src/types/api/index.d.ts` | **假阳性** —— ja 版 `:134` 写成 Markdown 链接 `[生成されたルート宣言](../app/src/types/api/index.d.ts)`，不在反引号集合里 |
+| `PLUGIN-PUBLISH.zh-CN.md` 的 `i18n/*.json` → `.json` | **假阳性** —— 中文版 `:56` 改写成「`i18n` 下直接存放的 `.json` 语言文件」，等义 |
+| `DOCUMENT-ADDRESSING.zh-CN.md` 的 `**#**` 与 `depth: 1`/`parentID: null` | **假阳性** —— `**#**` 是脚本对 `**文本**` 的脱敏改写（把非 ASCII 换成 `#`）；`depth: 1` → 「`depth` 为 `1`」仅为引号切分 |
+| `WORKSPACE.zh-CN.md` 的 `<>/`、`<boxID>/`、`filepath.Base(path)` 等 | **假阳性** —— `<>/` 来自目录树里的 `<workspace root>/` → `<工作区根>/`；`<boxID>/` → 「笔记本根层」；`filepath.Base(path)` → `filepath.Base(路径)`；`/Parent/Child/Current` → `/父标题/子标题/当前标题` —— 均可翻译的占位符 |
+| `API.zh-CN.md` 的 `fences 146->145` | **写法差异** —— `API.md`/`API.ja.md` 各有 2 处**四个反引号的嵌套围栏**（用于在代码块内展示 markdown 示例），中文版改写后为 0 处；我的严格计数（行首三反引号）三版均为 1/1 |
+
+⇒ **该脚本的「高置信」只对「整段/整行缺失」成立**；令牌级差异必须先回读原文，已入误报表（四类）。
+
 ### 方法论增量（本轮）
 
 1. **`scan_regression_index.py` 是「读代码之前」唯一能缩范围的工具**：169 个提交 → 130 个有历史登记的改动文件，再叠机械扫描选候选，避免逐文件读 diff
