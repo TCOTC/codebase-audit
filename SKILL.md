@@ -161,7 +161,7 @@ AI 审计最大的风险是合理化（rationalization）——把「代码可�
 |---|---|---|
 | 受类型系统校验，写错则编译失败 | 低 | 前端 API 路由字面量，受 `app/src/types/api/index.d.ts` 约束 |
 | 裸字符串，无任何校验 | **高** | 内核里的 `"filesys_status_check"`、`"storage/local.json"` |
-| 同目录已有同义常量却未复用 | **高** | 已有 `boxDocMetaName` 常量，但 `conf.json` 在各处裸写 |
+| 同目录已有同义常量却未复用 | **高** | 同一文件/目录里已定义 `const XxxName = "xxx.json"`，另一处却裸写同一字符串。**必须先确认两者真的是同一个文件**：第八十九轮纠正了本行原有的 `boxDocMetaName` 示例 —— 它是 `"boxDoc.json"`，与 `conf.json` 并非同一文件，而 `"conf.json"` 自身在 kernel 里是**5 个不同文件的同名 basename**（见「已知误报」的同名不同物条） |
 
 **发现方式**：
 

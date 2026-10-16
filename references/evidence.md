@@ -144,7 +144,7 @@
 | A | `filesys_status_check` 在 3 处各自硬编码，无单一真源 | 高 | 已提 issue #19397 |
 | E3 | dejavu 用 `HasSuffix` 匹配，隐含「数据目录必须名为 data」 | 高（测试复现） | 已提 issue #19397 |
 | D1 | `repository.go` 的 `Upserts`/`Removes` 双循环逻辑不对称 | 中 | 已提 issue #19397 |
-| A | `conf.json` 在 18 个文件裸写 28 次，而同目录已有 `boxDocMetaName` 常量 | 高 | 待处理 |
+| A | `conf.json` 在 18 个文件裸写 28 次，而同目录已有 `boxDocMetaName` 常量 | 高 | 待处理 —— **第八十九轮纠正：依据不成立**。`boxDocMetaName` 实为 `"boxDoc.json"`（`kernel/model/box_doc.go:41`），与 `conf.json` 是**两个不同文件**，不存在「同义常量未复用」。本轮实测 kernel 非测试代码 `"conf.json"` **41 处 / 26 文件**，同一 basename 承载**至少 5 种语义**：`{workspace}/conf/conf.json`（11）、`{box}/.siyuan/conf.json`（15）、`data/snippets/conf.json`（4）、`appearance/emojis/conf.json`（4）、归档成员名与黑名单条目。因此「提成一个常量」是**错误修法**（会把 5 种语义合并）；若要做，只能按语义各自命名。另核实 `kernel/util/path_guard.go:51-62` 与 `kernel/server/serve.go:603` 两处按 basename 判定敏感文件的代码**均为精确路径比较、不过宽**，不构成缺陷 |
 | F | 未转义插值 242 个候选（94 文件），需人工确认 | 低 | 待确认 |
 
 ### 第一轮的方法论教训
