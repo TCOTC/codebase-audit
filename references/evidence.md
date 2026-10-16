@@ -6149,6 +6149,33 @@ go test -tags "fts5 sqlcipher" -p 1 -run '^$' <37 个包>
 其判断与我的口径一致（「不是关键路径」正是我在评论里写的），且已决定暂停。
 我这条 17:14 的数据正落在他「以后续 CI 数据判断」所需的环节上（缓存状态决定可比性）。
 
+## 第八十九轮（2026-10-17）：全仓维护性（坏味道）扫描 —— 3 条发现 + 1 条新误报
+
+- 基线：目标仓库 `dev` @ `426e041c24`（0/0），工作树干净；只读审计（用户请求「找到项目里的坏味道」）
+- **去重前置**：`scan_regression_index.py --index-only`（246 文件 / 378 引用点 / 第 2–80 轮）+ 直接检索 `references/*.md`；近 3 天 169 个提交的改动文件里 **130 个命中历轮登记**
+- **机械扫描**（2007 文件）：重复字面量 `--min-files 4` **301 条**（P1 238 / P2 24 / P3 39）、未转义插值 **236 条 / 91 文件**、DOM 契约 **27 值、零漂移**、多语言文档 **5/14 组有差异**、a11y **K2 0 / A6 1**
+
+| 判据 | 发现 | 置信度 | 状态 |
+|---|---|---|---|
+| A / D1 / E4 | 文本文件操作的**结果码是「错误文本前缀」这一隐式协议**：6 元码集合在 `kernel/util/text_file.go:40` 与 `kernel/mcp/tools/file.go:402` 各硬编码一份（逐字相同；生产者是 `kernel/util/plugin_project.go:169/180` 的 `errors.New("invalid_path…")`）；消费点用**四种不同方式**匹配——`strings.CutPrefix`（util）、`HasPrefix`+`break`（mcp/tools/file）、`strings.Contains`（`mcp/tools/bazaar_project.go:37`）、`==`（`mcp/tools/file.go:426`）。于是**同一个 `ExecutionUnknown` 标志**（语义是「必须先读目标核实、不得直接重试」）在两处分别由**相等**与**子串**判定；未识别码的 fallback 也不一致（util → `backup_failed`，mcp → `write_failed`） | 高（重复处逐字可证）/ 中（行为差异需构造含该子串的文本） | 未提 issue |
+| A / D1 | 列表类型转换的 6 个动作名（`OL2UL`/`UL2OL`/`UL2TL`/`OL2TL`/`TL2UL`/`TL2OL`）有 **4 份副本**：真源 `app/src/protyle/wysiwyg/listContext.ts:22-26` 的 `LIST_CONVERSION_TYPES`（有导出访问器 `getListConversionType`，`listContext.test.ts:387-395` 覆盖全部 6 对 + 1 个非法对）之外，`app/src/protyle/render/listMindmap/index.ts:91` 是**方向相反**的内联 map 且带 `\|\| "OL2UL"` 兜底（未知 subtype 会被静默转成无序列表）、`app/src/protyle/wysiwyg/keydown.ts:2362` 用三目硬写 3 个名字（同文件 `:2372`/`:2406` 却用真源函数）、`app/src/protyle/render/listMindmap/model.ts:441` 用 6 元数组做校验白名单。**真源与白名单的等价性全仓无断言**（测试逐字面量枚举），新增一种转换时白名单会把新值静默判为非法 | 高（副本与用点逐处回读） | 未提 issue |
+| A / D3d | `docs/API-CONTRACTS.zh-CN.md` 与英文版的**结构指纹完全相同**（各级标题数 1/6/0/0/0/0）但少 **28 个语言无关标识符**（抽样：`/api/asset/resolveAssetPath`、`/api/setting/setAI`、`TestAPIContractAIDisabled`、`DisableFeature` 均 en=1 / zh-CN=0；230 vs 214 行）⇒ 不是「整节未翻译」而是**节内漏内容**；全仓 0 个脚本/工作流引用 `docs/API-CONTRACTS*.md`，漂移不会被任何生成步骤发现 | 中 | 未提 issue |
+
+### 已核对为不改（本轮排除清单，后续勿重复投入）
+
+- `app/src/menus/aliasInput.ts:27` 的 A6「纯图标按钮无可访问名」是**假阳性**：`:33` 的 `add.querySelector("span").textContent = options.addLabel` 在运行期填入名称 ⇒ 已进误报表
+- `NodeYamlFrontMatter` 全仓只出现 1 次（`app/src/editor/getIcon.ts:49`）：`lute.min.js` 中确实存在该节点类型，且与 `NodeCodeBlock` 合并到同一图标是有意为之 ⇒ 非拼写漂移、非漏项
+- `input.b3-text-field.search__label`、`.av__row[data-id]`、`separator_1/2`、`conf.json`、`sort.json`、`petals.json`、`plugin.json`、`session.json`、`127.0.0.1`、`image/png`：误报表或第 41/42/43 轮排除清单已覆盖
+- `image/heic`/`image/heif`/`image/bmp` 分散在 4 个文件：第 40 轮已按「用途不同的各自白名单」判为低危不报（本轮由 3 处增至 4 处，仍不报）
+- i18n 文本膨胀候选（未给 `--source` 时只有长度比）：ar/de/fr 的长译文本多是可换行容器 ⇒ 无结论
+
+### 方法论增量（本轮）
+
+1. **`scan_regression_index.py` 是「读代码之前」唯一能缩范围的工具**：169 个提交 → 130 个有历史登记的改动文件，再叠机械扫描选候选，避免逐文件读 diff
+2. **去重检索必须覆盖 `references/*.md`，不能只查 evidence.md 的历轮表**：本轮 6 个候选里有 3 个（`input.b3-text-field.search__label`、`separator_1`、`session.json`）只写在**误报表 / 第 41–43 轮的排除清单**里，只查发现表必然重复立论
+3. **「同一组字面量在多处」先问「它是不是线协议」**：结果码与转换动作名都不是普通常量，而是**以文本承载的结构化令牌**。判定点因此从「有没有常量」转到「各消费点用什么方式解析它」——多种匹配方式里只要有一处是子串匹配，就存在误分类面（这是 A 与 D1/E4 的交点）
+4. **反向对照本身也可能失效**：`test_scan_scripts.py` 第 [13] 组断言「未锁编码时中文解码不出来」，在父进程默认编码已是 UTF-8（Windows codepage 65001）的机器上该对照组恒失败——对照组同样要绑定环境前提
+
 ## 如何更新本文
 
 每轮审计后追加：

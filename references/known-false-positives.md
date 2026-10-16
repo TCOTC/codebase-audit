@@ -10,6 +10,7 @@
 | 类别 | 示例 | 原因 |
 |---|---|---|
 | UI 类名/选择器 | `fn__none`、`b3-list-item__text`、`.protyle-wysiwyg--select` | UI 框架固有约定 |
+| 纯图标按钮的「无可访问名」（A6） | `app/src/menus/aliasInput.ts:27` 的 `<button …><svg/><span></span></button>` | **名称可能在运行期被填入**：同函数 `:33` 的 `add.querySelector("span").textContent = options.addLabel` 给它补上文本，空 `span` 只是图标按钮的模板形态。A6 命中后必须回读该按钮的 `span`/`title`/`aria-label` 是否被赋值，再定性 |
 | 带标签名的选择器 | `input.b3-text-field.search__label` | 同上，未被 `.` 前缀规则过滤 |
 | 模板公式片段 | `.action{` | 模板语法 |
 | 导入路径 | `github.com/siyuan-note/siyuan/kernel/util` | 模块路径，脚本已排除 |
