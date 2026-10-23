@@ -6192,6 +6192,44 @@ go test -tags "fts5 sqlcipher" -p 1 -run '^$' <37 个包>
 3. **「同一组字面量在多处」先问「它是不是线协议」**：结果码与转换动作名都不是普通常量，而是**以文本承载的结构化令牌**。判定点因此从「有没有常量」转到「各消费点用什么方式解析它」——多种匹配方式里只要有一处是子串匹配，就存在误分类面（这是 A 与 D1/E4 的交点）
 4. **反向对照本身也可能失效**：`test_scan_scripts.py` 第 [13] 组断言「未锁编码时中文解码不出来」，在父进程默认编码已是 UTF-8（Windows codepage 65001）的机器上该对照组恒失败——对照组同样要绑定环境前提
 
+## 第九十轮（2026-10-24，差分审查：#19938 文档标题与寻址）
+
+基线 `origin/dev` @ `88eec8e8a7`（0/0）。范围＝引用 #19938 的 22 个提交（`git log --grep=19938`），
+约 2.0 万行新增、2882 文件；**只读**，未提 issue（用户未要求）。
+
+### 本轮确认（均为首次发现，`/memories/repo` 与历轮登记表无同类条目）
+
+1. **同一「旧字符串寻址必须整本拒绝」的守卫，CLI 有、MCP 没有（D1q）**
+   - `kernel/cli/cmd/document.go:299-306`、`:331-339` 先 `model.CheckLegacyDocumentPath(boxID)` 再 `GetBlockTreeRootByHPath`
+   - `kernel/mcp/tools/document.go:122-133`（create）、`:160-166`（list）、`:231-237`（move）**直接** `treenode.GetBlockTreeRootByHPath`，
+     该函数是单行查询（`kernel/treenode/blocktree.go:279-280`），hPath 相同即任取一行
+   - 权威侧：`docs/DOCUMENT-ADDRESSING.zh-CN.md:40`（「未知祖先有多个匹配时返回歧义，不能任取一篇」）、`:453`（开放条件「所有内置消费者已迁移」）；
+     `kernel/agent/agent.go:57` 仍把 `document.create/move/list` 的 `path` 声明为 hPath
+   - 结果：模式 2 下标题含 `/` 造成的 hPath 碰撞（根文档 `A`+子文档 `B` vs 根文档标题 `A/B`）会让 MCP 静默操作到另一篇文档；
+     在含 `/` 的祖先下创建则直接报 `parent path not found`
+
+2. **文档标题的截断：移动端保存，桌面端丢弃（D1q，既存 + 本轮同类修复只落一端）**
+   - 权威侧承认：`7023e076fc`（同一 issue）专修移动端「Save truncated mobile document titles on blur and Enter」
+   - 移动端 `app/src/mobile/util/initFramework.ts:458-475`：截断后**继续** `fetchPost(/api/filetree/renameDoc)`
+   - 桌面端 `app/src/protyle/header/Title.ts:346-356`：`rename()` 先 `this.pendingRename = undefined` 再截断并 `return false`，
+     且 `flushPendingInput()`（`:376-383`）只在 `composing` 时才重跑 `rename()` ⇒ 超长输入既不保存**也取消了上一次合法标题的防抖保存**
+   - 触发面窄：只有逐字键入到 512/513 边界时命中（粘贴走 `normalizeDocumentTitle` 预截断，不受影响）
+
+3. **「工具提示保留字面标题」的解码豁免只登记了 3 个载体（D1q/D3 闭合集合）**
+   - 机制：`app/src/dialog/tooltip.ts:24` 对所有 `.ariaLabel` 执行 `decodeURIComponent`，除非元素带 `data-tooltip-encoding="none"`
+   - 已登记：`app/src/layout/dock/Files.ts:2177`、`PinnedDocs.ts:341`、`util/pathName.ts:792`
+   - 未登记且展示文档标题/hPath：`app/src/util/Tree.ts:98`（反链/书签/大纲/标签共用）、
+     `app/src/search/util.ts:160`、`app/src/search/unRef.ts:117`；提交自带的用例已把 `A%2FB` 视为合法标题
+   - 后果：同一篇 `A%2FB` 在文件树提示里正确，在反链面板提示里显示成 `A/B`
+
+### 判为不改 / 负面结果（勿重复立论）
+
+- `UpgradeSpec` 只在标题含 ASCII `/` 时抬升 Spec 6（`kernel/treenode/tree.go:240-243`），且内核全部写路径都经
+  `filesys.prepareWriteTree` 先 `CheckSpecForMode` 再 `UpgradeSpec`（顺序正确）⇒ 不是「漏升 spec」
+- `allocateExportDocumentPaths`（`kernel/model/export_document_paths.go:31-72`）已把 `/\:*?"<>|` 与 Windows 保留名、尾点空格、大小写折叠处理到位
+- `documentaddressing.BoxMode` 的 `conflict` 分支不可被迁移分支遮盖（`conflict` 只在 `Mode > DefaultMode()` 成立）
+- MCP `documentSearchDisplayFields` 改用 `doc["title"]` 正确；`document.create` 的 `title = hPath` 回退已先取末段，不受 `/` 标题影响
+
 ## 如何更新本文
 
 每轮审计后追加：
