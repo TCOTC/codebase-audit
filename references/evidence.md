@@ -6222,6 +6222,29 @@ go test -tags "fts5 sqlcipher" -p 1 -run '^$' <37 个包>
      `app/src/search/util.ts:160`、`app/src/search/unRef.ts:117`；提交自带的用例已把 `A%2FB` 视为合法标题
    - 后果：同一篇 `A%2FB` 在文件树提示里正确，在反链面板提示里显示成 `A/B`
 
+### 本轮已提 issue（2026-10-24，均 open，title/body 逐字段回读一致）
+
+| # | 位置 | issue |
+| --- | --- | --- |
+| 1 | MCP 文档工具仍按 hPath 解析身份 | **#20840** |
+| 2 | 桌面端标题超长时不保存且取消上次合法保存 | **#20841** |
+| 3 | 工具提示的标题保留规则只覆盖 3 个载体 | **#20842** |
+| 4 | 原始文件写入/复制不为含 `/` 的标题提升 Spec | **#20843** |
+
+### 主题归属的判定必须机械化（本轮我判错了一次）
+
+我最初把「原始文件写入/复制不提升 Spec」放进「附录：主题外发现」，理由是「这块代码不在我读过的改动里」。
+用户追问后核实 `git log --name-only --grep=19938` 的并集，结果是 **`kernel/api/file.go` 在 diff 内**——
+而且 `ada5d9b0d3` 新增的正是这几个 `CheckDocumentAddressingFileWrite` / `CheckDocumentAddressingFileCopies` 调用。
+也就是说这条本该是主报告条目，而且性质比我写的更强：不是「旧问题没修」，而是**同一次改动新增的守卫少了一项判断**。
+
+同一批核实还发现相反的情况：`kernel/agent/agent.go`、`app/src/util/Tree.ts`、`app/src/search/unRef.ts`、
+`app/src/search/util.ts` **确实不在并集里**，把它们写进附录是对的。
+
+**教训**：主题归属的唯一判据是「该文件是否在 diff 并集里」，用一条 `git show --name-only` 的集合判断即可，
+不能凭「我读改动时没见过它」推断——后者在有 2882 个改动文件时会系统性出错（我漏了一个，且方向正好是「把主报告条目降级」，
+也就是 skill 核心原则 7 明确要防的那种假阴性）。**审计一开始就该先算出这个并集**，而不是等到分节时才猜。
+
 ### 判为不改 / 负面结果（勿重复立论）
 
 - `UpgradeSpec` 只在标题含 ASCII `/` 时抬升 Spec 6（`kernel/treenode/tree.go:240-243`），且内核全部写路径都经
