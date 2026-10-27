@@ -6266,6 +6266,62 @@ go test -tags "fts5 sqlcipher" -p 1 -run '^$' <37 个包>
 - `documentaddressing.BoxMode` 的 `conflict` 分支不可被迁移分支遮盖（`conflict` 只在 `Mode > DefaultMode()` 成立）
 - MCP `documentSearchDisplayFields` 改用 `doc["title"]` 正确；`document.create` 的 `title = hPath` 回退已先取末段，不受 `/` 标题影响
 
+
+## 第九十一轮（2026-10-28，差分审查：`refactor/code-reduction` 的 16 个提交）
+
+基线 `origin/dev` @ `0561a9ba`（`merge-base --is-ancestor` 退出码 0，领先 16 / 落后 0），
+HEAD `e56fc6e2f9`，工作区分支 `refactor/code-reduction`，共 2467 文件 / +11929 −19431
+（其中文件头统一占 2364 文件）。**只读**，未提 issue（用户只问「有没有引入新问题」）。
+
+**这一轮的价值主要在负面结果**：16 个提交里 13 个是纯重构，逐项核对后**行为改动零回归**。
+以下是做过但没产出缺陷的验证，供下轮省掉重复投入。
+
+### 已验证等价（不构成缺陷）
+
+| 重构 | 验证方式 | 结论 |
+|---|---|---|
+| `gulu.Result` → `Rejection`/`error`（`379377749d`，删除 484 处 `contractFailure` 桥） | 脚本枚举 diff 中全部 `ret.Code = N` 的删除（34 处非默认码）并逐个读替换行 | 3 / 1 / −2 / −3 / 403 / 404 / 409 / 500 全部按原值保留 |
+| `FailureFrom[Data](err)` 的 nil 风险 | 脚本扫 136 个调用点，检查是否在 `!= nil` 守卫内 | 3 处「无守卫」实为 `denied := Reject(...)`（恒非 nil），无 panic 路径 |
+| `model.Login` / `Login2fa` 类型化 | 逐分支对比新旧字段读取与错误码重映射 | `-1 → 1` 重映射仍在模型层；失败信封仍 `{code:-1, data:null}` |
+| `IsEmpty` / `IsBlank` 合并为 `isEmpty(trimSpace)` | 先提取两个旧函数体做 `diff` | 差异只有 6 处 `TrimSpace`，合并后语义一致 |
+| `calcField*` 六份逐字重复合并为 `calcFieldByScalarContent` | 读 `CountEmpty` 的新实现 `total - countValues` | 与原逐项空判定等价（含 `CountAll` 与四个 Percent 分支的分母） |
+| `CardSettings` 嵌入 `LayoutGallery`/`LayoutKanban` | 读新增 `card_settings_test.go` | 序列化仍扁平、旧扁平 JSON 可解 |
+| `CopyPath`/`MatchGlob`/`ExtractArchiveEntry`/`ParentHPath`/`commitTx`/`BoxIDFromDataPath`/`filterBlocksByPublishAccess` | 与各自被替换的副本逐字比对 | 逐字相同（`CopyDir` 的 `filepath.Join` 内联化不影响语义） |
+| SQL 行数上限（`37dd379c8c`，`limit < count` → `count >= limit`） | grep 全部调用方，查是否有人依赖 `limit+1` | **无**；`mcp/tools/sql.go:86` 用 `len(rows) == limit`，正是本次修复的目标 |
+| 死代码删除（`2e255e3f31`，30 余符号） | `git grep -w <symbol>` 在父提交上逐个查引用 | 全部只有定义、无活调用（含 `kernel/mobile`、`kernel/harmony`） |
+| `go:build` 是否因插入文件头而失效 | 脚本校验 2364 个文件的「头 → 空行 → tag → 空行 → package」位置 | 无失效（`clipboard_darwin.go` / `clipboard_windows.go` 位置正确） |
+
+### 本轮确认（2 条，均为元信息/跨仓层面，非业务逻辑）
+
+1. **MIT 派生子树被打上项目 AGPL 头（新增 P92）**
+   - `scripts/license-header.mjs:18` 的 `EXCLUDED_PREFIXES` 只有 `["kernel/plugin/encoding/"]`
+   - `kernel/heif/internal/h265heic/` 的 15 个 `.go` 全部含 `Copyright (c) 2020-present, b3log.org`
+     + `SPDX-License-Identifier: AGPL-3.0-or-later`
+   - 同目录 `LICENSE` 是 MIT（`2025 roticv` / `2026 Karpeles Lab Inc.`），`README.md` 写明派生自 `gen2brain/h265` v0.1.1
+   - 本次改写自身的方案 `LICENSE-HEADER-PLAN.md:9` 写「非目标：不对第三方来源文件做任何许可声明改动」
+   - 挑战门已收窄：MIT 允许并入 AGPL，**不写「侵权」**，只写「断言冲突 + 同步成本 + 校验器固化」
+
+2. **生成产物的跨仓同步目标未进 CI（新增 P93）**
+   - `2046f55e32` 把约 10 个端点的行为说明搬进 `contracts.go` 注释；仓库内 d.ts +47 行，petal 未更新
+   - `pnpm run api:check --petal ../../petal` → `out of date`（exit 1）；去掉 `--petal` → 通过（748 对）
+   - `.github/workflows/cd.yml:217` 用的正是不带 `--petal` 的形式 ⇒ 恒绿
+   - 归因三方对照：`origin/dev` 产物 ↔ petal 产物**零差异**；`origin/dev` ↔ 本分支 +52/−7
+
+### 新增误报（2 条，已入误报表）
+
+- **「测试被选中比例低就等于工具没用」**：`test-changed.mjs` 实测对单个源码改动仍选中 442–488/1042
+  （42–47%），但**未发现漏选**（抽查 4 组依赖链全部命中）。收益小 ≠ 有缺陷。
+- **「读源码断言的测试 = 无判定力」**：`capabilities.test.ts` 用 AST 断言函数体含 `.has(`，
+  确实绑定了实现写法（判据 J4），但它是**有意的性能守卫**，且同文件另有行为断言 ⇒ 只记取向问题，不立论。
+
+### 方法论教训
+
+1. **「结论落在元信息上」也要过挑战门的方向检查**：本轮第 1 条我最初写成「侵权/删除版权声明」，
+   被挑战门按 E1 收窄为「断言冲突」——许可问题最容易滑向法律断言，而审计能证明的只有文件内容层面的矛盾。
+2. **归因跨仓漂移必须做三方对照**（基线仓库内产物 ↔ 跨仓产物 ↔ 本分支产物）。
+   只做后两者会得到「跨仓落后」，无法区分「本轮引入」与「既存」。
+3. **机械改写的审计要审「范围定义」而不是「改写结果」**：2364 个文件的 diff 不可能逐条读，
+   但它的作用域只有一行 `EXCLUDED_PREFIXES`——审那一行 + 内容侧的许可证据即可。
 ## 如何更新本文
 
 每轮审计后追加：
