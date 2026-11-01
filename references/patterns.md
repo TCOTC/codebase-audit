@@ -3371,3 +3371,35 @@ go test -tags "fts5 sqlcipher" -p 1 -run '^$' <37 个包>
   没有界面时，该状态在实际用户路径上等价于永久失效；
 - 修法只改调用方（把 `if !valid` 换成 `if err != nil { return err }`）仍会漏，
   因为包装器已经把 `err` 丢了——**必须同时改函数签名**，三层一起改。
+
+### P95 派生字段的「死写」：写入在稍后的权威源刷新中被覆盖，索引已按写入前的派生值落库
+
+**形态**：某字段是另一处权威源的**派生摘要**（SiYuan 的富文本标题 `Properties.title`、
+块 hpath）。代码 A 直接写派生字段并同时算出别的派生值（`tree.HPath`）；同一提交链路上的
+代码 B 在渲染落盘前从**源**重算该字段并覆盖。于是 A 的写入对磁盘完全无效，但 B 之前已有一步
+把 A 算出的派生值写进索引/元数据 ⇒ 落盘与索引不一致，且不一致在重载后按「丢后缀」方向收敛。
+
+**SiYuan 实例（第九十三轮）**：`kernel/model/tree.go:44-66` 的 `resetTreeData` 把
+`" (Duplicated …)"` 写进根 IAL `title` 与 `tree.HPath`，不动 `DocumentTitle`；
+`kernel/filesys/tree.go:665-676` 的 `prepareWriteTree` 在渲染前调
+`treenode.RefreshDocumentTitle`（`kernel/treenode/document_title.go:104-118`），用源覆盖摘要；
+而 `kernel/model/transaction.go:2462-2481` 的 `doCreate` 早已通过 `UpsertBlockTreePending`
+把带后缀的 HPath 落库（`kernel/treenode/blocktree.go:738` 的 `CurrentParentHPath`）。
+结果：`.sy` 的 `title` 无后缀、`blocks.hpath` 有后缀、`refreshDocInfo0` 推给界面的 `name`
+（`kernel/model/push_reload.go:261`）也无后缀 ⇒ 文档树立刻显示原名，索引里留着一个谁都不用的后缀。
+富文本标题、带子文档副本、同步冲突副本三条路径同源。
+
+**判据（可机械）**：
+
+1. grep 目标字段的**写入点**，再 grep「同一操作链路上是否还有从该字段的源重算它的调用」；
+2. 比较「重算调用」与「索引/元数据落库」的**先后**：重算在前则一致；重算在后则中间态被永久落在库里；
+3. 该派生字段是否另有**显式守卫拒绝手写**（SiYuan 是 `kernel/model/file.go` 的
+   `prepareDocRename` 与 `kernel/model/blockial.go:388` 拒绝为富文本标题写 IAL `title`）——
+   守卫存在即说明「写入本身非法」，这里只是绕过了守卫。
+
+**排除面**：字段若是权威字段（没有上游源）则不属此形态；若重算之后还有一次回写索引，则只是瞬态，
+最多记观察项。
+
+**修法方向**：把内容写进**权威源**（走既有的源写入 API，并让调用方接受 error），由源派生其余表示；
+**不要**在重算之后再改写派生字段——那会被下一次重算打回，还会制造「磁盘源与摘要永久不一致」。
+也不可为了省事清空源（等于把格式降级，违反「现有文档版本从不降低」）。

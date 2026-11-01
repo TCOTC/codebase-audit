@@ -380,6 +380,21 @@
   契约（判据 J4 的结构绑定），纯重构即变红。但它与同文件的行为断言并存，且是**有意设置的性能守卫**
   （防止有人「为集中来源」退回逐次属性链——该退回是上游真实发生过的写法）。只记取向问题，不立论。
 
+## 第九十三轮新增（2026-11-01）
+
+- **「同一父目录下出现同名文档 = 缺陷」**：SiYuan 的 `docs/DOCUMENT-ADDRESSING.md:78,154` 明确允许
+  同父同名，身份由块 ID 承担，路径寻址遇到多候选返回显式的 `ambiguous`（
+  `kernel/treenode/document_path.go:60-64`）。**重名本身不是发现**；可报的只有「本应有区分的入口
+  没有区分」或「写入与派生索引互相矛盾」。降级理由不是个人偏好，而是文档与
+  `kernel/api/contract_document_legacy_test.go` 的既有断言。
+
+- **「`Properties.title` 是文档名的唯一真源」**：对 `Spec 7`（`DocumentTitle` 存在）的文档，
+  `Properties.title` 是**派生摘要**（`docs/SY-FORMAT.md` §1.1、`docs/DOCUMENT-ADDRESSING.md:48`），
+  完整渲染与导出读 `DocumentTitle`。据此可以断言「写 `Properties.title` 无效」，
+  **不能**据此断言「读 `Properties.title` 的地方全都错了」——导出文件名、面包屑（
+  `kernel/model/blockinfo.go` 文档节点用 `box.Name + hPath`）、插件直读 `name` 都按摘要工作，
+  它们是「摘要被写坏」的**受害者**，不是另一处独立缺陷。
+
 ## 维护
 
 - 新误报由审计轮次追加（`SKILL.md` 执行流程第 9 步）
